@@ -79,6 +79,28 @@ export function relayAuth(options: RelayAuthOptions): MiddlewareHandler {
     const expected = options.tokenOf();
 
     /*
+     * 期望值为空串时**一律拒绝**,这是第二道防护。
+     *
+     * 不加这一条会 fail-open:`secureCompare("", "")` 比较两个零长 Buffer,
+     * `timingSafeEqual` 返回 true —— 于是一个**不带** Authorization 的请求
+     * 被放行,而带了任意 token 的反而 401。实测过这个行为。
+     *
+     * 本文件开头声称"没有『空 token 等于不校验』这种形态",但先前那条保证
+     * 完全依赖 schema 的 `.min(16)`,中间件自身既无防御也无测试。
+     * `models/free.ts` 为同样的理由刻意留了第二道(`freeSuffix` 空串检查),
+     * 理由是"一个『配置写错就全开』的闸门不该只有一层防护" —— 这里本该一致。
+     *
+     * 而且这不只是理论:`tokenOf()` 是为配置热更新做成的函数(Phase 9),
+     * 届时任何绕过 schema 的写入路径都会直接把这道门打开。
+     *
+     * 放在比较之前返回不引入时间信道:它只依赖**配置**(本机的、非机密的
+     * 部署状态),不依赖请求里的任何内容,所以对攻击者没有可利用的差异。
+     */
+    if (expected === "") {
+      return unauthorized(c);
+    }
+
+    /*
      * 即使没带 token 也走一次比较。
      *
      * 直接 `if (provided === null) return 401` 会让「没带」明显快于「带错」,
@@ -87,17 +109,22 @@ export function relayAuth(options: RelayAuthOptions): MiddlewareHandler {
     const ok = secureCompare(provided ?? "", expected);
 
     if (!ok) {
-      return c.json(
-        {
-          error: {
-            type: "unauthorized",
-            message: "缺少或无效的 Relay Token,请在 Authorization 头以 Bearer 方式提供",
-          },
-        },
-        401,
-      );
+      return unauthorized(c);
     }
 
     return next();
   };
+}
+
+/** 统一的 401 —— 措辞必须只有一处,否则迟早出现可区分的分支。 */
+function unauthorized(c: Parameters<MiddlewareHandler>[0]): Response {
+  return c.json(
+    {
+      error: {
+        type: "unauthorized",
+        message: "缺少或无效的 Relay Token,请在 Authorization 头以 Bearer 方式提供",
+      },
+    },
+    401,
+  );
 }

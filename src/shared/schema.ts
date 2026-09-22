@@ -15,6 +15,46 @@ import { isIpAddress } from "./ip.ts";
 /** 端口：1-65535，且排除需要特权的 0-1023（本工具无须特权端口）。 */
 export const PortSchema = z.number().int().min(1024).max(65535);
 
+/**
+ * 内部标识符（Worker / 代理 / 订阅 / Clash 内核的 id）。
+ *
+ * 字符集必须收窄,因为**这些 id 会进 HTTP 头**:转发响应带
+ * `x-zen-gateway-worker: <worker.id>`。先前 id 是任意字符串,于是一个含
+ * CRLF 的 id 会让 `Headers.set()` 抛 TypeError —— 而那个异常发生在
+ * 上游**已经成功**之后,客户端拿到裸 500、上游响应体既不转发也不释放。
+ *
+ * id 是本机自动生成或用户手填的短标识,没有任何理由包含这些字符。
+ */
+export const IdSchema = z
+  .string()
+  .min(1)
+  .max(128)
+  .regex(/^[A-Za-z0-9._:\-]+$/, { message: "id 只允许字母、数字与 . _ : - " });
+
+/**
+ * 凭证字符串（Zen API key、代理口令、Controller secret）。
+ *
+ * 不限定具体字符集（上游可能用任意可打印字符），但**必须排除控制字符**:
+ * `apiKey` 会被拼进 `Authorization: Bearer <key>`,含 CRLF 的值会让 undici
+ * 在 fetch 时抛错,而那个失败被 `classifyError` 归为 `transport` →
+ * 客户端收到「502 上游不可达」,尽管请求根本没发出去。归因完全错位。
+ *
+ * 用逐码点检查而非正则:这段处理凭证,而源码里的字面控制字符在本项目
+ * 已被工具改写过（见 redact.ts）。
+ */
+function hasControlChars(value: string): boolean {
+  for (let i = 0; i < value.length; i += 1) {
+    const code = value.charCodeAt(i);
+    if (code <= 0x1f || code === 0x7f) return true;
+  }
+  return false;
+}
+
+export const SecretSchema = z
+  .string()
+  .max(512)
+  .refine((v) => !hasControlChars(v), { message: "凭证不得含控制字符或换行" });
+
 const HostSchema = z
   .string()
   .min(1)
@@ -86,20 +126,20 @@ export const ProxySourceSchema = z.enum(["manual", "subscription", "controller"]
 
 export const ProxySchema = z
   .strictObject({
-    id: z.string().min(1).max(128),
+    id: IdSchema,
     name: z.string().min(1).max(200),
     /** 原始协议名，可能是 vless/hysteria2 等只能桥接的类型，故不用 enum 收窄。 */
     type: z.string().min(1).max(32),
     host: HostSchema,
     port: z.number().int().min(1).max(65535),
     username: z.string().max(256).optional(),
-    password: z.string().max(512).optional(),
+    password: SecretSchema.optional(),
     enabled: z.boolean().default(true),
     source: ProxySourceSchema,
-    subscriptionId: z.string().min(1).max(128).optional(),
+    subscriptionId: IdSchema.optional(),
     /** 经 Clash Controller 导入时所属的 selector 分组。 */
     controllerGroup: z.string().max(200).optional(),
-    bridgeId: z.string().min(1).max(128).optional(),
+    bridgeId: IdSchema.optional(),
     /** Clash selector 里的节点名，通常与 name 相同。 */
     clashNodeName: z.string().max(200).optional(),
     /** 能否直连出口（协议在 DIRECT_PROTOCOLS 内）。 */
@@ -123,7 +163,7 @@ export type Proxy = z.infer<typeof ProxySchema>;
  * ------------------------------------------------------------------ */
 
 export const SubscriptionSchema = z.strictObject({
-  id: z.string().min(1).max(128),
+  id: IdSchema,
   name: z.string().min(1).max(200),
   /**
    * 订阅 URL 通常把 token 带在 query 或 path 里，本身即凭证。
@@ -144,14 +184,14 @@ export type Subscription = z.infer<typeof SubscriptionSchema>;
  * ------------------------------------------------------------------ */
 
 export const ClashBridgeSchema = z.strictObject({
-  id: z.string().min(1).max(128),
+  id: IdSchema,
   name: z.string().min(1).max(200),
   enabled: z.boolean().default(true),
   /** 数值越小越优先（auto 模式下多个健康内核时的取舍）。 */
   priority: z.number().int().min(0).max(999).default(100),
   apiBase: UpstreamUrlSchema,
   /** Controller secret，是凭证，任何输出前必须脱敏。 */
-  apiSecret: z.string().max(512).default(""),
+  apiSecret: SecretSchema.default(""),
   localProxyHost: HostSchema.default("127.0.0.1"),
   localProxyPort: z.number().int().min(1).max(65535),
   selectorGroup: z.string().min(1).max(200).default("GLOBAL"),
@@ -162,7 +202,7 @@ export const ClashConfigSchema = z.strictObject({
   enabled: z.boolean().default(false),
   selectionMode: z.enum(["manual", "auto"]).default("auto"),
   /** manual 模式下选中的内核；auto 模式下记最近一个健康内核。 */
-  activeBridgeId: z.string().min(1).max(128).nullable().default(null),
+  activeBridgeId: IdSchema.nullable().default(null),
   bridges: z.array(ClashBridgeSchema).max(32).default([]),
 });
 export type ClashConfig = z.infer<typeof ClashConfigSchema>;
@@ -176,14 +216,14 @@ export type WorkerKind = z.infer<typeof WorkerKindSchema>;
 
 export const WorkerSchema = z
   .strictObject({
-    id: z.string().min(1).max(128),
+    id: IdSchema,
     name: z.string().max(200).default(""),
     kind: WorkerKindSchema,
     /** Zen API key。匿名 Worker 为空串。是凭证。 */
-    apiKey: z.string().max(512).default(""),
+    apiKey: SecretSchema.default(""),
     enabled: z.boolean().default(true),
     /** 绑定的出口代理 id；null 表示直连本机网络出口。 */
-    proxyId: z.string().min(1).max(128).nullable().default(null),
+    proxyId: IdSchema.nullable().default(null),
   })
   .refine((w) => w.kind === "anonymous" || w.apiKey.trim() !== "", {
     message: "登录态 Worker 必须有 apiKey",

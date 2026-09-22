@@ -174,8 +174,38 @@ async function handleRelay(
   }
 
   /* ---- 6. 透传 ---- */
+
+  /*
+   * 透传包一层兜底。
+   *
+   * `pipeUpstreamResponse` 现在内部对畸形头容错,理论上不抛;但这里是
+   * **上游已经成功之后**的位置,一旦抛异常后果特别糟:客户端拿到裸 500
+   * (不是我们的 JSON 错误形状)、上游那次请求已真实计入额度、
+   * 响应体流既不转发也不释放(连接泄漏),而且 `deps.log` 完全不被调用 ——
+   * 异常绕过所有日志路径,故障现场什么都不留。
+   *
+   * 所以即便 pipe 自己已经容错,这层兜底仍然要在:它保证"无论如何 body
+   * 都被处置、错误都被记录"。
+   */
+  const pipeOrFail = (
+    upstream: NonNullable<typeof result.response>,
+    extra: Record<string, string>,
+  ): Response => {
+    try {
+      return pipeUpstreamResponse(upstream, extra);
+    } catch (err) {
+      // 释放上游连接 —— 不释放会让它悬挂到超时。
+      void upstream.body?.cancel().catch(() => {});
+      deps.log?.(`响应透传失败(上游已成功): ${logMessageFor(err)}`);
+      return c.json(
+        gatewayError("internal_error", "网关无法转发上游响应,详见服务端日志"),
+        500,
+      );
+    }
+  };
+
   if (result.ok) {
-    return pipeUpstreamResponse(result.response, {
+    return pipeOrFail(result.response, {
       // 诊断头:这次由哪个 Worker 承接。便于用户核对出口隔离是否按预期生效。
       "x-zen-gateway-worker": result.workerId,
     });
@@ -189,14 +219,21 @@ async function handleRelay(
    * 上游真实拒绝原因(例如 FreeTierError)的路径。
    */
   if (result.response !== null) {
-    return pipeUpstreamResponse(result.response, {
+    return pipeOrFail(result.response, {
       "x-zen-gateway-attempts": String(result.attempts.length),
     });
   }
 
-  // 连响应头都没拿到:网关自造错误。
-  const type = typeForFailureKind(result.kind);
-  deps.log?.(`转发失败(${result.kind}): ${result.reason}`);
+  /*
+   * 连响应头都没拿到:网关自造错误。
+   *
+   * 出口配置失败要单独报 `egress_unavailable`(503),不能跟着 `bad_request`
+   * 走 400。「代理已停用」「Clash 没开」都是**本机配置**问题,客户端的请求
+   * 完全合法 —— 报 400「请求无效」会让用户去检查请求体,而真实原因在配置里。
+   * 更糟的是 OpenCode 这类客户端把 4xx 当作自己的错,不会重试。
+   */
+  const type = result.egressSetup ? "egress_unavailable" : typeForFailureKind(result.kind);
+  deps.log?.(`转发失败(${result.egressSetup ? "出口配置" : result.kind}): ${result.reason}`);
   return c.json(
     gatewayError(type, `上游请求失败:${result.reason}`),
     statusForGatewayError(type) as 400 | 500 | 502 | 503,

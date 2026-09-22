@@ -34,10 +34,50 @@ export class ProtocolRegistry {
       throw new ProtocolRegistryError(`协议面 ${surface.id} 未声明任何 clientPaths`);
     }
 
+    /*
+     * 面**内部**的重复路径也要拒。
+     *
+     * 先前只查 `#byPath`（别的面已占用的路径），所以
+     * `clientPaths: ["/x", "/x"]` 会被静默接受。本类的契约是"路径冲突必须在
+     * 启动期抛错,而不是留到运行期静默裁决",而这正是它静默接受的一种冲突。
+     */
+    const seen = new Set<string>();
+
     for (const path of surface.clientPaths) {
       if (!path.startsWith("/")) {
         throw new ProtocolRegistryError(`协议面 ${surface.id} 的路径 ${path} 必须以 / 开头`);
       }
+
+      /*
+       * 拒绝永远匹配不到真实请求路径的形态。
+       *
+       * `?`/`#` 之后的部分不属于路径（Hono 匹配的是 pathname），空白字符
+       * 同理不会出现在规范化后的请求路径里。注册这样的路径 = 注册一个
+       * **静默失效的面**,与空 `clientPaths` 是同一类错误,所以同样拒掉。
+       *
+       * 这在本阶段还多了一层意义:`app.ts` 现在从 `registry.paths()` 推导
+       * 鉴权中间件的挂载点。一条匹配不到的路径会同时让守卫与处理器都挂空,
+       * 二者虽然仍然一致（不构成漏洞）,但"整个面无声消失"这种故障
+       * 极难归因,不该被允许注册。
+       */
+      if (/[?#]/.test(path)) {
+        throw new ProtocolRegistryError(
+          `协议面 ${surface.id} 的路径 ${path} 含 ? 或 #,永远匹配不到请求路径`,
+        );
+      }
+      if (/\s/.test(path)) {
+        throw new ProtocolRegistryError(`协议面 ${surface.id} 的路径 ${path} 含空白字符`);
+      }
+      if (path.includes("//")) {
+        // `//` 不是合法的请求路径形态,且不同 HTTP 栈对它的归一化不一致。
+        throw new ProtocolRegistryError(`协议面 ${surface.id} 的路径 ${path} 含连续斜杠`);
+      }
+
+      if (seen.has(path)) {
+        throw new ProtocolRegistryError(`协议面 ${surface.id} 自身重复声明了路径 ${path}`);
+      }
+      seen.add(path);
+
       const existing = this.#byPath.get(path);
       if (existing) {
         throw new ProtocolRegistryError(

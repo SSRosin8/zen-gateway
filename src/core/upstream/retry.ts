@@ -69,6 +69,17 @@ export type RetryResult =
        */
       readonly response: UndiciResponse | null;
       readonly kind: FailureKind;
+      /**
+       * 这次失败是**本机出口配置**问题(代理不存在/已停用/只能桥接但 Clash 关着/
+       * 内核缺 selector 分组),而不是上游或请求本身的问题。
+       *
+       * 单独一个字段而不是新增一个 `FailureKind` 变体:`FailureKind` 驱动冷却与
+       * 重试判定,而出口配置失败在那两件事上的处置与 `bad_request` 完全相同
+       * (不冷却、不归咎 Worker)。差别只在**给客户端的措辞**:
+       * 400「请求无效」会让用户去检查请求体,而真实原因是他的 Clash 没开。
+       * 所以分类保持 `bad_request`,只额外标出真实归因。
+       */
+      readonly egressSetup: boolean;
       /** 已脱敏的原因,用于日志与(无上游响应时的)网关自造错误体。 */
       readonly reason: string;
       readonly attempts: readonly AttemptRecord[];
@@ -103,16 +114,36 @@ export async function runRetryChain(input: RetryInput): Promise<RetryResult> {
       ok: false,
       response: null,
       kind: "unknown",
+      egressSetup: false,
       reason: "没有可用的 Worker",
       attempts,
     };
   }
 
-  let lastFailure: { kind: FailureKind; reason: string; response: UndiciResponse | null } = {
+  let lastFailure: {
+    kind: FailureKind;
+    reason: string;
+    response: UndiciResponse | null;
+    egressSetup: boolean;
+  } = {
     kind: "unknown",
     reason: "未执行任何尝试",
     response: null,
+    egressSetup: false,
   };
+
+  /*
+   * 单独记住**最后一次非出口配置**的失败。
+   *
+   * 出口配置失败只说明"这一个 Worker 的代理配坏了",它对前面那些因真实网络
+   * 原因失败的尝试什么都没解释。若只用 `lastFailure`,一条
+   * 「w1 传输失败 → w2 传输失败 → w3 代理已停用」的链会把最终分类变成
+   * `bad_request`,于是**一次真实的上游不可达被报成客户端 400**
+   * (「你的请求无效」),用户会去检查请求体而真实原因在网络。
+   *
+   * 所以结尾优先报这个;两者都没有时才报配置错误。
+   */
+  let lastRealFailure: typeof lastFailure | null = null;
 
   for (let i = 0; i < limit; i += 1) {
     const target = input.targets[i]!;
@@ -148,7 +179,14 @@ export async function runRetryChain(input: RetryInput): Promise<RetryResult> {
       attempts.push(record);
       input.onAttempt?.(record);
 
-      lastFailure = { kind, reason: safeErrorMessage(err), response: null };
+      lastFailure = {
+        kind,
+        reason: safeErrorMessage(err),
+        response: null,
+        egressSetup: isSetup,
+      };
+      // 只有真实失败才更新 lastRealFailure —— 见它的声明处说明。
+      if (!isSetup) lastRealFailure = lastFailure;
       // 配置错误换 Worker 无意义,但换代理可能有意义 —— 仍继续走候选链。
       continue;
     }
@@ -193,6 +231,7 @@ export async function runRetryChain(input: RetryInput): Promise<RetryResult> {
         ok: false,
         response,
         kind: failure,
+        egressSetup: false,
         reason: `上游返回 ${response.status}`,
         attempts,
       };
@@ -203,8 +242,24 @@ export async function runRetryChain(input: RetryInput): Promise<RetryResult> {
      * cancel 失败要吞掉 —— 它不该盖住我们正在处理的那个真实失败。
      */
     await response.body?.cancel().catch(() => {});
-    lastFailure = { kind: failure, reason: `上游返回 ${response.status}`, response: null };
+    lastFailure = {
+      kind: failure,
+      reason: `上游返回 ${response.status}`,
+      response: null,
+      egressSetup: false,
+    };
+    // 拿到过上游响应,这是真实失败。
+    lastRealFailure = lastFailure;
   }
 
-  return { ok: false, response: lastFailure.response, kind: lastFailure.kind, reason: lastFailure.reason, attempts };
+  // 优先报真实失败;全链都是出口配置问题时才报后者。见 lastRealFailure 的说明。
+  const final = lastRealFailure ?? lastFailure;
+  return {
+    ok: false,
+    response: final.response,
+    kind: final.kind,
+    egressSetup: final.egressSetup,
+    reason: final.reason,
+    attempts,
+  };
 }

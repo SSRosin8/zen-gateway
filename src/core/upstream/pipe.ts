@@ -55,6 +55,19 @@ const STRIPPED_RESPONSE_HEADERS = new Set([
  *
  * `extraHeaders` 用于加网关自己的诊断头(例如命中了哪个 Worker)。
  * 它在过滤之后写入,因此不会被上游头覆盖。
+ *
+ * ## 为什么这里必须对畸形头**容错**而不是抛错
+ *
+ * 这个函数在**上游已经成功之后**被调用。此时抛异常的后果特别糟:
+ * 客户端拿到一个裸 500（不是网关的 JSON 错误形状）,而上游那次请求
+ * 已经真实发生并计费/计入额度,响应体流既没转发也没释放。
+ *
+ * 而 `headers.set()` 确实可能抛 —— 头名/头值都来自**上游**,不在我们控制内。
+ * 一个畸形的上游头不该让整个请求变成 500:跳过它、把其余内容照常转发,
+ * 远好于丢掉一个本来成功的响应。
+ *
+ * (`extraHeaders` 是网关自己构造的,其中的 worker id 现已由 `IdSchema`
+ * 约束字符集;但这里同样容错 —— 纵深防御,且成本只是一个 try。)
  */
 export function pipeUpstreamResponse(
   upstream: UndiciResponse,
@@ -64,11 +77,22 @@ export function pipeUpstreamResponse(
 
   upstream.headers.forEach((value, name) => {
     if (STRIPPED_RESPONSE_HEADERS.has(name.toLowerCase())) return;
-    headers.set(name, value);
+    try {
+      headers.set(name, value);
+    } catch {
+      /*
+       * 上游给了一个 Headers 拒绝的名/值(含 CR/LF 或非法 token 字符)。
+       * 跳过这一个头,继续转发其余内容 —— 见函数注释。
+       */
+    }
   });
 
   for (const [name, value] of Object.entries(extraHeaders ?? {})) {
-    headers.set(name, value);
+    try {
+      headers.set(name, value);
+    } catch {
+      // 诊断头加不上不影响转发本身。
+    }
   }
 
   /*
@@ -80,9 +104,21 @@ export function pipeUpstreamResponse(
   const body = upstream.body as ReadableStream<Uint8Array> | null;
   const hasBody = body !== null && upstream.status !== 204 && upstream.status !== 304;
 
-  return new Response(hasBody ? body : null, {
-    status: upstream.status,
-    statusText: upstream.statusText,
-    headers,
-  });
+  /*
+   * `statusText` 也来自上游,同样可能畸形。
+   *
+   * 注意:`@hono/node-server` 的 `serve()` 会把全局 `Response` 换成一个
+   * 不校验 statusText 的实现,所以生产路径下这一条通常不触发 —— 但单测里
+   * 用的是标准 `Response`(会校验),而且我们不该依赖那个替换行为。
+   * 失败时退回不带 statusText 的构造:状态码与 body 才是语义所在。
+   */
+  try {
+    return new Response(hasBody ? body : null, {
+      status: upstream.status,
+      statusText: upstream.statusText,
+      headers,
+    });
+  } catch {
+    return new Response(hasBody ? body : null, { status: upstream.status, headers });
+  }
 }
