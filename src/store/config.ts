@@ -64,26 +64,28 @@ export function defaultConfig(): Config {
 }
 
 /**
- * 迁移钩子。
+ * 版本闸门 + 迁移钩子。
  *
- * 目前只有 version 1，没有需要搬的形状。保留这层是因为
- * 「加字段」不升版本、「改语义」才升版本，届时这里逐档递进。
+ * 目前只有 version 1，没有需要搬的形状。保留这一层是因为格式**会**演进：
+ * 「加字段」不升版本（schema 的默认值兜住），「改语义或改形状」才升版本，
+ * 届时在这里逐档递进。
+ *
+ * 本项目是全新实现，不从任何旧项目导入配置 —— 缺 version 字段就是配置坏了，
+ * 不是「来自某个更早的格式」。
  */
-function migrate(raw: Record<string, unknown>): Record<string, unknown> {
-  const version = typeof raw["version"] === "number" ? raw["version"] : 0;
+function checkVersion(raw: Record<string, unknown>): Record<string, unknown> {
+  const version = raw["version"];
 
-  if (version > CONFIG_VERSION) {
+  if (typeof version !== "number" || !Number.isInteger(version) || version < 1) {
     throw new ConfigError(
-      `配置版本 ${version} 高于本程序支持的 ${CONFIG_VERSION}，请升级 zen-gateway 而不是降级配置`,
+      "配置缺少合法的 version 字段（应为 ≥1 的整数）",
       "invalid",
     );
   }
 
-  // version 0 = 旧项目的 settings.json 形态，由 scripts/migrate-config.mjs 单独处理，
-  // 不在运行期隐式转换：那会让「我的配置怎么被改了」变成一个无从追查的问题。
-  if (version === 0) {
+  if (version > CONFIG_VERSION) {
     throw new ConfigError(
-      "配置缺少 version 字段。若来自旧项目 settings.json，请先运行 npm run migrate:config",
+      `配置版本 ${version} 高于本程序支持的 ${CONFIG_VERSION}，请升级 zen-gateway 而不是降级配置`,
       "invalid",
     );
   }
@@ -158,9 +160,9 @@ export async function loadConfig(root: string = process.cwd()): Promise<LoadResu
     throw new ConfigError(`${file} 的顶层必须是对象`, "malformed");
   }
 
-  const migrated = migrate(raw as Record<string, unknown>);
+  const versioned = checkVersion(raw as Record<string, unknown>);
 
-  const parsed = ConfigSchema.safeParse(migrated);
+  const parsed = ConfigSchema.safeParse(versioned);
   if (!parsed.success) {
     throw new ConfigError(
       `${file} 校验未通过：\n${formatIssues(parsed.error)}`,

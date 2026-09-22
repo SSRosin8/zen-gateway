@@ -56,6 +56,25 @@ describe("嵌套默认值真的生效（prefault 回归守卫）", () => {
     const cfg = ConfigSchema.parse(base());
     expect(cfg.models.freeSuffix).toBe("-free");
     expect(cfg.models.defaultSurfaces).toContain("chat");
+  });
+
+  it("extraFreeIds 出厂默认含实测到的无后缀免费模型", () => {
+    /*
+     * 2026-09-22 实测 Zen 目录：105 个模型、32 个零费率，其中只有
+     * big-pickle 与 grok-code 不带 -free 后缀。这是**默认值**而非代码里的
+     * 硬编码判定 —— 用户可改，Phase 6 的定时刷新会按真实目录纠正。
+     * 旧项目把等价名单写死成代码常量，目录一变就要改代码发版。
+     */
+    const cfg = ConfigSchema.parse(base());
+    expect(cfg.models.extraFreeIds).toContain("big-pickle");
+    expect(cfg.models.extraFreeIds).toContain("grok-code");
+    // union-alpha 已从目录消失，绝不能再出现在默认值里。
+    expect(cfg.models.extraFreeIds).not.toContain("union-alpha");
+  });
+
+  it("extraFreeIds 可被配置覆盖为空", () => {
+    // 目录变化不该需要改代码。
+    const cfg = ConfigSchema.parse(base({ models: { extraFreeIds: [] } }));
     expect(cfg.models.extraFreeIds).toEqual([]);
   });
 

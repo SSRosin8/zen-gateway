@@ -110,12 +110,22 @@ describe("损坏与非法配置", () => {
     expect(err.kind).toBe("malformed");
   });
 
-  it("缺 version 时提示走迁移脚本,不隐式转换", async () => {
+  it("缺 version 时报错,不猜测格式", async () => {
+    // 本项目不从任何旧项目导入配置 —— 缺 version 就是配置坏了。
     await writeRaw(JSON.stringify({ gateway: { relayToken: generateRelayToken() } }));
     const err = (await loadConfig(root).catch((e: unknown) => e)) as ConfigError;
     expect(err.kind).toBe("invalid");
-    expect(err.message).toContain("migrate:config");
+    expect(err.message).toContain("version");
   });
+
+  it.each([["字符串", "1"], ["小数", 1.5], ["零", 0], ["负数", -1]])(
+    "version 是 %s 时报错",
+    async (_label, version) => {
+      await writeRaw(JSON.stringify({ version, gateway: { relayToken: generateRelayToken() } }));
+      const err = (await loadConfig(root).catch((e: unknown) => e)) as ConfigError;
+      expect(err.kind).toBe("invalid");
+    },
+  );
 
   it("version 高于本程序支持时提示升级程序,不降级配置", async () => {
     await writeRaw(JSON.stringify({ version: 99, gateway: { relayToken: generateRelayToken() } }));

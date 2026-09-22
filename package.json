@@ -23,8 +23,7 @@
     "status": "node scripts/service.mjs status",
     "doctor": "node scripts/doctor.mjs",
     "setup": "node scripts/setup.mjs",
-    "discover:upstream": "node scripts/discover-upstream.mjs",
-    "migrate:config": "node scripts/migrate-config.mjs"
+    "discover:upstream": "node scripts/discover-upstream.mjs"
   },
   "dependencies": {
     "@fontsource/instrument-serif": "5.3.0",

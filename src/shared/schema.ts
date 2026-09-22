@@ -181,10 +181,20 @@ export const ModelRulesSchema = z.strictObject({
   /** 免费模型的 id 后缀约定。 */
   freeSuffix: z.string().min(1).max(32).default("-free"),
   /**
-   * 无后缀但确实免费的模型（如 big-pickle）。
-   * 目录会变：union-alpha 就已经消失了，所以这里必须是配置而非代码常量。
+   * 无 `-free` 后缀但实际零费率的模型。
+   *
+   * 这是**出厂默认值**，不是代码里的硬编码判定 —— 用户可改，Phase 6 的
+   * 定时刷新会按真实目录纠正它。旧项目把等价的名单写死在代码常量里
+   * （`SPECIAL_FREE_MODEL_IDS`），目录一变就必须改代码发版。
+   *
+   * 2026-09-22 实测 Zen 目录（经 models.dev）：105 个模型、32 个零费率，
+   * 其中只有这两个不带 `-free` 后缀。同时确认 `union-alpha` 已从目录消失
+   * —— 旧代码把它硬编码为特例，正是改成配置驱动的直接理由。
    */
-  extraFreeIds: z.array(z.string().min(1).max(128)).max(256).default([]),
+  extraFreeIds: z
+    .array(z.string().min(1).max(128))
+    .max(256)
+    .default(["big-pickle", "grok-code"]),
   /** 默认支持的协议面。 */
   defaultSurfaces: z.array(ProtocolIdSchema).min(1).default(["chat", "responses"]),
   /** 按模型覆写协议面。 */
