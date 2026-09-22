@@ -6,6 +6,7 @@ import {
   ConfigError,
   configExists,
   configPath,
+  dataDir,
   defaultConfig,
   generateRelayToken,
   loadConfig,
@@ -151,6 +152,69 @@ describe("权限修正", () => {
 
     const st = await stat(configPath(root));
     expect(st.mode & 0o777).toBe(0o600);
+  });
+
+  it.each([0o755, 0o777, 0o750])("加载时把 %s 的 data/ 目录改回 0700", async (mode) => {
+    /*
+     * `mkdir(…, { mode })` 只在**创建时**生效,已存在且权限过松的 data/
+     * 不会被纠正 —— 于是其他本地用户能列目录并读到 runtime.db 与日志。
+     *
+     * service.mjs 里有一份等价逻辑,但任何不经它的入口(脚本、测试、
+     * `npm run dev:server`)都只走 config.ts,所以两处都需要。
+     */
+    const cfg = defaultConfig();
+    await writeRaw(JSON.stringify(cfg));
+    await chmod(join(root, "data"), mode);
+
+    await loadConfig(root);
+
+    expect((await stat(join(root, "data"))).mode & 0o777).toBe(0o700);
+  });
+
+  it("保存时也纠正过松的目录权限", async () => {
+    const { config } = await loadConfig(root);
+    await chmod(join(root, "data"), 0o755);
+
+    await saveConfig(config, root);
+
+    expect((await stat(join(root, "data"))).mode & 0o777).toBe(0o700);
+  });
+});
+
+describe("ZG_DATA_DIR", () => {
+  /*
+   * service.mjs 认这个环境变量,config.ts 先前不认 —— 于是 service.mjs 在一个
+   * 目录里管状态文件,而服务端从 `cwd/data` 读配置,凭证与运行时数据被劈成两份。
+   * Phase 0-2 的服务端还不读配置,所以那只是个陷阱;Phase 3 起就是真 bug。
+   */
+  it("不传 root 时遵循 ZG_DATA_DIR", async () => {
+    const override = await mkdtemp(join(tmpdir(), "zg-override-"));
+    const previous = process.env["ZG_DATA_DIR"];
+    process.env["ZG_DATA_DIR"] = override;
+    try {
+      expect(dataDir()).toBe(override);
+      expect(configPath()).toBe(join(override, "config.json"));
+
+      const { created } = await loadConfig();
+      expect(created).toBe(true);
+      expect((await stat(join(override, "config.json"))).mode & 0o777).toBe(0o600);
+    } finally {
+      if (previous === undefined) delete process.env["ZG_DATA_DIR"];
+      else process.env["ZG_DATA_DIR"] = previous;
+      await rm(override, { recursive: true, force: true });
+    }
+  });
+
+  it("显式传入的 root 优先于环境变量", async () => {
+    const previous = process.env["ZG_DATA_DIR"];
+    process.env["ZG_DATA_DIR"] = "/tmp/should-be-ignored";
+    try {
+      // 测试用临时目录必须能压过环境变量,否则测试之间会互相踩。
+      expect(dataDir(root)).toBe(join(root, "data"));
+    } finally {
+      if (previous === undefined) delete process.env["ZG_DATA_DIR"];
+      else process.env["ZG_DATA_DIR"] = previous;
+    }
   });
 });
 

@@ -315,4 +315,62 @@ describe("buildIsolationReport", () => {
     expect(report.groups[0]!.proxyIds).toEqual([]);
     expect(report.groups[0]!.workerIds).toEqual(["w1"]);
   });
+
+  it("同一 IPv6 地址的不同写法必须归到同一组", () => {
+    /*
+     * 分组先前用原始字符串相等。四个回显服务各自格式化 IPv6 的方式不同,
+     * 而探测会在它们之间自由回退 —— worker A 经 ipify 拿到
+     * `2001:db8:0:0:0:0:0:1`、worker B 经 ip.sb 拿到 `2001:DB8::1`
+     * 是完全可能的。同一地址被分成两组 → sharedGroups 为空 →
+     * **误报已隔离**,而这正是本报告唯一要回答的问题。
+     */
+    const report = buildIsolationReport([
+      { workerId: "wA", proxyId: "pA", egressIp: "2001:db8:0:0:0:0:0:1" },
+      { workerId: "wB", proxyId: "pB", egressIp: "2001:DB8::1" },
+    ]);
+
+    expect(report.groups).toHaveLength(1);
+    expect(report.sharedGroups).toHaveLength(1);
+    expect(report.isolated).toBe(false);
+  });
+
+  it("重复的 workerId 只计一次", () => {
+    // 否则一个重复条目会变成两个「各自独占一个 IP」的 Worker,虚增隔离程度。
+    const report = buildIsolationReport([
+      { workerId: "wA", proxyId: "pA", egressIp: "198.51.100.1" },
+      { workerId: "wA", proxyId: "pA", egressIp: "198.51.100.1" },
+    ]);
+    expect(report.groups[0]!.workerIds).toEqual(["wA"]);
+    expect(report.sharedGroups).toHaveLength(0);
+    expect(report.isolated).toBe(true);
+  });
+
+  it.each([
+    ["非 IP 文本", "not-an-ip"],
+    ["一段 HTML", "<html>err</html>"],
+    ["空串", ""],
+    ["只有冒号", "::::"],
+  ])("非法的 egressIp(%s)算作未知,不拿来当分组键", (_label, value) => {
+    /*
+     * egressIp 可能来自手工编辑的配置或一次被劫持的探测。拿垃圾值当分组键
+     * 会让每个垃圾各自成组 —— 看起来「全都不同」,于是误报已隔离。
+     */
+    const report = buildIsolationReport([
+      { workerId: "w1", proxyId: "p1", egressIp: value },
+      { workerId: "w2", proxyId: "p2", egressIp: value },
+    ]);
+    expect(report.groups).toHaveLength(0);
+    expect(report.unknownWorkerIds).toEqual(["w1", "w2"]);
+    expect(report.isolated).toBe(false);
+  });
+
+  it("IPv4 与其 IPv4-mapped 形态归为同一出口", () => {
+    // 双栈回显服务可能返回 ::ffff:1.2.3.4,而另一个返回点分形式。
+    const report = buildIsolationReport([
+      { workerId: "wA", proxyId: "pA", egressIp: "::ffff:192.0.2.1" },
+      { workerId: "wB", proxyId: "pB", egressIp: "::ffff:c000:201" },
+    ]);
+    expect(report.groups).toHaveLength(1);
+    expect(report.isolated).toBe(false);
+  });
 });

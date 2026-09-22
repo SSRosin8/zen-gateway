@@ -143,6 +143,47 @@ describe("classifyError", () => {
     expect(classifyError(err)).toBe("transport");
   });
 
+  it("cause 成环(两个互指)时不栈溢出", () => {
+    /*
+     * 先前只判断 `cause !== err`(自指),两环直接递归到
+     * RangeError: Maximum call stack size exceeded —— **异常从错误处理函数里
+     * 抛出来**,把一次本可分类的传输失败升级成进程级崩溃。
+     */
+    const a = new Error("a");
+    const b = new Error("b");
+    (a as { cause?: unknown }).cause = b;
+    (b as { cause?: unknown }).cause = a;
+    expect(() => classifyError(a)).not.toThrow();
+    expect(classifyError(a)).toBe("transport");
+  });
+
+  it("超长 cause 链不栈溢出", () => {
+    let deep = new Error("leaf");
+    for (let i = 0; i < 20_000; i += 1) {
+      const next = new Error(`level-${i}`);
+      (next as { cause?: unknown }).cause = deep;
+      deep = next;
+    }
+    expect(() => classifyError(deep)).not.toThrow();
+  });
+
+  it("深度上限不影响正常的一两层包装", () => {
+    // fetch 通常只包一层,分类必须仍然穿透到底层 code。
+    const inner = Object.assign(new Error("connect ECONNREFUSED"), { code: "ECONNREFUSED" });
+    const mid = new Error("socket error");
+    (mid as { cause?: unknown }).cause = inner;
+    const outer = new TypeError("fetch failed");
+    (outer as { cause?: unknown }).cause = mid;
+    expect(classifyError(outer)).toBe("transport");
+  });
+
+  it("穿透多层包装仍能识别超时", () => {
+    const inner = Object.assign(new Error("timeout"), { code: "UND_ERR_HEADERS_TIMEOUT" });
+    const outer = new TypeError("fetch failed");
+    (outer as { cause?: unknown }).cause = inner;
+    expect(classifyError(outer)).toBe("timeout");
+  });
+
   it("非 Error 输入归为 unknown", () => {
     expect(classifyError("字符串")).toBe("unknown");
     expect(classifyError(null)).toBe("unknown");
@@ -197,5 +238,51 @@ describe("parseRetryAfter", () => {
 
   it("容忍首尾空白", () => {
     expect(parseRetryAfter("  45  ", NOW)).toBe(45_000);
+  });
+
+  describe("HTTP-date 必须严格匹配 RFC 9110 的三种形态", () => {
+    /*
+     * 先前只检查「首字符是字母」就交给 Date.parse,于是三类输入被算成 0
+     * (= 立刻重试)。这个头几乎只出现在 429 上,刚被限流就立刻重试通常
+     * 换来更长的封禁,所以畸形输入必须返回 null(改用我们自己的默认冷却)。
+     */
+
+    it.each([
+      ["IMF-fixdate", "Tue, 22 Sep 2026 12:05:00 GMT"],
+      ["IMF-fixdate (UTC)", "Tue, 22 Sep 2026 12:05:00 UTC"],
+      ["asctime", "Tue Sep 22 12:05:00 2026"],
+    ])("%s 正常解析", (_label, raw) => {
+      expect(parseRetryAfter(raw, NOW)).toBe(300_000);
+    });
+
+    it("缺时区的日期返回 null,不按本地时间解析", () => {
+      /*
+       * 无 GMT 时 Date.parse 按**本地时间**解析。本机在 UTC+8,于是任何
+       * 8 小时内的未来时刻都会算出 delta <= 0 → 0。而在 UTC 机器上同样的
+       * 输入会得到一个正数 —— 同一份配置在不同机器上行为不同,更难察觉。
+       */
+      expect(parseRetryAfter("Tue, 22 Sep 2026 19:00:00", NOW)).toBeNull();
+    });
+
+    it.each(["Nov 6", "Jan 1", "March 5", "Dec 31"])(
+      "裸月日 %s 返回 null —— Date.parse 会把它解析到 2001 年",
+      (raw) => {
+        // 与最初 "-5" 被解析成 2001-04-30 是同一类 bug,只是换了个字母入口。
+        expect(parseRetryAfter(raw, NOW)).toBeNull();
+      },
+    );
+
+    it.each(["Mar", "Thu", "Tuesday", "GMT"])("只有月/周名的 %s 返回 null", (raw) => {
+      expect(parseRetryAfter(raw, NOW)).toBeNull();
+    });
+
+    it("带尾部垃圾的合法日期返回 null", () => {
+      expect(parseRetryAfter("Tue, 22 Sep 2026 12:05:00 GMT extra", NOW)).toBeNull();
+    });
+
+    it("RFC-850 形态可解析(已过期的日期归零是正确的)", () => {
+      // 1994 年确实已经过去 —— 此时 0 表示「现在就能重试」,语义正确。
+      expect(parseRetryAfter("Sunday, 06-Nov-94 08:49:37 GMT", NOW)).toBe(0);
+    });
   });
 });

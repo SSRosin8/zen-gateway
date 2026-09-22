@@ -75,7 +75,16 @@ export function resolveProxy(config: Config, proxyId: string | null): ResolveRes
     }
     const bridge = pickBridge(config.clash);
     if (bridge === null) return { ok: false, failure: { kind: "no_bridge", proxyId } };
-    return { ok: true, target: { mode: "bridge", proxy, bridge } };
+    /*
+     * nodeName 必须随 target 一起传下去：dispatcher 的缓存身份要包含它，
+     * 否则同一内核上的所有桥接代理共用一个连接池，而 Clash 在建连时就
+     * 把连接绑定到当时选中的节点 —— 复用旧连接会让出口停留在旧节点，
+     * 刚执行的 select() 形同虚设（见 dispatcher.ts 的说明）。
+     */
+    return {
+      ok: true,
+      target: { mode: "bridge", proxy, bridge, nodeName: bridgeNodeName(proxy) },
+    };
   }
 
   return { ok: false, failure: { kind: "unusable", proxyId, type: proxy.type } };

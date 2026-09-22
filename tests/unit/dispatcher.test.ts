@@ -77,18 +77,41 @@ describe("dispatcher 缓存", () => {
     expect(second).not.toBe(first);
   });
 
-  it("口令变了就重建 —— 口令参与缓存键", () => {
+  it("口令变了就重建 —— 且**等长**的口令也必须重建", () => {
     /*
-     * 只用 proxy.id 作键的话,用户改了口令后仍会复用旧 dispatcher,
-     * 继续用错误的凭证连接。
+     * 缓存键先前只放口令的**长度**,于是等长的两个口令撞键。
+     * 而「改掉一个打错的等长口令」恰是最常见的情形(改一个字符、轮换 token),
+     * 撞键意味着仍复用旧 dispatcher —— 鉴权永久失败,且代码里没有任何地方
+     * 会调 reset()。现在键里放 sha256 前缀:不可逆,也不会撞。
      */
     const p = pool();
-    const first = p.get({ mode: "direct", proxy: proxy({ username: "u", password: "old-secret" }) });
-    const second = p.get({
+    const first = p.get({ mode: "direct", proxy: proxy({ username: "u", password: "secret-aa" }) });
+    const sameLength = p.get({
       mode: "direct",
-      proxy: proxy({ username: "u", password: "different-length-secret" }),
+      proxy: proxy({ username: "u", password: "secret-bb" }), // 与上面等长
     });
-    expect(second).not.toBe(first);
+    expect(sameLength, "等长口令撞键").not.toBe(first);
+
+    const differentLength = p.get({
+      mode: "direct",
+      proxy: proxy({ username: "u", password: "secret-bb-longer" }),
+    });
+    expect(differentLength).not.toBe(sameLength);
+  });
+
+  it("空口令与非空口令不撞键", () => {
+    const p = pool();
+    const empty = p.get({ mode: "direct", proxy: proxy({ username: "u" }) });
+    const set = p.get({ mode: "direct", proxy: proxy({ username: "u", password: "x" }) });
+    expect(set).not.toBe(empty);
+  });
+
+  it("协议大小写变化不触发无谓重建", () => {
+    // #create 内部会 toLowerCase,键也必须用同样的归一化,否则白重建一次。
+    const p = pool();
+    const lower = p.get({ mode: "direct", proxy: proxy({ type: "socks5" }) });
+    const upper = p.get({ mode: "direct", proxy: proxy({ type: "SOCKS5" }) });
+    expect(upper).toBe(lower);
   });
 
   it("协议变了就重建", () => {
@@ -121,13 +144,48 @@ describe("dispatcher 缓存", () => {
 
   it("桥接模式按内核与本地端口缓存", () => {
     const p = pool();
-    const base = { mode: "bridge" as const, proxy: proxy({ type: "vless", direct: false, bridgeable: true }) };
+    const base = {
+      mode: "bridge" as const,
+      proxy: proxy({ type: "vless", direct: false, bridgeable: true }),
+      nodeName: "节点甲",
+    };
     const first = p.get({ ...base, bridge: { bridgeId: "b1", host: "127.0.0.1", port: 7890 } });
     const same = p.get({ ...base, bridge: { bridgeId: "b1", host: "127.0.0.1", port: 7890 } });
     const other = p.get({ ...base, bridge: { bridgeId: "b1", host: "127.0.0.1", port: 7891 } });
 
     expect(same).toBe(first);
     expect(other).not.toBe(first);
+  });
+
+  it("桥接模式下 nodeName 必须参与身份 —— 否则连接复用会击穿 selector 锁", () => {
+    /*
+     * Clash 在**建立连接时**决定出站节点,之后该连接终身绑定它;而 undici 会
+     * 复用连接池里的 keep-alive 连接。于是 nodeName 不在缓存键里时,切换
+     * selector 后的请求会沿用旧连接、从旧节点出去 —— 刚执行的 select() 形同虚设。
+     *
+     * 实测过后果:同一 proxy id 依次指向 A→B→B,三次探测全部报回 A 的 IP,
+     * 服务端只看到 1 条 TCP 连接。而 applyProbeResult 会把这个错的 IP 持久化,
+     * 出口隔离报告正是按它分组。
+     */
+    const p = pool();
+    const bridge = { bridgeId: "b1", host: "127.0.0.1", port: 7890 };
+    const bridged = proxy({ type: "vless", direct: false, bridgeable: true });
+
+    const viaA = p.get({ mode: "bridge", proxy: bridged, bridge, nodeName: "节点甲" });
+    const viaB = p.get({ mode: "bridge", proxy: bridged, bridge, nodeName: "节点乙" });
+
+    expect(viaB, "不同节点必须用不同的 dispatcher(各自的连接池)").not.toBe(viaA);
+  });
+
+  it("同一节点重复取用仍复用 —— 复用本身是有益的", () => {
+    // 一个 dispatcher 只服务一个节点时,它池里所有连接都绑定同一节点,
+    // 复用是安全的,还省掉每次请求的握手。
+    const p = pool();
+    const bridge = { bridgeId: "b1", host: "127.0.0.1", port: 7890 };
+    const bridged = proxy({ type: "vless", direct: false, bridgeable: true });
+    const target = { mode: "bridge" as const, proxy: bridged, bridge, nodeName: "节点甲" };
+
+    expect(p.get(target)).toBe(p.get(target));
   });
 });
 

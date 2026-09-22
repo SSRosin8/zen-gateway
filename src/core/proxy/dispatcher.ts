@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { Agent, ProxyAgent, type Dispatcher } from "undici";
 import { socksDispatcher } from "fetch-socks";
 import type { Proxy } from "../../shared/schema.ts";
@@ -28,6 +29,19 @@ import type { Proxy } from "../../shared/schema.ts";
 const SOCKS_TYPES = new Set(["socks4", "socks5"]);
 const HTTP_TYPES = new Set(["http", "https"]);
 
+/**
+ * 口令的稳定指纹,供缓存键使用。
+ *
+ * 不能用明文(键会进诊断输出),也不能用长度 —— 等长口令会撞键,
+ * 于是用户改掉一个「长度恰好相同的错口令」后仍会复用旧 dispatcher,
+ * 鉴权永久失败且无从察觉。取 sha256 前 12 位:碰撞概率可忽略,
+ * 且不可逆推原值。
+ */
+function credentialFingerprint(secret: string): string {
+  if (secret === "") return "empty";
+  return createHash("sha256").update(secret).digest("hex").slice(0, 12);
+}
+
 export type TimeoutConfig = {
   /** 等响应头的上限。 */
   headersTimeoutMs: number;
@@ -45,8 +59,12 @@ export type BridgeEndpoint = {
 export type EgressTarget =
   /** 直连:自带 dispatcher。 */
   | { mode: "direct"; proxy: Proxy }
-  /** 经本地 Clash 混合端口;出口节点由 selector 决定,需持锁切换。 */
-  | { mode: "bridge"; proxy: Proxy; bridge: BridgeEndpoint }
+  /**
+   * 经本地 Clash 混合端口;出口节点由 selector 决定,需持锁切换。
+   *
+   * `nodeName` 必须参与 dispatcher 身份 —— 见 DispatcherPool 的说明。
+   */
+  | { mode: "bridge"; proxy: Proxy; bridge: BridgeEndpoint; nodeName: string }
   /** 不走代理,用本机网络出口。 */
   | { mode: "none" };
 
@@ -71,6 +89,25 @@ export function isDirectCapable(type: string): boolean {
  *
  * 缓存键必须包含所有影响连接行为的字段 —— 只用 proxy.id 的话,
  * 用户改了端口或口令后仍会复用旧 dispatcher,连到旧地址上。
+ *
+ * ## 桥接:`nodeName` 必须参与身份,否则连接复用会击穿 selector 锁
+ *
+ * Clash 在**建立连接时**决定这条连接走哪个出站节点,之后该连接终身绑定
+ * 那个节点。而 undici 会在 dispatcher 的连接池里复用 keep-alive 连接。
+ *
+ * 于是:锁保证了「切 selector + 建连接」原子,但只在**真的新建连接**时有效。
+ * 若池里还有活连接,undici 直接复用,Clash 就沿用那条连接出生时绑定的节点
+ * —— 刚刚执行的 `select()` 被完全忽略。
+ *
+ * 实测(连接建立时绑定出口 IP 的假混合端口):同一个 proxy id 依次指向
+ * A → B → B，三次探测拿到 `1.1.1.1`、`1.1.1.1`、`1.1.1.1`，服务端只看到
+ * **1 条 TCP 连接**。第二、三次明明选了 B，出口却还是 A。更糟的是
+ * `applyProbeResult` 会把这个错的 IP 持久化进 `egressIp`，
+ * 而出口隔离报告正是按它分组 —— 于是整份隔离结论建立在错误数据上。
+ *
+ * 把 `nodeName` 纳入身份后，一个 dispatcher 只会用于一个节点，
+ * 它池里的所有连接都绑定同一节点，复用因此是安全且有益的
+ * （省掉每次请求的握手）。节点变了则键变，旧 dispatcher 被弃用。
  */
 export class DispatcherPool {
   #cache = new Map<string, { key: string; dispatcher: Dispatcher }>();
@@ -109,11 +146,14 @@ export class DispatcherPool {
     const p = target.proxy;
     if (target.mode === "bridge") {
       const b = target.bridge;
-      return `bridge|${b.bridgeId}|${b.host}:${b.port}|${timeouts}`;
+      // nodeName 必须在键里 —— 见类注释:否则连接复用会让出口停留在旧节点。
+      return `bridge|${b.bridgeId}|${b.host}:${b.port}|${target.nodeName}|${timeouts}`;
     }
-    // 口令参与键,但只用长度而非明文 —— 键会进日志与诊断输出。
-    const auth = `${p.username ?? ""}:${(p.password ?? "").length}`;
-    return `direct|${p.type}|${p.host}:${p.port}|${auth}|${timeouts}`;
+    // 口令参与键。用 sha256 前 12 位而非长度:长度相同的口令会撞键,
+    // 于是「改掉一个等长的错口令」后仍复用旧 dispatcher,鉴权永久失败。
+    // 用摘要而非明文是因为这个键会进诊断输出。
+    const auth = `${p.username ?? ""}:${credentialFingerprint(p.password ?? "")}`;
+    return `direct|${p.type.toLowerCase()}|${p.host}:${p.port}|${auth}|${timeouts}`;
   }
 
   #create(target: EgressTarget): Dispatcher {

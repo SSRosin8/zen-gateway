@@ -21,7 +21,7 @@
 
 import { spawn } from "node:child_process";
 import { existsSync, openSync } from "node:fs";
-import { chmod, mkdir, open, readFile, rm, stat, writeFile } from "node:fs/promises";
+import { chmod, mkdir, open, readFile, readlink, rm, stat, writeFile } from "node:fs/promises";
 import { fileURLToPath } from "node:url";
 import { dirname, join, resolve } from "node:path";
 
@@ -40,6 +40,8 @@ const STATE_FILE = join(DATA_DIR, "zen-gateway.state.json");
 const LOCK_FILE = join(DATA_DIR, "zen-gateway.lock");
 const LOG_FILE = join(DATA_DIR, "zen-gateway.log");
 const ENTRY = join(ROOT, "dist", "server", "server", "index.js");
+/** 本脚本自身的路径:用于确认锁的持有者是不是另一个 start。 */
+const SCRIPT = fileURLToPath(import.meta.url);
 
 const PORT = Number(process.env.ZG_PORT ?? 9876);
 const BASE = `http://127.0.0.1:${PORT}`;
@@ -47,7 +49,6 @@ const BASE = `http://127.0.0.1:${PORT}`;
 const HEALTH_TIMEOUT_MS = 20_000;
 const HEALTH_INTERVAL_MS = 250;
 const STOP_TIMEOUT_MS = 10_000;
-const LOCK_STALE_MS = 60_000;
 
 /** data/ 与其中的文件都可能含凭证,一律只对属主开放。 */
 const FILE_MODE = 0o600;
@@ -164,6 +165,71 @@ async function inspect() {
   };
 }
 
+/**
+ * 锁持有者的 cmdline 是否指向本脚本。
+ *
+ * 必须按路径解析后比较,不能直接字符串相等:`npm start` 执行的是
+ * `node scripts/service.mjs`,cmdline 里是**相对路径**,而 `SCRIPT` 是绝对路径。
+ * 直接比较会把一个真正并发的 start 判成「PID 被复用」并抢掉它的锁 ——
+ * 恰好重新引入这把锁要防止的双 spawn。
+ *
+ * 相对路径要相对**持有者的 cwd**解析,所以先读 /proc/<pid>/cwd;
+ * 读不到就退回本进程的 cwd(同一个 npm 脚本通常同 cwd)。
+ */
+async function cmdlinePointsAtScript(pid) {
+  let cmdline;
+  try {
+    cmdline = await readFile(`/proc/${pid}/cmdline`, "utf8");
+  } catch {
+    return null; // 无法判断
+  }
+
+  let cwd = process.cwd();
+  try {
+    cwd = await readlink(`/proc/${pid}/cwd`);
+  } catch {
+    /* 退回本进程 cwd */
+  }
+
+  return cmdline
+    .split("\0")
+    .filter(Boolean)
+    .some((arg) => arg === SCRIPT || resolve(cwd, arg) === SCRIPT);
+}
+
+/**
+ * 判断锁的持有者状态。
+ *
+ * 不能只看「锁文件有多旧」:先前的逻辑是
+ * `stale = 持有者已死 || 年龄 > 60s`,于是一把**活着的**锁只要超过 60s 就会被
+ * 抢占 —— 慢磁盘或高负载下两次相隔 61s 的 start 会双双 spawn,正是这把锁
+ * 要防止的事。mtime 也从不刷新,所以「年龄」根本不代表持有者是否还在工作。
+ *
+ * 改为按持有者身份判断,与停止服务时同一套思路:
+ *   - 内容不可解析 → 崩溃在写入中途,可抢占
+ *   - 进程已死 → 可抢占
+ *   - 进程存活但 cmdline 不是本脚本 → PID 被复用,可抢占
+ *   - 进程存活且确是本脚本 → 真的有并发 start,拒绝(不看年龄)
+ *   - 无法判断(读不到 /proc) → 保守拒绝,并给出恢复提示
+ */
+async function lockHolder() {
+  let raw;
+  try {
+    raw = await readFile(LOCK_FILE, "utf8");
+  } catch {
+    return { state: "gone" };
+  }
+
+  const pid = Number.parseInt(raw.trim(), 10);
+  if (!Number.isInteger(pid) || pid <= 0) return { state: "garbage" };
+  if (pid === process.pid) return { state: "live", pid }; // 自己的锁,不该抢
+  if (!pidAlive(pid)) return { state: "dead", pid };
+
+  const isOurs = await cmdlinePointsAtScript(pid);
+  if (isOurs === null) return { state: "unknown", pid };
+  return isOurs ? { state: "live", pid } : { state: "reused", pid };
+}
+
 /** 排他锁:防止两个 start 同时 spawn。 */
 async function acquireLock() {
   for (let attempt = 0; attempt < 2; attempt += 1) {
@@ -171,24 +237,52 @@ async function acquireLock() {
       const handle = await open(LOCK_FILE, "wx", FILE_MODE);
       await handle.writeFile(`${process.pid}\n`, "utf8");
       await handle.close();
-      return true;
+      return { ok: true };
     } catch (err) {
-      if (err?.code !== "EEXIST") throw err;
-
-      // 锁可能是崩溃留下的。持有者已死、或锁文件过旧,才允许抢占。
-      let stale = false;
-      try {
-        const holder = Number.parseInt(await readFile(LOCK_FILE, "utf8"), 10);
-        const age = Date.now() - (await stat(LOCK_FILE)).mtimeMs;
-        stale = (Number.isInteger(holder) && !pidAlive(holder)) || age > LOCK_STALE_MS;
-      } catch {
-        stale = true;
+      if (err?.code !== "EEXIST") {
+        /*
+         * 不是「已存在」而是别的错误,例如锁路径被建成了目录(EISDIR)。
+         * 先前直接 rethrow,于是抛出未捕获异常:堆栈里带安装路径,退出码 1
+         * 而不是有意义的失败。这里给一句明确的话。
+         */
+        return { ok: false, reason: `无法创建锁文件(${err?.code ?? "未知错误"}):${LOCK_FILE}` };
       }
-      if (!stale) return false;
-      await rm(LOCK_FILE, { force: true });
+
+      const holder = await lockHolder();
+      if (holder.state === "live") {
+        return { ok: false, reason: `另一个 start 正在进行中(pid ${holder.pid})。` };
+      }
+      if (holder.state === "unknown") {
+        return {
+          ok: false,
+          reason:
+            `锁被 pid ${holder.pid} 持有,但无法确认它是否为本脚本。\n` +
+            `请手工确认后删除:${LOCK_FILE}`,
+        };
+      }
+
+      // gone / garbage / dead / reused —— 都可以安全抢占。
+      try {
+        await rm(LOCK_FILE, { force: true });
+      } catch (err) {
+        /*
+         * 锁路径存在但删不掉,最典型的是它是个**目录**:
+         * open 得到 EEXIST → readFile 得到 EISDIR(被当成「锁已消失」)
+         * → rm 抛 ERR_FS_EISDIR 且无人接住 → 未捕获异常 + 堆栈里带安装路径。
+         *
+         * 刻意不做递归删除:那个目录不是我们建的,recursive 删一个来历不明的
+         * 目录是不可逆的破坏性操作。报清楚,让用户自己处理。
+         */
+        return {
+          ok: false,
+          reason:
+            `锁路径无法删除(${err?.code ?? "未知错误"}):${LOCK_FILE}\n` +
+            "若它是个目录或权限不对,请手工清理后重试。",
+        };
+      }
     }
   }
-  return false;
+  return { ok: false, reason: "反复抢锁失败,可能有并发 start 在竞争。" };
 }
 
 const releaseLock = () => rm(LOCK_FILE, { force: true });
@@ -200,8 +294,9 @@ const releaseLock = () => rm(LOCK_FILE, { force: true });
 async function start() {
   await ensureDataDir();
 
-  if (!(await acquireLock())) {
-    console.error("另一个 start 正在进行中(data/zen-gateway.lock 被持有)。");
+  const lock = await acquireLock();
+  if (!lock.ok) {
+    console.error(lock.reason);
     return 1;
   }
 

@@ -34,14 +34,30 @@ export type ProxyNode = {
   latencyMs: number | null;
 };
 
+/**
+ * Controller 交互失败的分类。
+ *
+ * `invalid_input` 与其余几种性质不同:它表示**调用方传进来的名字不合法**,
+ * 而不是上游出了问题。必须单独一类 —— `delay()` 会把 `bad_response`/`not_found`
+ * 当作「节点不可用」吞掉并返回 null,若输入错误也用那两类,一个配置错误就会被
+ * 伪装成「这个节点没有延迟数据」,彻底看不见。
+ */
+export type ControllerErrorKind =
+  | "unreachable"
+  | "auth"
+  | "not_found"
+  | "bad_response"
+  | "timeout"
+  | "invalid_input";
+
 export class ControllerError extends Error {
   override readonly name = "ControllerError";
-  readonly kind: "unreachable" | "auth" | "not_found" | "bad_response" | "timeout";
+  readonly kind: ControllerErrorKind;
   readonly status: number | undefined;
 
   constructor(
     message: string,
-    kind: "unreachable" | "auth" | "not_found" | "bad_response" | "timeout",
+    kind: ControllerErrorKind,
     status?: number,
   ) {
     super(message);
@@ -55,6 +71,46 @@ const DEFAULT_TIMEOUT_MS = 5_000;
 
 /** 延迟测试的超时上限,避免一个坏节点拖住整批探测。 */
 const DELAY_TIMEOUT_MS = 5_000;
+
+/**
+ * 编码单个路径段,并拒绝会被路径归一化吃掉的名字。
+ *
+ * ## 为什么必须拒绝而不是编码
+ *
+ * 点段无法靠编码保护:WHATWG URL 规范**明确**把 `.`、`..`、`%2e`、`%2e%2e`
+ * (不分大小写)都当作点段处理。实测:
+ *
+ *   proxies/../delay        → /delay
+ *   proxies/%2E%2E/delay    → /delay     ← 编码无效
+ *   u.pathname = ".../.."   → 同样归一化  ← 直接赋值也无效
+ *
+ * 于是 `select("..", n)` 会把 PUT 打到 Controller 根路径,
+ * `delay("..", url)` 会打到 `/delay` —— 都不是调用方想操作的资源。
+ * `selectorGroup` 在 schema 里是任意 1–200 字符,这条路径是可达的。
+ *
+ * 唯一正确的做法是在 API 边界拒绝:真实的 Clash 分组或节点不可能叫
+ * `.` 或 `..`,把这种输入当成配置错误报出来,远好于静默操作错误的资源。
+ */
+function encodeSegment(value: string, what: "分组" | "节点"): string {
+  // 归一化后只剩点的名字一律拒绝(含 %2e 这类已编码形态)。
+  const decoded = (() => {
+    try {
+      return decodeURIComponent(value);
+    } catch {
+      return value;
+    }
+  })();
+  if (/^\.+$/.test(decoded) || /^\.+$/.test(value)) {
+    throw new ControllerError(
+      `${what}名不能是「${value}」—— 纯点名会被 URL 路径归一化吃掉,无法安全寻址`,
+      "invalid_input",
+    );
+  }
+  if (value === "") {
+    throw new ControllerError(`${what}名不能为空`, "invalid_input");
+  }
+  return encodeURIComponent(value);
+}
 
 export type ControllerOptions = {
   timeoutMs?: number;
@@ -71,8 +127,23 @@ export class ClashController {
 
   constructor(bridge: Pick<ClashBridge, "id" | "apiBase" | "apiSecret">, opts: ControllerOptions = {}) {
     this.bridgeId = bridge.id;
-    // 去掉末尾斜杠,避免拼出 //proxies。
-    this.#base = bridge.apiBase.replace(/\/+$/, "");
+    /*
+     * 用 URL 归一化 base,不做字符串拼接。
+     *
+     * 先前只 `replace(/\/+$/, "")` 再直接拼路径,于是 `apiBase` 带 query 或
+     * fragment 时会拼出永远到不了的地址:`http://h:9090/?x=1` + `/proxies`
+     * → `http://h:9090/?x=1/proxies`(路径其实是 `/`)。而 schema 的
+     * `UpstreamUrlSchema` 是允许 query 的。
+     *
+     * 归一化为「origin + pathname + 末尾斜杠」,后续一律用相对路径解析,
+     * 这样也顺带支持 `http://h:9090/api` 这类带前缀的 base。
+     */
+    const base = new URL(bridge.apiBase);
+    base.search = "";
+    base.hash = "";
+    if (!base.pathname.endsWith("/")) base.pathname = `${base.pathname}/`;
+    this.#base = base.href;
+
     this.#secret = bridge.apiSecret;
     this.#timeoutMs = opts.timeoutMs ?? DEFAULT_TIMEOUT_MS;
     this.#fetch = opts.fetchImpl ?? fetch;
@@ -83,7 +154,8 @@ export class ClashController {
   }
 
   async #request(path: string, init: RequestInit = {}, timeoutMs?: number): Promise<Response> {
-    const url = `${this.#base}${path}`;
+    // path 是相对路径(如 `proxies/GLOBAL`),交给 URL 解析 —— 见构造器说明。
+    const url = new URL(path, this.#base).href;
     let res: Response;
     try {
       res = await this.#fetch(url, {
@@ -131,7 +203,7 @@ export class ClashController {
 
   /** 探活。返回内核版本字符串。 */
   async version(): Promise<{ version: string; isMeta: boolean }> {
-    const body = await this.#json("/version");
+    const body = await this.#json("version");
     if (body === null || typeof body !== "object") {
       throw new ControllerError("/version 返回的不是对象", "bad_response");
     }
@@ -145,7 +217,7 @@ export class ClashController {
 
   /** 枚举全部 selector 分组。 */
   async selectors(): Promise<SelectorGroup[]> {
-    const body = await this.#json("/proxies");
+    const body = await this.#json("proxies");
     const proxies = (body as { proxies?: unknown })?.proxies;
     if (proxies === null || typeof proxies !== "object") {
       throw new ControllerError("/proxies 返回的不是对象", "bad_response");
@@ -167,7 +239,7 @@ export class ClashController {
 
   /** 列出全部可选节点(含最近延迟),用于导入代理池。 */
   async nodes(): Promise<ProxyNode[]> {
-    const body = await this.#json("/proxies");
+    const body = await this.#json("proxies");
     const proxies = (body as { proxies?: unknown })?.proxies;
     if (proxies === null || typeof proxies !== "object") {
       throw new ControllerError("/proxies 返回的不是对象", "bad_response");
@@ -198,7 +270,7 @@ export class ClashController {
    */
   async select(group: string, node: string): Promise<void> {
     // 节点名含空格/冒号/emoji,必须编码。
-    await this.#request(`/proxies/${encodeURIComponent(group)}`, {
+    await this.#request(`proxies/${encodeSegment(group, "分组")}`, {
       method: "PUT",
       headers: { "content-type": "application/json" },
       body: JSON.stringify({ name: node }),
@@ -207,7 +279,7 @@ export class ClashController {
 
   /** 读取单个分组的当前选中节点。 */
   async currentNode(group: string): Promise<string> {
-    const body = await this.#json(`/proxies/${encodeURIComponent(group)}`);
+    const body = await this.#json(`proxies/${encodeSegment(group, "分组")}`);
     const now = (body as { now?: unknown })?.now;
     if (typeof now !== "string") {
       throw new ControllerError(`分组 ${group} 没有 now 字段(可能不是 Selector)`, "bad_response");
@@ -226,7 +298,7 @@ export class ClashController {
     const query = new URLSearchParams({ timeout: String(DELAY_TIMEOUT_MS), url: testUrl });
     try {
       const body = await this.#json(
-        `/proxies/${encodeURIComponent(node)}/delay?${query}`,
+        `proxies/${encodeSegment(node, "节点")}/delay?${query}`,
         undefined,
         DELAY_TIMEOUT_MS + 1_000,
       );

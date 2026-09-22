@@ -107,6 +107,29 @@ describe("version", () => {
     await make("", `${origin}/`).version();
     expect(recorded[0]!.url).toBe("/version");
   });
+
+  it.each([
+    ["带 query", "/?x=1"],
+    ["带 fragment", "/#frag"],
+    ["带 query 与 fragment", "/?x=1#f"],
+  ])("apiBase %s 时仍然打到正确路径", async (_label, suffix) => {
+    /*
+     * 先前只 replace(/\/+$/, "") 再字符串拼接,于是
+     * `http://h:9090/?x=1` + `/proxies` → `http://h:9090/?x=1/proxies`,
+     * 路径其实是 `/`,请求永远到不了目标端点。而 UpstreamUrlSchema 是允许
+     * query 的,所以这个配置是可达的。
+     */
+    respond = json({ version: "1.10.0" });
+    await make("", `${origin}${suffix}`).version();
+    expect(recorded[0]!.url).toBe("/version");
+  });
+
+  it("apiBase 带路径前缀时保留前缀", async () => {
+    // 反向代理后的 Controller 可能挂在子路径上。
+    respond = json({ version: "1.10.0" });
+    await make("", `${origin}/api`).version();
+    expect(recorded[0]!.url).toBe("/api/version");
+  });
 });
 
 describe("selectors", () => {
@@ -213,6 +236,49 @@ describe("select", () => {
     await make().select("a/b", "n1");
     // 不编码会把 a/b 变成两级路径,指向完全不同的资源。
     expect(recorded[0]!.url).toBe("/proxies/a%2Fb");
+  });
+
+  it.each([".", "..", "...", "%2E%2E", "%2e%2e"])(
+    "纯点名 %s 被拒绝,而不是静默操作错误的资源",
+    async (group) => {
+      /*
+       * 点段**无法靠编码保护**:WHATWG URL 规范明确把 `.`、`..`、`%2e`、
+       * `%2e%2e` 都当作点段。实测 `proxies/%2E%2E/delay` 依然归一化成
+       * `/delay`,直接给 `u.pathname` 赋值也一样。
+       *
+       * 于是 select("..") 曾把 PUT 打到 Controller 根路径。selectorGroup 在
+       * schema 里是任意 1–200 字符,这条路径可达。真实的 Clash 分组不可能
+       * 叫 `.` 或 `..`,所以正确做法是在边界拒绝。
+       */
+      respond = (_req, res) => res.writeHead(204).end();
+      const err = (await make()
+        .select(group, "n1")
+        .catch((e: unknown) => e)) as ControllerError;
+
+      expect(err).toBeInstanceOf(ControllerError);
+      expect(err.message).toContain("纯点名");
+      // 关键:请求根本没发出去,而不是打到了别的资源。
+      expect(recorded).toHaveLength(0);
+    },
+  );
+
+  it("节点名为 .. 时 delay 同样被拒绝", async () => {
+    respond = json({ delay: 100 });
+    const err = (await make()
+      .delay("..", "http://x.invalid")
+      .catch((e: unknown) => e)) as ControllerError;
+
+    expect(err).toBeInstanceOf(ControllerError);
+    expect(recorded).toHaveLength(0);
+  });
+
+  it("名字里**含**点但不只有点是合法的", async () => {
+    // `网址:example.invalid` 这类真实节点名含点,不能一并拒掉。
+    respond = (_req, res) => res.writeHead(204).end();
+    await expect(
+      make().select("GLOBAL", "🇺🇲 示例节点2 网址:example.invalid"),
+    ).resolves.toBeUndefined();
+    expect(recorded).toHaveLength(1);
   });
 
   it("分组不存在时报 not_found", async () => {

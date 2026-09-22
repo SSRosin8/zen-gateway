@@ -238,6 +238,114 @@ describe("egressIp 语义", () => {
     const proxy = ProxySchema.parse(directProxy("p1"));
     expect(proxy.egressIp).toBeNull();
   });
+
+  it.each(["", "not-an-ip", "<html>err</html>", "192.0.2.1:8080", "::::", "010.1.1.1"])(
+    "拒绝非法 IP 字面量 %j",
+    (value) => {
+      /*
+       * egressIp 是**出口隔离的分组键**。允许任意字符串时,一次手工误编辑或
+       * 一段被劫持的回显响应就会变成一个独立的「出口」—— 每个垃圾值自成一组,
+       * 看起来全都不同,于是误报已隔离。空串尤其坏:它与 null 会成为两个
+       * 不同的「未知」桶。
+       */
+      expect(ProxySchema.safeParse(directProxy("p1", { egressIp: value })).success).toBe(false);
+    },
+  );
+
+  it.each(["192.0.2.1", "2001:db8::1", "::ffff:192.0.2.1", "fe80::1%eth0"])(
+    "接受合法 IP %s",
+    (value) => {
+      expect(ProxySchema.safeParse(directProxy("p1", { egressIp: value })).success).toBe(true);
+    },
+  );
+});
+
+describe("host 校验", () => {
+  it.each([
+    ["换行", "a\nb"],
+    ["回车", "a\rb"],
+    ["空格", "a b"],
+    ["制表符", "a\tb"],
+  ])("拒绝含%s的 host", (_label, host) => {
+    // host 会进 URL 与 SOCKS 握手;含空白或控制字符的值在拼接场景下是注入原语。
+    expect(ProxySchema.safeParse(directProxy("p1", { host })).success).toBe(false);
+  });
+
+  it.each(["192.0.2.1", "example.invalid", "sub.example.invalid", "127.0.0.1", "[2001:db8::1]"])(
+    "接受正常 host %s",
+    (host) => {
+      expect(ProxySchema.safeParse(directProxy("p1", { host })).success).toBe(true);
+    },
+  );
+});
+
+describe("校验消息不回显用户数据", () => {
+  /*
+   * config.ts 的 formatIssues 会把 issue.message 放进 ConfigError.message,
+   * 而那条消息会进日志、终端、以及用户粘贴的报错。issue.path 已经精确指到
+   * 出错元素,再把值拼进消息只会泄漏 —— 代理 name 来自订阅导入,正是
+   * 「测试不得用真实订阅数据」所要保护的同一类数据。
+   */
+  it("引用不存在的代理时不回显 proxyId", () => {
+    const result = ConfigSchema.safeParse(
+      base({
+        workers: [{ id: "w1", kind: "anonymous", proxyId: "SECRET-CANARY-PROXY-ID" }],
+        proxies: [],
+      }),
+    );
+    const messages = (result.error?.issues ?? []).map((i) => i.message).join("\n");
+    expect(messages).not.toContain("SECRET-CANARY-PROXY-ID");
+    // 但路径必须仍能定位。
+    expect(JSON.stringify(result.error?.issues)).toContain("proxyId");
+  });
+
+  it("id 重复时不回显 id", () => {
+    const result = ConfigSchema.safeParse(
+      base({
+        workers: [
+          { id: "SECRET-CANARY-DUP", kind: "anonymous" },
+          { id: "SECRET-CANARY-DUP", kind: "anonymous" },
+        ],
+      }),
+    );
+    const messages = (result.error?.issues ?? []).map((i) => i.message).join("\n");
+    expect(messages).not.toContain("SECRET-CANARY-DUP");
+    expect(messages).toContain("重复");
+  });
+
+  it("仅可桥接的代理报错时不回显代理 name", () => {
+    const result = ConfigSchema.safeParse(
+      base({
+        clash: { enabled: false },
+        proxies: [
+          directProxy("p1", {
+            name: "🇺🇲 SECRET-CANARY-NODE-NAME",
+            type: "vless",
+            direct: false,
+            bridgeable: true,
+            enabled: true,
+          }),
+        ],
+      }),
+    );
+    const messages = (result.error?.issues ?? []).map((i) => i.message).join("\n");
+    expect(messages).not.toContain("SECRET-CANARY-NODE-NAME");
+  });
+});
+
+describe("集合上限", () => {
+  it("surfaceOverrides 有键数上限", () => {
+    // 其他集合都有上限;配置文件可手工编辑,无界 record 会让一次误粘贴
+    // 变成启动期的内存与校验开销。
+    const many: Record<string, string[]> = {};
+    for (let i = 0; i < 600; i += 1) many[`m${i}`] = ["chat"];
+    expect(ConfigSchema.safeParse(base({ models: { surfaceOverrides: many } })).success).toBe(false);
+  });
+
+  it("正常规模的覆写可用", () => {
+    const few = { "big-pickle": ["chat", "responses", "messages"] };
+    expect(ConfigSchema.safeParse(base({ models: { surfaceOverrides: few } })).success).toBe(true);
+  });
 });
 
 describe("未知字段", () => {

@@ -16,11 +16,23 @@ import { safeErrorMessage } from "../shared/redact.ts";
 const FILE_MODE = 0o600;
 const DIR_MODE = 0o700;
 
-export function dataDir(root: string = process.cwd()): string {
-  return resolve(root, "data");
+/**
+ * data/ 的位置。
+ *
+ * 显式传 `root` 时以它为准(测试用临时目录走这条路)。不传时才看
+ * `ZG_DATA_DIR` —— 必须与 `scripts/service.mjs` 认的是同一个环境变量,
+ * 否则 service.mjs 在一个目录里管状态文件,而服务端从另一个目录读配置,
+ * 凭证与运行时数据被劈成两份。Phase 0-2 的服务端还不读配置,所以现在
+ * 只是个陷阱;Phase 3 起就是真 bug。
+ */
+export function dataDir(root?: string): string {
+  if (root !== undefined) return resolve(root, "data");
+
+  const override = process.env["ZG_DATA_DIR"];
+  return override !== undefined && override !== "" ? resolve(override) : resolve(process.cwd(), "data");
 }
 
-export function configPath(root: string = process.cwd()): string {
+export function configPath(root?: string): string {
   return join(dataDir(root), "config.json");
 }
 
@@ -33,10 +45,10 @@ export function generateRelayToken(): string {
  * 配置错误。
  *
  * 刻意不用构造器参数属性（`constructor(readonly kind: ...)`）：
- * Node 的 strip-only TypeScript 模式不支持那个语法，而 scripts/*.mjs
- * 要直接 import 本模块来复用 schema 与读写逻辑（不复用就会退化成两份
- * 定义，迁移脚本写出的配置迟早与 schema 不一致）。tsc 不会拦这个 ——
- * 只有真正跑脚本时才炸。
+ * Node 的 strip-only TypeScript 模式不支持那个语法，而 `scripts/*.mjs`
+ * 会直接 import 本模块来复用 schema 与读写逻辑（不复用就会退化成两份定义，
+ * 脚本写出的配置迟早与 schema 不一致）。**tsc 不会拦这个** ——
+ * 只有真正跑脚本时才炸，所以 tests/integration 里有一条「脚本能跑起来」的守卫。
  */
 export class ConfigError extends Error {
   override readonly name = "ConfigError";
@@ -121,7 +133,7 @@ export type LoadResult = {
  * 只有「文件不存在」会自动创建。文件存在但读不动、解析不了、校验不过时
  * 一律抛错 —— 那种情况下自动覆盖会把用户的配置连同凭证一起丢掉。
  */
-export async function loadConfig(root: string = process.cwd()): Promise<LoadResult> {
+export async function loadConfig(root?: string): Promise<LoadResult> {
   const file = configPath(root);
 
   let text: string;
@@ -173,18 +185,34 @@ export async function loadConfig(root: string = process.cwd()): Promise<LoadResu
   }
 
   // 文件可能是别的工具或手工创建的,权限不一定对。
-  await ensureFileMode(file);
+  await ensurePermissions(file);
 
   return { config: parsed.data, created: false };
 }
 
-/** 权限不对就修正，而不是只警告 —— 警告会被忽略，凭证不该赌这个。 */
-async function ensureFileMode(file: string): Promise<void> {
+/**
+ * 权限不对就修正，而不是只警告 —— 警告会被忽略，凭证不该赌这个。
+ *
+ * **目录也要管**:`mkdir(…, { mode })` 只在**创建时**生效,已存在且权限过松的
+ * `data/` 不会被纠正。先前只修文件不修目录,于是一个 0755(或更糟)的 data/
+ * 会让其他本地用户列目录并读到 runtime.db 与日志。
+ *
+ * service.mjs 里有一份等价逻辑,但任何不经 service.mjs 的入口
+ * (脚本、测试、`npm run dev:server`)都只走这里 —— 两处都需要。
+ */
+async function ensurePermissions(file: string): Promise<void> {
   try {
     const st = await stat(file);
     if ((st.mode & 0o777) !== FILE_MODE) await chmod(file, FILE_MODE);
   } catch {
     // 改不动权限不该阻塞启动；doctor 会单独报这一项。
+  }
+  try {
+    const dir = dirname(file);
+    const st = await stat(dir);
+    if ((st.mode & 0o777) !== DIR_MODE) await chmod(dir, DIR_MODE);
+  } catch {
+    /* 同上 */
   }
 }
 
@@ -197,13 +225,15 @@ async function ensureFileMode(file: string): Promise<void> {
  *   而这个文件是唯一一份凭证存储。
  * - 临时文件一出生就是 0600,不存在「先 0644 再 chmod」的窗口。
  */
-export async function saveConfig(config: Config, root: string = process.cwd()): Promise<void> {
+export async function saveConfig(config: Config, root?: string): Promise<void> {
   // 写之前必过 schema：避免代码里某处构造了非法配置,写盘后下次启动才炸。
   const validated = ConfigSchema.parse(config);
 
   const file = configPath(root);
   const dir = dirname(file);
   await mkdir(dir, { recursive: true, mode: DIR_MODE });
+  // mode 只在创建时生效;已存在且过松的目录要纠正 —— 见 ensurePermissions。
+  await chmod(dir, DIR_MODE).catch(() => {});
 
   const temp = join(dir, `.config.json.${process.pid}.${randomBytes(6).toString("hex")}.tmp`);
   const body = `${JSON.stringify(validated, null, 2)}\n`;
@@ -239,7 +269,7 @@ async function syncDir(dir: string): Promise<void> {
   }
 }
 
-export async function configExists(root: string = process.cwd()): Promise<boolean> {
+export async function configExists(root?: string): Promise<boolean> {
   try {
     await access(configPath(root), fsConstants.F_OK);
     return true;

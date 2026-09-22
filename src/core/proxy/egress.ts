@@ -1,12 +1,7 @@
 import type { Config, Proxy } from "../../shared/schema.ts";
 import { ClashController } from "./clash/controller.ts";
 import { DispatcherPool, type TimeoutConfig } from "./dispatcher.ts";
-import {
-  bridgeNodeName,
-  bridgeSelectorGroup,
-  describeResolveFailure,
-  resolveProxy,
-} from "./pool.ts";
+import { bridgeSelectorGroup, describeResolveFailure, resolveProxy } from "./pool.ts";
 import { probeEgress, type IpEchoService, type ProbeOutcome } from "./probe.ts";
 import { SelectorLockRegistry } from "./selectorLock.ts";
 
@@ -143,7 +138,9 @@ export class EgressService {
           lock: this.#locks.forBridge(target.bridge.bridgeId),
           controller,
           selectorGroup: group,
-          nodeName: bridgeNodeName(target.proxy),
+          // target.nodeName 由 resolveProxy 填好，与 dispatcher 的缓存身份同源 ——
+          // 两处若各自算一遍，迟早出现「锁切到 A 而 dispatcher 属于 B」的偏差。
+          nodeName: target.nodeName,
         },
       }),
     };

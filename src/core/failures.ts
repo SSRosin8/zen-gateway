@@ -80,7 +80,17 @@ export function shouldCooldown(kind: FailureKind): boolean {
 }
 
 /** 把异常分类为传输层失败。同样不看任何响应体。 */
-export function classifyError(err: unknown): FailureKind {
+/**
+ * 把异常分类为传输层失败。同样不看任何响应体。
+ *
+ * `depth` 与 `seen` 是必需的防护:`cause` 链可能成环。第一版只判断了
+ * `err.cause !== err`(自指),而 `a.cause = b; b.cause = a` 这种两环会直接
+ * 递归到 `RangeError: Maximum call stack size exceeded` —— **异常从错误处理
+ * 函数里抛出来**,把一次可分类的传输失败变成进程级崩溃。超长链(两万层)同理。
+ */
+export function classifyError(err: unknown, depth = 0, seen?: Set<unknown>): FailureKind {
+  if (depth > 16) return "transport";
+
   if (err instanceof Error) {
     const name = err.name;
     if (name === "TimeoutError" || name === "HeadersTimeoutError" || name === "BodyTimeoutError") {
@@ -103,14 +113,37 @@ export function classifyError(err: unknown): FailureKind {
     ) {
       return "transport";
     }
+
     // fetch 把底层错误包在 cause 里。
-    if ("cause" in err && err.cause !== undefined && err.cause !== err) {
-      return classifyError(err.cause);
+    const cause = "cause" in err ? err.cause : undefined;
+    if (cause !== undefined && cause !== err) {
+      const visited = seen ?? new Set<unknown>();
+      visited.add(err);
+      if (!visited.has(cause)) return classifyError(cause, depth + 1, visited);
     }
     return "transport";
   }
   return "unknown";
 }
+
+/**
+ * RFC 9110 允许的三种 HTTP-date 形态。
+ *
+ * 必须逐形态严格匹配,不能只检查「首字符是字母」就交给 `Date.parse` ——
+ * 实测那样会放过三类输入并把它们算成 0(= 立刻重试):
+ *
+ *   1. **缺时区的 IMF-fixdate**：`"Tue, 22 Sep 2026 07:00:00"`(无 GMT)
+ *      被当作**本地时间**解析。在 UTC+8 的机器上,任何 8 小时内的未来时刻
+ *      都会算出 `delta <= 0`。
+ *   2. **asctime**：`"Tue Sep 22 00:05:00 2026"` 本身不带时区,同样按本地时间解析。
+ *   3. **裸月日**：`"Nov 6"`、`"March 5"` 通过了首字母检查,而 `Date.parse`
+ *      把它们解析到 2001 年 —— 早已过期,于是返回 0。
+ *
+ * 这和最初 `"-5"` 被解析成 2001-04-30 是同一类 bug,只是换了个入口。
+ */
+const IMF_FIXDATE = /^[A-Za-z]{3}, \d{2} [A-Za-z]{3} \d{4} \d{2}:\d{2}:\d{2} (?:GMT|UTC)$/;
+const RFC_850 = /^[A-Za-z]{6,9}, \d{2}-[A-Za-z]{3}-\d{2} \d{2}:\d{2}:\d{2} (?:GMT|UTC)$/;
+const ASCTIME = /^[A-Za-z]{3} [A-Za-z]{3} {1,2}\d{1,2} \d{2}:\d{2}:\d{2} \d{4}$/;
 
 /**
  * 解析 `Retry-After`。
@@ -121,12 +154,6 @@ export function classifyError(err: unknown): FailureKind {
  * 畸形输入必须返回 null(用我们自己的默认冷却),**绝不能返回 0**:
  * 0 意味着「立刻重试」,而这个头几乎只出现在 429 上 —— 刚被限流就立刻
  * 重试是最糟的反应,通常换来更长的封禁。
- *
- * 这里踩过的坑:`Date.parse` 会把裸数字当年份或日期解析 ——
- * `Date.parse("-5")` 得到 2001-04-30,`"2026"` 得到 2026-01-01,`"99"` 得到 1998。
- * 于是 `-5`、`5.5`、`99` 这类垃圾会落进「日期已过期」分支并返回 0。
- * 因此 HTTP-date 分支必须先要求形如 HTTP-date:RFC 9110 的三种形态
- * (IMF-fixdate / RFC 850 / asctime)**都以星期名开头**,故要求首字符是字母。
  */
 export function parseRetryAfter(value: string | null, now: number = Date.now()): number | null {
   if (value === null) return null;
@@ -140,11 +167,19 @@ export function parseRetryAfter(value: string | null, now: number = Date.now()):
     return Math.min(seconds * 1000, 86_400_000);
   }
 
-  // HTTP-date 形态必须以星期名开头;裸数字与符号一律不进 Date.parse。
-  if (!/^[A-Za-z]/.test(trimmed)) return null;
+  // HTTP-date:必须严格匹配三种形态之一,且时区明确。
+  let at: number;
+  if (IMF_FIXDATE.test(trimmed) || RFC_850.test(trimmed)) {
+    at = Date.parse(trimmed);
+  } else if (ASCTIME.test(trimmed)) {
+    // asctime 不带时区,RFC 9110 规定按 UTC 理解;显式补上,否则按本地时间解析。
+    at = Date.parse(`${trimmed} UTC`);
+  } else {
+    return null;
+  }
 
-  const at = Date.parse(trimmed);
   if (Number.isNaN(at)) return null;
+
   const delta = at - now;
   // 合法但已过期的日期确实表示「现在就可以重试」,0 在这里是对的。
   if (delta <= 0) return 0;

@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { isIpAddress } from "./ip.ts";
 
 /**
  * 配置 schema —— server ⇄ admin ⇄ CLI 的唯一契约。
@@ -14,7 +15,26 @@ import { z } from "zod";
 /** 端口：1-65535，且排除需要特权的 0-1023（本工具无须特权端口）。 */
 export const PortSchema = z.number().int().min(1024).max(65535);
 
-const HostSchema = z.string().min(1).max(255);
+const HostSchema = z
+  .string()
+  .min(1)
+  .max(255)
+  // 不得含空白或控制字符:host 会进 URL 与 SOCKS 握手,`a\nb` 这类值
+  // 在拼接场景下是注入原语,而它先前是合法的。
+  .regex(/^[A-Za-z0-9._:\-[\]%]+$/, { message: "host 只允许主机名/IP 字面量字符" });
+
+/**
+ * 实测到的公网出口 IP。
+ *
+ * 必须是合法 IP 字面量:这个字段是**出口隔离的分组键**。
+ * 若允许任意字符串,一段被劫持的回显响应或一次手工误编辑就会变成一个
+ * 独立的「出口」,于是每个垃圾值自成一组、看起来全都不同 —— 误报已隔离。
+ * `null` 表示尚未探测出,与「确认不同」是两件事。
+ */
+const EgressIpSchema = z
+  .string()
+  .max(45)
+  .refine((v) => isIpAddress(v), { message: "不是合法的 IPv4/IPv6 字面量" });
 
 /**
  * 上游 baseUrl。
@@ -91,7 +111,7 @@ export const ProxySchema = z
      * 出口隔离判定必须按这个字段分组，不能按 id —— 两个不同代理
      * 可能 NAT 到同一个公网 IP，那种情况下隔离是假的。
      */
-    egressIp: z.string().max(64).nullable().default(null),
+    egressIp: EgressIpSchema.nullable().default(null),
   })
   .refine((p) => p.direct || p.bridgeable, {
     message: "既不能直连也不能桥接的代理无法使用",
@@ -198,7 +218,12 @@ export const ModelRulesSchema = z.strictObject({
   /** 默认支持的协议面。 */
   defaultSurfaces: z.array(ProtocolIdSchema).min(1).default(["chat", "responses"]),
   /** 按模型覆写协议面。 */
-  surfaceOverrides: z.record(z.string().min(1).max(128), z.array(ProtocolIdSchema)).default({}),
+  surfaceOverrides: z
+    .record(z.string().min(1).max(128), z.array(ProtocolIdSchema))
+    // 与其他集合一样设上限:配置文件是手工可编辑的,无界 record 会让
+    // 一次误粘贴变成启动期的内存与校验开销。目录总量才百余个模型。
+    .refine((r) => Object.keys(r).length <= 512, { message: "最多 512 条覆写" })
+    .default({}),
 });
 export type ModelRules = z.infer<typeof ModelRulesSchema>;
 
@@ -292,11 +317,20 @@ export const ConfigSchema = z
     const subIds = new Set(cfg.subscriptions.map((s) => s.id));
     const bridgeIds = new Set(cfg.clash.bridges.map((b) => b.id));
 
+    /*
+     * 校验消息**不得插值任何用户数据**。
+     *
+     * `issue.path` 已经精确指到出错的元素（如 `workers.0.proxyId`），
+     * 再把值拼进消息只带来一个后果：config.ts 的 formatIssues 会把它
+     * 放进 ConfigError.message，而那条消息会进日志、终端、以及用户
+     * 粘贴的报错。代理 name 来自订阅导入 —— 那正是「测试不得用真实
+     * 订阅数据」所要保护的同一类数据。
+     */
     const dup = (label: string, ids: string[], path: string) => {
       const seen = new Set<string>();
       ids.forEach((id, i) => {
         if (seen.has(id)) {
-          ctx.addIssue({ code: "custom", path: [path, i, "id"], message: `${label} id 重复：${id}` });
+          ctx.addIssue({ code: "custom", path: [path, i, "id"], message: `${label} id 与前面的条目重复` });
         }
         seen.add(id);
       });
@@ -311,7 +345,7 @@ export const ConfigSchema = z
         ctx.addIssue({
           code: "custom",
           path: ["workers", i, "proxyId"],
-          message: `引用了不存在的代理 ${w.proxyId}；若确实要直连请显式写 null`,
+          message: "引用了不存在的代理；若确实要直连请显式写 null",
         });
       }
     });
@@ -321,14 +355,14 @@ export const ConfigSchema = z
         ctx.addIssue({
           code: "custom",
           path: ["proxies", i, "subscriptionId"],
-          message: `引用了不存在的订阅 ${p.subscriptionId}`,
+          message: "引用了不存在的订阅",
         });
       }
       if (p.bridgeId !== undefined && !bridgeIds.has(p.bridgeId)) {
         ctx.addIssue({
           code: "custom",
           path: ["proxies", i, "bridgeId"],
-          message: `引用了不存在的 Clash 内核 ${p.bridgeId}`,
+          message: "引用了不存在的 Clash 内核",
         });
       }
     });
@@ -337,7 +371,7 @@ export const ConfigSchema = z
       ctx.addIssue({
         code: "custom",
         path: ["clash", "activeBridgeId"],
-        message: `引用了不存在的 Clash 内核 ${cfg.clash.activeBridgeId}`,
+        message: "引用了不存在的 Clash 内核",
       });
     }
 
@@ -348,7 +382,7 @@ export const ConfigSchema = z
           ctx.addIssue({
             code: "custom",
             path: ["proxies", i],
-            message: `${p.name} 只能经 Clash 桥接，但 clash.enabled 为 false`,
+            message: "该代理只能经 Clash 桥接，但 clash.enabled 为 false",
           });
         }
       });

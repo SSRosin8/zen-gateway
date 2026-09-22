@@ -10,7 +10,7 @@ import { MIGRATIONS, TARGET_VERSION } from "./migrations.ts";
  * 用 Node 24 内置的 `node:sqlite`,零新增依赖。WAL 已实测可用。
  */
 
-export function dbPath(root: string = process.cwd()): string {
+export function dbPath(root?: string): string {
   return join(dataDir(root), "runtime.db");
 }
 
@@ -85,7 +85,7 @@ export function migrate(db: DatabaseSync): number {
 }
 
 /** 供服务端启动使用:确保目录存在后打开。 */
-export async function openRuntimeDb(root: string = process.cwd()): Promise<DatabaseSync> {
+export async function openRuntimeDb(root?: string): Promise<DatabaseSync> {
   const file = dbPath(root);
   await mkdir(dirname(file), { recursive: true, mode: 0o700 });
   return openDb(file);

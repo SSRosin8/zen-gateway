@@ -8,18 +8,22 @@ import type { ReactNode } from "react";
  * 问题 —— 任何满足 4.5:1 对比度的暖调配色都会落在同一片色相区间。
  * 所以颜色之外必须始终有第二(字形)与第三(文字)条信息通道。
  *
- * `icon` 与 `label` 都是必填,且运行期都会校验。
+ * `icon` 与 `label` 都是必填,且运行期都会校验非空。
  *
- * 类型只能挡住「不传」,挡不住「传了空东西」:`ReactNode` 接受
- * `null`/`undefined`/`false`/`""`,四者都能通过 typecheck 并渲染出一个
- * 空的图标位 —— 于是这个组件唯一的存在理由被静默绕过。因此排除这些空值
- * 形态既写进类型,也在运行期兜一道(有人 `as any` 或从 JS 调用时)。
+ * **分工要说清,免得再次高估类型的能力**:
+ *   - 类型挡住 `null` / `undefined` / `false`(已实测确认这三个会报错)
+ *   - 类型**挡不住空字符串**:`Exclude<string, "">` 仍然是 `string` ——
+ *     TypeScript 无法从宽泛的原始类型里减去一个字面量。
+ *   - 所以 `""`、`"   "`、`[]` 只能由下面的运行期守卫拦住。
+ *
+ * 两道都要:类型挡住最常见的手滑(忘传、传了个可能为 null 的变量),
+ * 运行期挡住类型表达不了的空值形态与绕过类型的调用(`as any` / 从 JS 调用)。
  */
 
 export type StatusTone = "success" | "warn" | "error" | "info" | "neutral";
 
-/** 排除 ReactNode 里所有「渲染出空」的形态。 */
-export type NonEmptyIcon = Exclude<ReactNode, null | undefined | boolean | "">;
+/** 排除 ReactNode 里能被类型表达的空值形态(空字符串由运行期守卫拦)。 */
+export type NonEmptyIcon = Exclude<ReactNode, null | undefined | boolean>;
 
 export type StatusIndicatorProps = {
   tone: StatusTone;

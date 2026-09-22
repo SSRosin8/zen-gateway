@@ -88,8 +88,13 @@ export const MIGRATIONS: Migration[] = [
       --
       -- session_key 存 sha256 摘要而非原值:它来自客户端的
       -- x-opencode-session,内容不受我们控制,而这张表会进备份与诊断导出。
+      --
+      -- CHECK 同时限定长度与字符集,见 blob_affinity 处的说明。
       CREATE TABLE session_affinity (
-        session_hash  TEXT PRIMARY KEY CHECK (length(session_hash) = 64),
+        session_hash  TEXT PRIMARY KEY CHECK (
+                        length(session_hash) = 64
+                        AND session_hash NOT GLOB '*[^0-9a-f]*'
+                      ),
         worker_id     TEXT NOT NULL,
         bound_at      INTEGER NOT NULL,
         expires_at    INTEGER NOT NULL
@@ -99,10 +104,17 @@ export const MIGRATIONS: Migration[] = [
 
       -- 加密推理块 → Worker。
       --
-      -- CHECK 把「只存摘要」从约定变成结构约束:长度不等于 64 的值根本写不进来,
-      -- 于是不可能有人图方便直接存进原始推理内容。
+      -- CHECK 把「只存 sha256 摘要」从约定变成**结构约束**。
+      --
+      -- 只查长度是不够的:实测 64 个字符的原始推理文本、64 个 CJK 字符
+      -- (192 字节)都能照常写进来,于是注释里「不可能有人存进原始推理内容」
+      -- 这句是假的。加上字符集限制后,只有小写十六进制能通过 ——
+      -- 正好是 Node 的 digest("hex") 输出形态,任何自然语言都进不来。
       CREATE TABLE blob_affinity (
-        blob_hash   TEXT PRIMARY KEY CHECK (length(blob_hash) = 64),
+        blob_hash   TEXT PRIMARY KEY CHECK (
+                      length(blob_hash) = 64
+                      AND blob_hash NOT GLOB '*[^0-9a-f]*'
+                    ),
         worker_id   TEXT NOT NULL,
         learned_at  INTEGER NOT NULL,
         expires_at  INTEGER NOT NULL
@@ -113,11 +125,15 @@ export const MIGRATIONS: Migration[] = [
       -- 批量探测的长任务进度,由服务端持有。
       --
       -- 前端刷新或关页面后要能接着看,所以进度不能只活在浏览器内存里。
-      -- state 的取值范围就是状态机的字母表,写错状态名会被 CHECK 拦住。
+      --
+      -- state 的取值范围就是状态机的字母表(idle | screening | running |
+      -- paused | cancelling | done),写错状态名会被 CHECK 拦住。
+      -- idle 必须在列:规划把它定义为状态机的一员,而 reducer 的单元测试
+      -- 会把每个状态都往库里存一遍 —— 少一个就会在那里炸,而不是在这里。
       CREATE TABLE batch_probe_jobs (
         id                TEXT PRIMARY KEY,
         state             TEXT NOT NULL CHECK (
-                            state IN ('screening','running','paused','cancelling','done')
+                            state IN ('idle','screening','running','paused','cancelling','done')
                           ),
         screen_total      INTEGER NOT NULL DEFAULT 0,
         screen_done       INTEGER NOT NULL DEFAULT 0,

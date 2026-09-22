@@ -157,15 +157,27 @@ describe("@theme 映射", () => {
     expect(unmapped, "缺映射的 token 不会生成工具类").toEqual([]);
   });
 
-  it("映射只引用 var(--zg-*)，不写字面色值", () => {
-    // 字面值绕开了整套对比度关卡。
-    const literals = Object.entries(mappings).filter(([, v]) => v.startsWith("#"));
-    expect(literals).toEqual([]);
+  it("--color-* 的名字必须与 token 同名", () => {
+    /*
+     * 先前只检查了映射的**值**(token 名),没检查**键**(工具类名)。
+     * 于是把 `--color-warn` 改名成 `--color-warning` 照样全绿 ——
+     * 而产物 CSS 里 `.text-warn` 直接消失,StatusIndicator 渲染出一个
+     * 没有颜色类的状态。实测确认过这个洞。
+     *
+     * 工具类名由 --color-* 的后缀决定,所以它必须逐字等于 token 名:
+     * 组件里写的是 `text-warn`,token 叫 `warn`,中间这条映射不能改名。
+     */
+    for (const token of CLASSIFIED) {
+      expect(mappings[token], `缺 --color-${token},.text-${token}/.bg-${token} 不会生成`).toBe(
+        token,
+      );
+    }
   });
 
-  it("映射引用的 token 都真实存在", () => {
-    const dangling = Object.entries(mappings).filter(([, token]) => !(token in LIGHT));
-    expect(dangling).toEqual([]);
+  it("每个 --color-* 都引用一个真实存在的 token,不写字面色值", () => {
+    // 字面色值绕开了整套对比度关卡;引用不存在的 token 则生成不出工具类。
+    const bad = Object.entries(mappings).filter(([, value]) => !(value in LIGHT));
+    expect(bad, "--color-* 只能是 var(--zg-<已定义 token>)").toEqual([]);
   });
 });
 

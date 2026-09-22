@@ -131,16 +131,35 @@ describe("迁移", () => {
 });
 
 describe("结构约束", () => {
-  it("亲和表只接受 sha256 摘要长度的值", () => {
+  it("亲和表只接受小写十六进制的 sha256 摘要", () => {
     const db = openDb(file);
     try {
-      // 把「只存摘要」变成结构约束：存原始推理内容根本写不进来。
-      expect(() =>
-        db.exec("INSERT INTO blob_affinity VALUES ('原始推理内容', 'w1', 0, 0)"),
+      /*
+       * 「只存摘要」必须是结构约束,不能只是约定。
+       *
+       * 光查长度是不够的:实测 64 个字符的原始推理文本、64 个 CJK 字符
+       * (192 字节)都能照常写进来 —— 于是「不可能有人存进原始推理内容」
+       * 这句话曾经是假的。加上字符集限制后只有小写十六进制能通过,
+       * 正好是 Node 的 digest("hex") 输出形态。
+       */
+      const insert = (table: "blob_affinity" | "session_affinity", value: string) => () =>
+        db.exec(`INSERT INTO ${table} VALUES ('${value}', 'w1', 0, 0)`);
+
+      // 正当的摘要。
+      expect(insert("blob_affinity", "a".repeat(64))).not.toThrow();
+      expect(insert("session_affinity", "0123456789abcdef".repeat(4))).not.toThrow();
+
+      // 长度对但不是摘要 —— 这些先前全部能写进来。
+      expect(insert("blob_affinity", "推".repeat(64)), "64 个 CJK 字符").toThrow();
+      expect(
+        insert("blob_affinity", "the user asked about their config and i reasoned".padEnd(64, "x")),
+        "64 字符的自然语言",
       ).toThrow();
-      expect(() =>
-        db.exec(`INSERT INTO blob_affinity VALUES ('${"a".repeat(64)}', 'w1', 0, 0)`),
-      ).not.toThrow();
+      expect(insert("blob_affinity", "A".repeat(64)), "大写十六进制").toThrow();
+
+      // 长度不对。
+      expect(insert("blob_affinity", "a".repeat(63))).toThrow();
+      expect(insert("blob_affinity", "原始推理内容")).toThrow();
     } finally {
       db.close();
     }
@@ -149,14 +168,20 @@ describe("结构约束", () => {
   it("批测任务的 state 只接受状态机里的取值", () => {
     const db = openDb(file);
     try {
-      const insert = (state: string) =>
+      const insert = (state: string) => () =>
         db.exec(
           `INSERT INTO batch_probe_jobs (id, state, started_at, updated_at) VALUES ('${state}', '${state}', 0, 0)`,
         );
-      expect(() => insert("idle")).toThrow(); // idle 只存在于前端，不落库
-      expect(() => insert("running")).not.toThrow();
-      expect(() => insert("cancelling")).not.toThrow();
-      expect(() => insert("乱写")).toThrow();
+
+      // 规划定义的六态全部合法 —— 包括 idle。
+      // 先前漏了 idle,而 Phase 9 的 reducer 测试会把每个状态都落一遍库,
+      // 那时才会炸在一个与真正问题无关的地方。
+      for (const state of ["idle", "screening", "running", "paused", "cancelling", "done"]) {
+        expect(insert(state), state).not.toThrow();
+      }
+
+      expect(insert("乱写")).toThrow();
+      expect(insert("")).toThrow();
     } finally {
       db.close();
     }

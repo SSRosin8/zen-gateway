@@ -48,46 +48,78 @@ export function stripComments(css: string): string {
 }
 
 /**
- * 从 tokens.css 中取出某个选择器块内的 `--zg-*` 声明。
+ * 找出**全部**匹配该选择器的块体(不含花括号)。
  *
- * 故意只认字面量十六进制值：token 层不允许出现 `var()` 间接引用或
- * 运行期计算的颜色，否则这里就无法静态断言，规则也就失去强制力。
+ * 必须找全部,不能只取第一个:CSS 允许同一选择器出现多次,后出现的覆盖先出现的。
+ * 只解析首个块时,在文件末尾追加一个 `:root { --zg-warn: #ffff00 }` 就能让
+ * 线上颜色被改掉而**断言全绿** —— 实测确认过,产物 CSS 里是后者生效。
+ * 同理适用于第二个 `@theme` 块。
  *
- * 必须匹配「选择器紧跟 `{`」而不是选择器的首次出现：
- * `[data-theme="dark"]` 也出现在文件顶部的 `@custom-variant` 声明里，
- * 按首次出现取块会拿到 :root 的内容，于是深色主题被静默当成浅色来断言
- * —— 这正是本函数第一版的 bug。
+ * 必须匹配「选择器紧跟 `{`」而不是选择器的首次出现:
+ * `[data-theme="dark"]` 也出现在文件顶部的 `@custom-variant` 声明里,
+ * 按首次出现取块会拿到 :root 的内容,于是深色主题被静默当成浅色来断言
+ * —— 这是本函数第一版的 bug。
  */
-export function parseTokenBlock(rawCss: string, selector: string): TokenMap {
-  const css = stripComments(rawCss);
-
-  let open = -1;
+function findBlocks(css: string, selector: string): string[] {
+  const bodies: string[] = [];
   for (let from = 0; ; ) {
     const at = css.indexOf(selector, from);
     if (at === -1) break;
+
     const rest = css.slice(at + selector.length);
     const brace = /^\s*\{/.exec(rest);
-    if (brace) {
-      open = at + selector.length + brace[0].length - 1;
-      break;
+    if (!brace) {
+      from = at + selector.length;
+      continue;
     }
-    from = at + selector.length;
-  }
-  if (open === -1) throw new Error(`tokens.css 中找不到选择器块：${selector}`);
 
-  const close = css.indexOf("}", open);
-  if (close === -1) throw new Error(`选择器块不完整：${selector}`);
-  const body = css.slice(open + 1, close);
+    const open = at + selector.length + brace[0].length - 1;
+    const close = css.indexOf("}", open);
+    if (close === -1) throw new Error(`选择器块不完整：${selector}`);
+
+    bodies.push(css.slice(open + 1, close));
+    from = close + 1;
+  }
+  return bodies;
+}
+
+/**
+ * 从 tokens.css 中取出某个选择器下的全部 `--zg-*` 声明。
+ *
+ * **只接受字面量十六进制值**:token 层不允许 `var()` 间接引用、命名颜色或
+ * 运行期计算的颜色,否则这里无法静态断言,整套规则也就失去强制力。
+ * 遇到非十六进制的 `--zg-*` 声明直接报错 —— 先前是静默跳过,于是
+ * `--zg-ring: red` 这类 token 既不被校验对比度,也能通过「每个 token 都被
+ * 显式归类」的穷举检查,等于凭空开了个后门。
+ */
+export function parseTokenBlock(rawCss: string, selector: string): TokenMap {
+  const css = stripComments(rawCss);
+  const bodies = findBlocks(css, selector);
+  if (bodies.length === 0) throw new Error(`tokens.css 中找不到选择器块：${selector}`);
 
   const out: TokenMap = {};
-  for (const line of body.split(";")) {
-    const m = /--zg-([a-z0-9-]+)\s*:\s*(#[0-9a-fA-F]{6})\s*$/.exec(line.trim());
-    if (!m) continue;
-    const [, key, value] = m as unknown as [string, string, string];
-    // 重复键报错而非后者覆盖：同一个 token 写两遍时，「哪个生效」
-    // 取决于 CSS 层叠而不是本解析器，静默取一个必然与线上不一致。
-    if (key in out) throw new Error(`${selector} 中 --zg-${key} 重复声明`);
-    out[key] = value.toLowerCase();
+  for (const body of bodies) {
+    for (const line of body.split(";")) {
+      const trimmed = line.trim();
+      if (!trimmed.startsWith("--zg-")) continue;
+
+      const m = /^--zg-([a-z0-9-]+)\s*:\s*(.+)$/.exec(trimmed);
+      if (!m) throw new Error(`${selector} 中有无法解析的 token 声明：${trimmed.slice(0, 40)}`);
+
+      const [, key, rawValue] = m as unknown as [string, string, string];
+      const value = rawValue.trim();
+      if (!/^#[0-9a-fA-F]{6}$/.test(value)) {
+        throw new Error(
+          `--zg-${key} 的值必须是 6 位字面量十六进制（收到 ${value.slice(0, 20)}）——` +
+            "token 层不允许 var()、命名颜色或运行期计算值,否则对比度无法静态断言",
+        );
+      }
+      // 重复键报错而非后者覆盖:同一个 token 写两遍时,「哪个生效」
+      // 取决于 CSS 层叠而不是本解析器,静默取一个必然与线上不一致。
+      // 跨块重复同理 —— 追加一个同选择器的块正是绕过关卡的方式。
+      if (key in out) throw new Error(`${selector} 中 --zg-${key} 重复声明`);
+      out[key] = value.toLowerCase();
+    }
   }
   return out;
 }
@@ -105,22 +137,30 @@ export function parseTokenBlock(rawCss: string, selector: string): TokenMap {
  */
 export function parseThemeMappings(rawCss: string): Record<string, string> {
   const css = stripComments(rawCss);
-  const at = css.indexOf("@theme");
-  if (at === -1) throw new Error("tokens.css 中找不到 @theme 块");
-  const open = css.indexOf("{", at);
-  const close = css.indexOf("}", open);
-  if (open === -1 || close === -1) throw new Error("@theme 块不完整");
+  const bodies = findBlocks(css, "@theme");
+  if (bodies.length === 0) throw new Error("tokens.css 中找不到 @theme 块");
 
   const out: Record<string, string> = {};
-  for (const line of css.slice(open + 1, close).split(";")) {
-    const trimmed = line.trim();
-    const viaVar = /--color-([a-z0-9-]+)\s*:\s*var\(\s*--zg-([a-z0-9-]+)\s*\)$/.exec(trimmed);
-    if (viaVar) {
-      out[viaVar[1]!] = viaVar[2]!;
-      continue;
+  for (const body of bodies) {
+    for (const line of body.split(";")) {
+      const trimmed = line.trim();
+      if (!trimmed.startsWith("--color-")) continue;
+
+      const viaVar = /^--color-([a-z0-9-]+)\s*:\s*var\(\s*--zg-([a-z0-9-]+)\s*\)$/.exec(trimmed);
+      if (viaVar) {
+        const name = viaVar[1]!;
+        if (name in out) throw new Error(`@theme 中 --color-${name} 重复声明`);
+        out[name] = viaVar[2]!;
+        continue;
+      }
+      // 非 var() 形态一律记下原值,供「只能引用 var(--zg-*)」那条断言拒绝。
+      const literal = /^--color-([a-z0-9-]+)\s*:\s*(.+)$/.exec(trimmed);
+      if (literal) {
+        const name = literal[1]!;
+        if (name in out) throw new Error(`@theme 中 --color-${name} 重复声明`);
+        out[name] = literal[2]!.trim().toLowerCase();
+      }
     }
-    const literal = /--color-([a-z0-9-]+)\s*:\s*(#[0-9a-fA-F]{3,8})$/.exec(trimmed);
-    if (literal) out[literal[1]!] = literal[2]!.toLowerCase();
   }
   return out;
 }

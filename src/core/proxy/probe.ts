@@ -1,4 +1,5 @@
 import { fetch, type Dispatcher } from "undici";
+import { canonicalizeIp, isIpAddress } from "../../shared/ip.ts";
 import type { FailureKind } from "../failures.ts";
 import { classifyError, classifyStatus } from "../failures.ts";
 import { safeErrorMessage } from "../../shared/redact.ts";
@@ -54,31 +55,12 @@ export const DEFAULT_IP_ECHO_SERVICES: IpEchoService[] = [
   { url: "https://httpbin.org/ip", extract: asJsonField("origin") },
 ];
 
-/**
- * IP 字面量校验。
- *
- * 必须校验:回显服务被劫持或返回一页 HTML 时,未校验的实现会把整段文本
- * 当成「出口 IP」存进配置,于是隔离判定按一串垃圾分组,看起来全都「不同」。
+/*
+ * IP 校验与规范化在 `src/shared/ip.ts` —— `schema.ts` 校验 `egressIp` 时也要用,
+ * 而 schema 会被管理后台的浏览器包打进去,所以那份实现不能依赖 `node:net`。
+ * 这里转出来,让本模块的调用方不必关心它住在哪。
  */
-export function isIpAddress(value: string): boolean {
-  if (value.length === 0 || value.length > 45) return false;
-
-  // IPv4
-  if (/^\d{1,3}(\.\d{1,3}){3}$/.test(value)) {
-    return value.split(".").every((part) => {
-      const n = Number(part);
-      // 拒绝前导零:010 在不同解析器里含义不同。
-      return n <= 255 && String(n) === part;
-    });
-  }
-
-  // IPv6:只做保守的字符与结构检查,不求完整实现。
-  if (/^[0-9a-fA-F:]+$/.test(value) && value.includes(":")) {
-    return value.split("::").length <= 2 && value.split(":").length <= 8;
-  }
-
-  return false;
-}
+export { canonicalizeIp, isIpAddress };
 
 export type ProbeOutcome =
   | {
@@ -243,16 +225,39 @@ export function buildIsolationReport(
 ): IsolationReport {
   const byIp = new Map<string, IsolationGroup>();
   const unknown: string[] = [];
+  /** 同一个 workerId 只计一次 —— 重复条目不该被算成两个"各自独占一个 IP"的 Worker。 */
+  const seenWorkers = new Set<string>();
 
   for (const e of entries) {
-    if (e.egressIp === null || e.egressIp === "") {
+    if (seenWorkers.has(e.workerId)) continue;
+    seenWorkers.add(e.workerId);
+
+    /*
+     * 非法 IP 一律当作「未知」,不拿它做分组键。
+     *
+     * `egressIp` 是自由文本字段(可能来自手工编辑的配置,或一次被劫持的探测),
+     * 拿 `"not-an-ip"`、`""`、一段 HTML 当分组键会让每个垃圾值自成一组 ——
+     * 看起来「全都不同」,于是误报已隔离。
+     */
+    if (e.egressIp === null || !isIpAddress(e.egressIp)) {
       unknown.push(e.workerId);
       continue;
     }
-    let group = byIp.get(e.egressIp);
+
+    /*
+     * 必须先规范化再分组。
+     *
+     * 四个回显服务各自格式化 IPv6 的方式不同,而探测会在它们之间自由回退,
+     * 所以同一个地址可能以 `2001:db8:0:0:0:0:0:1` 与 `2001:DB8::1` 两种形态
+     * 进入这里 —— 字符串相等会把它们分成两组,`sharedGroups` 为空,
+     * 于是**误报已隔离**,而这正是本报告唯一要回答的问题。
+     */
+    const canonical = canonicalizeIp(e.egressIp);
+
+    let group = byIp.get(canonical);
     if (!group) {
-      group = { egressIp: e.egressIp, workerIds: [], proxyIds: [] };
-      byIp.set(e.egressIp, group);
+      group = { egressIp: canonical, workerIds: [], proxyIds: [] };
+      byIp.set(canonical, group);
     }
     group.workerIds.push(e.workerId);
     // 同一 IP 下可能有多个不同代理 —— 这正是「看起来隔离其实没隔离」的形态。
