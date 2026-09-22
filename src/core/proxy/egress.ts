@@ -174,6 +174,34 @@ export class EgressService {
     return results;
   }
 
+  /**
+   * 供转发链路复用**同一套**出口机构。
+   *
+   * 转发与探测必须共用一个 `DispatcherPool` 与一套 selector 锁,否则:
+   *
+   * - **锁分裂**:两个 registry 各自串行化,但 Clash selector 的 `now` 是
+   *   **进程外的全局状态**。探测在切到节点 A 的同时,转发可能正切到 B ——
+   *   于是探测量到的出口 IP 不是转发实际用的那个,而 `egressIp` 正是
+   *   出口隔离报告的分组键。隔离结论会建立在错误数据上。
+   * - **连接池分裂**:同一节点会有两套 keep-alive 连接,白费握手。
+   *
+   * 这是 Phase 2 审核查出的不变量 #7 的自然延伸:那一条要求缓存键含节点名,
+   * 这一条要求**只有一个**缓存。
+   */
+  upstreamDeps(config: Config): {
+    config: Config;
+    dispatchers: DispatcherPool;
+    locks: SelectorLockRegistry;
+    controllerFor: (bridgeId: string) => ClashController | null;
+  } {
+    return {
+      config,
+      dispatchers: this.#pool,
+      locks: this.#locks,
+      controllerFor: (bridgeId) => this.controllerFor(config, bridgeId),
+    };
+  }
+
   /** 配置变更后让缓存失效。 */
   async reset(): Promise<void> {
     this.#controllers.clear();

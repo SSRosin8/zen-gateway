@@ -20,7 +20,7 @@
  */
 
 import { spawn } from "node:child_process";
-import { existsSync, openSync } from "node:fs";
+import { existsSync, openSync, readFileSync } from "node:fs";
 import { chmod, mkdir, open, readFile, readlink, rm, stat, writeFile } from "node:fs/promises";
 import { fileURLToPath } from "node:url";
 import { dirname, join, resolve } from "node:path";
@@ -43,7 +43,39 @@ const ENTRY = join(ROOT, "dist", "server", "server", "index.js");
 /** 本脚本自身的路径:用于确认锁的持有者是不是另一个 start。 */
 const SCRIPT = fileURLToPath(import.meta.url);
 
-const PORT = Number(process.env.ZG_PORT ?? 9876);
+/**
+ * 端口解析必须与 `src/server/index.ts` **完全一致**:
+ * `ZG_PORT` > `config.json` 的 `gateway.port` > 9876。
+ *
+ * 两处若不一致,本脚本会去探一个没人监听的端口,然后在健康等待超时后报
+ * 「启动失败」—— 而服务其实已经起来了。这是本阶段真实发生过的回归:
+ * 服务端改成读配置里的 port、本脚本仍只认 ZG_PORT,6 条集成测试全红。
+ *
+ * 这里刻意**不**校验配置的其他部分,也绝不打印配置内容(整个文件都可能是凭证)。
+ * 配置坏了由服务端在启动时如实报错,本脚本只需要一个用于探活的端口号。
+ */
+function resolvePort() {
+  const fromEnv = process.env.ZG_PORT;
+  if (fromEnv !== undefined && fromEnv !== "") {
+    const parsed = Number(fromEnv);
+    if (Number.isInteger(parsed) && parsed >= 1 && parsed <= 65535) return parsed;
+    // 非法值不静默回落:那会让「我明明设了 ZG_PORT」变成一个查不出的问题。
+    console.error(`ZG_PORT 不是合法端口:${fromEnv}`);
+    process.exit(1);
+  }
+
+  try {
+    const raw = JSON.parse(readFileSync(join(DATA_DIR, "config.json"), "utf8"));
+    const p = raw?.gateway?.port;
+    if (Number.isInteger(p) && p >= 1 && p <= 65535) return p;
+  } catch {
+    // 配置不存在(首启)或不可解析 —— 用默认端口,服务端会报真正的原因。
+  }
+
+  return 9876;
+}
+
+const PORT = resolvePort();
 const BASE = `http://127.0.0.1:${PORT}`;
 
 const HEALTH_TIMEOUT_MS = 20_000;

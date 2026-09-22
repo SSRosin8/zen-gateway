@@ -324,3 +324,93 @@ describe("文件权限", () => {
     expect((await stat(dataDir)).mode & 0o777).toBe(0o700);
   });
 });
+
+describe("端口解析与服务端一致", () => {
+  /*
+   * 这一组是针对**我在 Phase 3 真实引入的一次回归**加的守卫。
+   *
+   * 当时我把服务端的监听端口从 `ZG_PORT` 改成读 `config.gateway.port`，
+   * 却没同步 service.mjs —— 于是脚本去探一个没人监听的端口，健康等待超时后
+   * 报「启动失败」，而服务其实已经起来了。本文件既有的 6 条用例当场全红，
+   * 那是因为它们都设了 ZG_PORT。
+   *
+   * 但**反方向没有覆盖**：用户在 config.json 里改 `gateway.port`、不设 ZG_PORT
+   * 时两处是否仍一致？那恰恰是真实用户的用法（ZG_PORT 只是测试与调试用的）。
+   * 下面两条把这个方向也钉住。
+   */
+
+  /** 只写出 port，其余字段交给服务端用默认值补齐。 */
+  async function writeConfigPort(p: number): Promise<void> {
+    await mkdir(dataDir, { recursive: true, mode: 0o700 });
+    await writeFile(
+      join(dataDir, "config.json"),
+      JSON.stringify({
+        version: 1,
+        gateway: { port: p, relayToken: "service-test-token-not-real" },
+      }),
+      { mode: 0o600 },
+    );
+  }
+
+  /** 不注入 ZG_PORT 的 run —— 逼两处都从 config.json 解析端口。 */
+  async function runWithoutEnvPort(args: string[]): Promise<RunResult> {
+    // 显式标注为可选键的字典：字面量推导出的类型里没有 ZG_PORT，delete 会被拒。
+    const env: NodeJS.ProcessEnv = { ...process.env, ZG_DATA_DIR: dataDir };
+    delete env["ZG_PORT"];
+    try {
+      const { stdout, stderr } = await execFileAsync(process.execPath, [SCRIPT, ...args], {
+        env,
+        cwd: PROJECT,
+      });
+      return { code: 0, stdout, stderr };
+    } catch (err) {
+      const e = err as { code?: number; stdout?: string; stderr?: string };
+      return { code: e.code ?? 1, stdout: e.stdout ?? "", stderr: e.stderr ?? "" };
+    }
+  }
+
+  it("不设 ZG_PORT 时，两处都认 config.json 的 gateway.port", async () => {
+    const configured = nextPort++;
+    await writeConfigPort(configured);
+
+    const started = await runWithoutEnvPort(["start"]);
+    expect(started.code, started.stderr).toBe(0);
+    // 脚本打印的地址必须是配置里的端口 —— 若它回落到 9876，这里就会不符。
+    expect(started.stdout).toContain(String(configured));
+
+    // 而且服务真的在那个端口上应答（证明脚本探的与服务端听的是同一个）。
+    const res = await fetch(`http://127.0.0.1:${configured}/health`);
+    expect(res.status).toBe(200);
+    expect(((await res.json()) as { ok: boolean }).ok).toBe(true);
+
+    const stopped = await runWithoutEnvPort(["stop"]);
+    expect(stopped.code).toBe(0);
+  });
+
+  it("ZG_PORT 优先于 config.json —— 两处的优先级必须相同", async () => {
+    // 配置里写一个端口，环境变量给另一个；服务必须听环境变量那个。
+    const ignored = nextPort++;
+    await writeConfigPort(ignored);
+
+    const started = await run(["start"]); // run() 会注入 ZG_PORT=port
+    expect(started.code, started.stderr).toBe(0);
+
+    const res = await fetch(`http://127.0.0.1:${port}/health`);
+    expect(res.status).toBe(200);
+
+    // 配置里那个端口上不该有东西在听。
+    await expect(fetch(`http://127.0.0.1:${ignored}/health`)).rejects.toThrow();
+  });
+
+  it("ZG_PORT 非法时明确报错，不静默回落", async () => {
+    // 静默回落会让「我明明设了 ZG_PORT」变成一个查不出的问题。
+    const env = { ...process.env, ZG_DATA_DIR: dataDir, ZG_PORT: "not-a-port" };
+    const r = await execFileAsync(process.execPath, [SCRIPT, "status"], { env, cwd: PROJECT }).then(
+      () => ({ code: 0, stderr: "" }),
+      (err: { code?: number; stderr?: string }) => ({ code: err.code ?? 1, stderr: err.stderr ?? "" }),
+    );
+
+    expect(r.code).toBe(1);
+    expect(r.stderr).toContain("ZG_PORT");
+  });
+});
