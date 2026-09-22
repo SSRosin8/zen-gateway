@@ -1,0 +1,63 @@
+{
+  "name": "zen-gateway",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "本地 OpenCode Zen 免费模型网关：多协议面、Worker 调度、出口隔离",
+  "engines": {
+    "node": ">=24.0.0"
+  },
+  "scripts": {
+    "dev": "vite",
+    "dev:server": "node --watch --experimental-strip-types src/server/index.ts",
+    "build": "npm run build:server && npm run build:admin",
+    "build:server": "tsc -p tsconfig.server.json",
+    "build:admin": "vite build",
+    "typecheck": "tsc -p tsconfig.server.json --noEmit && tsc -p tsconfig.admin.json --noEmit",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "validate": "npm run typecheck && npm run test && npm run build",
+    "start": "node scripts/service.mjs start",
+    "stop": "node scripts/service.mjs stop",
+    "restart": "node scripts/service.mjs restart",
+    "status": "node scripts/service.mjs status",
+    "doctor": "node scripts/doctor.mjs",
+    "setup": "node scripts/setup.mjs",
+    "discover:upstream": "node scripts/discover-upstream.mjs",
+    "migrate:config": "node scripts/migrate-config.mjs"
+  },
+  "dependencies": {
+    "@fontsource/inter": "5.3.0",
+    "@hono/node-server": "2.1.1",
+    "@fontsource/instrument-serif": "5.3.0",
+    "@fontsource/jetbrains-mono": "5.3.0",
+    "@fontsource/noto-sans-sc": "5.3.0",
+    "@radix-ui/react-dialog": "1.1.23",
+    "@radix-ui/react-dropdown-menu": "2.1.24",
+    "@radix-ui/react-tooltip": "1.2.16",
+    "@tanstack/react-table": "9.2.4",
+    "@tanstack/react-virtual": "3.14.13",
+    "hono": "4.13.8",
+    "react": "19.3.0",
+    "react-dom": "19.3.0",
+    "socks-proxy-agent": "10.1.0",
+    "undici": "8.10.2",
+    "yaml": "2.9.1",
+    "zod": "4.6.5"
+  },
+  "devDependencies": {
+    "@tailwindcss/vite": "4.3.3",
+    "@testing-library/jest-dom": "7.0.1",
+    "@testing-library/react": "16.3.3",
+    "@testing-library/user-event": "14.6.7",
+    "@types/node": "26.6.2",
+    "@types/react": "19.3.0",
+    "@types/react-dom": "19.3.0",
+    "@vitejs/plugin-react": "6.1.1",
+    "jsdom": "30.1.0",
+    "tailwindcss": "4.3.3",
+    "typescript": "7.0.2",
+    "vite": "8.3.0",
+    "vitest": "5.0.1"
+  }
+}

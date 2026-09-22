@@ -1,0 +1,53 @@
+/* 字体自托管：localhost 工具没有 CDN 往返的理由。
+   Noto Sans SC 承担全部中文字形 —— 本项目文案只有中文,
+   Inter 的 CJK 覆盖为零,回落链里它必须排在 Inter 之后但在 system-ui 之前。 */
+@import "@fontsource/inter/400.css";
+@import "@fontsource/inter/500.css";
+@import "@fontsource/inter/600.css";
+@import "@fontsource/noto-sans-sc/400.css";
+@import "@fontsource/noto-sans-sc/500.css";
+@import "@fontsource/instrument-serif/400.css";
+@import "@fontsource/jetbrains-mono/400.css";
+
+@import "./tokens.css";
+
+@layer base {
+  html {
+    color-scheme: light;
+  }
+
+  html:has([data-theme="dark"]) {
+    color-scheme: dark;
+  }
+
+  body {
+    margin: 0;
+    background-color: var(--zg-bg);
+    color: var(--zg-text);
+    font-family: var(--font-sans);
+    font-size: 14px;
+    line-height: 1.55;
+    -webkit-font-smoothing: antialiased;
+  }
+
+  /* 数字逐位可比：延迟、token 数、计数在表格里必须能上下对齐。 */
+  th[data-numeric],
+  td[data-numeric] {
+    font-variant-numeric: tabular-nums;
+    text-align: right;
+  }
+
+  :focus-visible {
+    outline: 2px solid var(--zg-accent-fg);
+    outline-offset: 2px;
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    *,
+    *::before,
+    *::after {
+      animation-duration: 0.01ms !important;
+      transition-duration: 0.01ms !important;
+    }
+  }
+}

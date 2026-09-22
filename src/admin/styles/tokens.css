@@ -1,0 +1,102 @@
+/*
+ * 设计 token —— 唯一来源。
+ *
+ * 两条硬规则（由 tests/design/contrast.test.ts 在 `npm run validate` 中强制）：
+ *   1. 任何前景 token × 任何表面 token 的对比度必须 ≥ 4.5:1。
+ *      Anthropic 官方品牌色里有四个在米白底上不及格（success 3.49 / accent 2.96 /
+ *      info 2.78 / mid-gray 2.11），下面的值是重算后的替代值，不是品牌原值。
+ *   2. 层次只靠「表面色调 + 1px 边框」，禁用 box-shadow。因此 border 必须真的可见：
+ *      原 --zg-border 在 --zg-surface 上只有 1.077，故另设 --zg-border-strong。
+ *
+ * 结构性 token（border / border-strong / *-fill）不承载文本，不参与规则 1，
+ * 在测试里走白名单，但各自有独立断言。
+ */
+
+@import "tailwindcss";
+
+@custom-variant dark (&:where([data-theme="dark"], [data-theme="dark"] *));
+
+/* ---- 浅色（默认） ---------------------------------------------------- */
+:root {
+  --zg-bg: #faf9f5;
+  --zg-surface: #f0eee6;
+  --zg-surface-accent: #f5e3c7;
+
+  --zg-border: #e8e6dc;
+  --zg-border-strong: #d2cfc2;
+
+  --zg-text: #141413;
+  --zg-text-muted: #5c5a51;
+
+  /* 品牌橙保留，但只作填充；文字/图标/边框形态用 accent-fg。 */
+  --zg-accent-fill: #d97757;
+  --zg-on-accent-fill: #141413;
+  --zg-accent-fg: #ad3f14;
+
+  --zg-success: #3f6b30;
+  /* 琥珀在浅底上最难达标：品牌感更强的 #8a6a12 在 surface 上只有 4.35、
+     在 surface-accent 上只有 4.02（两个都不及格，且 surface-accent 本身
+     就是暖黄调，与警告色天然接近）。压深到 #75580d 后三个底色分别
+     6.31 / 5.72 / 5.29，同时保持与 accent-fg 26.4°、与 error 40.0° 的色相间距。 */
+  --zg-warn: #75580d;
+  --zg-error: #b3261e;
+  --zg-info: #2d5f9a;
+}
+
+/* ---- 深色（同源暖调反转） -------------------------------------------- */
+[data-theme="dark"] {
+  --zg-bg: #141413;
+  --zg-surface: #1f1e1c;
+  --zg-surface-accent: #2a2621;
+
+  --zg-border: #2e2d2a;
+  --zg-border-strong: #454339;
+
+  --zg-text: #e8e6dc;
+  --zg-text-muted: #a8a69c;
+
+  --zg-accent-fill: #d97757;
+  --zg-on-accent-fill: #141413;
+  --zg-accent-fg: #e8956f;
+
+  --zg-success: #9dbd78;
+  --zg-warn: #e0b84a;
+  --zg-error: #e8796b;
+  --zg-info: #8fb8e0;
+}
+
+@theme {
+  --color-bg: var(--zg-bg);
+  --color-surface: var(--zg-surface);
+  --color-surface-accent: var(--zg-surface-accent);
+
+  --color-border: var(--zg-border);
+  --color-border-strong: var(--zg-border-strong);
+
+  --color-text: var(--zg-text);
+  --color-text-muted: var(--zg-text-muted);
+
+  --color-accent-fill: var(--zg-accent-fill);
+  --color-on-accent-fill: var(--zg-on-accent-fill);
+  --color-accent-fg: var(--zg-accent-fg);
+
+  --color-success: var(--zg-success);
+  --color-warn: var(--zg-warn);
+  --color-error: var(--zg-error);
+  --color-info: var(--zg-info);
+
+  /* Instrument Serif 的 CJK 覆盖为零，而本项目文案只有中文 ——
+     标题归 sans，衬线只用在它真能生效的地方：拉丁数字、向导、空状态、wordmark。 */
+  --font-sans: Inter, "Noto Sans SC", system-ui, sans-serif;
+  --font-serif: "Instrument Serif", Georgia, serif;
+  --font-mono: "JetBrains Mono", ui-monospace, monospace;
+
+  --radius-xs: 4px;
+  --radius-sm: 6px;
+  --radius-md: 8px;
+  --radius-lg: 12px;
+
+  /* 宽松密度：表格行高 44px 同时满足触摸目标 ≥44px。 */
+  --spacing-row: 44px;
+  --text-base: 14px;
+}
