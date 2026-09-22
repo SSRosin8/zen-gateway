@@ -9,7 +9,7 @@
   },
   "scripts": {
     "dev": "vite",
-    "dev:server": "node --watch --experimental-strip-types src/server/index.ts",
+    "dev:server": "node --watch src/server/index.ts",
     "build": "npm run build:server && npm run build:admin",
     "build:server": "tsc -p tsconfig.server.json",
     "build:admin": "vite build",
@@ -17,13 +17,10 @@
     "test": "vitest run",
     "test:watch": "vitest",
     "validate": "npm run typecheck && npm run test && npm run build",
-    "start": "node scripts/service.mjs start",
+    "start": "npm run build && node scripts/service.mjs start",
     "stop": "node scripts/service.mjs stop",
-    "restart": "node scripts/service.mjs restart",
-    "status": "node scripts/service.mjs status",
-    "doctor": "node scripts/doctor.mjs",
-    "setup": "node scripts/setup.mjs",
-    "discover:upstream": "node scripts/discover-upstream.mjs"
+    "restart": "npm run build && node scripts/service.mjs restart",
+    "status": "node scripts/service.mjs status"
   },
   "dependencies": {
     "@fontsource/instrument-serif": "5.3.0",
