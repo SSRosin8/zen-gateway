@@ -58,18 +58,23 @@ describe("嵌套默认值真的生效（prefault 回归守卫）", () => {
     expect(cfg.models.defaultSurfaces).toContain("chat");
   });
 
-  it("extraFreeIds 出厂默认含实测到的无后缀免费模型", () => {
+  it("extraFreeIds 出厂默认只含上游目录里真实存在的无后缀免费模型", () => {
     /*
-     * 2026-09-22 实测 Zen 目录：105 个模型、32 个零费率，其中只有
-     * big-pickle 与 grok-code 不带 -free 后缀。这是**默认值**而非代码里的
-     * 硬编码判定 —— 用户可改，Phase 6 的定时刷新会按真实目录纠正。
-     * 旧项目把等价名单写死成代码常量，目录一变就要改代码发版。
+     * 2026-09-22 以上游权威目录核实（`GET /zen/v1/models`，免鉴权）：
+     * 76 个在架模型，9 个带 -free 后缀，外加 big-pickle 一个零费率无后缀模型。
+     * 这是**默认值**而非代码里的硬编码判定 —— 用户可改，Phase 6 定时刷新会纠正。
+     *
+     * 先前这里断言过 grok-code，来源是 models.dev 的 opencode provider。
+     * 它在 Zen 自己的目录与定价页里都不存在 —— models.dev 那份当日有 23 个
+     * 零费率条目已下架。第三方聚合站不能当权威目录用。
      */
     const cfg = ConfigSchema.parse(base());
-    expect(cfg.models.extraFreeIds).toContain("big-pickle");
-    expect(cfg.models.extraFreeIds).toContain("grok-code");
-    // union-alpha 已从目录消失，绝不能再出现在默认值里。
+    expect(cfg.models.extraFreeIds).toEqual(["big-pickle"]);
+    // union-alpha 与 grok-code 都已不在上游目录里，绝不能出现在默认值中。
     expect(cfg.models.extraFreeIds).not.toContain("union-alpha");
+    expect(cfg.models.extraFreeIds).not.toContain("grok-code");
+    // jev-1.13 无后缀但**不免费**（输入 $0.042/1M，只有输出免费）。
+    expect(cfg.models.extraFreeIds).not.toContain("jev-1.13");
   });
 
   it("extraFreeIds 可被配置覆盖为空", () => {

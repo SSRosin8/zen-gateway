@@ -207,14 +207,21 @@ export const ModelRulesSchema = z.strictObject({
    * 定时刷新会按真实目录纠正它。旧项目把等价的名单写死在代码常量里
    * （`SPECIAL_FREE_MODEL_IDS`），目录一变就必须改代码发版。
    *
-   * 2026-09-22 实测 Zen 目录（经 models.dev）：105 个模型、32 个零费率，
-   * 其中只有这两个不带 `-free` 后缀。同时确认 `union-alpha` 已从目录消失
-   * —— 旧代码把它硬编码为特例，正是改成配置驱动的直接理由。
+   * 2026-09-22 以**上游权威目录**核实：`GET https://opencode.ai/zen/v1/models`
+   * （免鉴权）返回 **76 个在架模型**，其中 9 个带 `-free` 后缀且全部真免费，
+   * 外加 `big-pickle` 一个零费率无后缀模型 —— 共 10 个免费模型。
+   * 所以这里**只需一条例外**。
+   *
+   * 不要用 models.dev 的 `opencode` provider 做这份名单：它当日报 105 个模型 /
+   * 32 个零费率，与在架目录比对后发现 **23 个零费率项已下架**（`glm-5-free`、
+   * `kimi-k2.5-free`、`minimax-m3-free`、`grok-code` …）。本文件先前的默认值
+   * 里就混进了 `grok-code` —— 它在 Zen 自己的目录和定价页里都不存在，
+   * 与旧项目硬编码 `union-alpha` 是同一类错误，只是来源换成了第三方聚合站。
+   *
+   * 注意 `jev-1.13`（无后缀）**不免费**：定价页是输入 $0.042 / 输出免费，
+   * 只有 `jev-1.13-free` 才免费。它不能进这份名单。
    */
-  extraFreeIds: z
-    .array(z.string().min(1).max(128))
-    .max(256)
-    .default(["big-pickle", "grok-code"]),
+  extraFreeIds: z.array(z.string().min(1).max(128)).max(256).default(["big-pickle"]),
   /** 默认支持的协议面。 */
   defaultSurfaces: z.array(ProtocolIdSchema).min(1).default(["chat", "responses"]),
   /** 按模型覆写协议面。 */
