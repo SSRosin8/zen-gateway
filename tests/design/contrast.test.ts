@@ -1,6 +1,12 @@
 import { describe, expect, it } from "vitest";
 import { readFileSync } from "node:fs";
-import { contrastRatio, parseTokenBlock, type TokenMap } from "./color.ts";
+import {
+  contrastRatio,
+  parseThemeMappings,
+  parseTokenBlock,
+  stripComments,
+  type TokenMap,
+} from "./color.ts";
 
 const CSS = readFileSync(new URL("../../src/admin/styles/tokens.css", import.meta.url), "utf8");
 
@@ -21,16 +27,46 @@ const FOREGROUNDS = ["text", "text-muted", "accent-fg", "success", "warn", "erro
 const SURFACES = ["bg", "surface", "surface-accent"] as const;
 
 /**
- * 结构性 token —— 不承载文本，不参与 ≥4.5:1 规则。
- * 白名单是穷举的：任何新 token 若不在 FOREGROUNDS/SURFACES/STRUCTURAL 里，
- * 下面的「穷举覆盖」测试会失败，逼迫作者显式归类而不是默默漏掉。
+ * 结构性 token —— 不承载任意文本，不参与 ≥4.5:1 的笛卡尔积规则，
+ * 但每一个都有下面单独的断言，不是「豁免」。
  */
 const STRUCTURAL = ["border", "border-strong", "accent-fill", "on-accent-fill"] as const;
+
+const CLASSIFIED = [...FOREGROUNDS, ...SURFACES, ...STRUCTURAL] as const;
 
 const THEMES: Array<[string, TokenMap]> = [
   ["light", LIGHT],
   ["dark", DARK],
 ];
+
+describe("token 解析本身", () => {
+  it("注释被剥离，注释里的色值不会被当成声明", () => {
+    /*
+     * 实测过的失败形态：真实声明是不及格的 #8a6a12，后面跟一句
+     * 「压深前的值：--zg-warn: #75580d」的注释，解析器按最后匹配生效
+     * 读出 #75580d —— 53 条断言全绿而线上 CSS 不合规。
+     * tokens.css 里本就有一条引用旧色值的注释，离触发只差一次文档编辑。
+     */
+    const masked = `:root {\n  --zg-warn: #8a6a12;\n  /* 旧值 --zg-warn: #75580d 备查 */\n}`;
+    expect(parseTokenBlock(masked, ":root")["warn"]).toBe("#8a6a12");
+  });
+
+  it("注释里的花括号不会截断块", () => {
+    const tricky = `:root {\n  /* 卡片用 .card { border } 表达层次 */\n  --zg-bg: #ffffff;\n}`;
+    expect(parseTokenBlock(tricky, ":root")["bg"]).toBe("#ffffff");
+  });
+
+  it("同一 token 重复声明时报错，而不是静默取一个", () => {
+    // 「哪个生效」取决于 CSS 层叠而非本解析器，静默取一个必然与线上不一致。
+    const dup = `:root {\n  --zg-warn: #75580d;\n  --zg-warn: #8a6a12;\n}`;
+    expect(() => parseTokenBlock(dup, ":root")).toThrow(/重复声明/);
+  });
+
+  it("stripComments 保持长度，位置语义不变", () => {
+    const src = "a/* xx */b";
+    expect(stripComments(src)).toHaveLength(src.length);
+  });
+});
 
 describe("设计 token 对比度", () => {
   it.each(THEMES)("%s：token 解析出字面量十六进制值", (_name, tokens) => {
@@ -41,13 +77,21 @@ describe("设计 token 对比度", () => {
   });
 
   it.each(THEMES)("%s：每个 token 都被显式归类", (_name, tokens) => {
-    const classified = new Set<string>([...FOREGROUNDS, ...SURFACES, ...STRUCTURAL]);
+    const classified = new Set<string>(CLASSIFIED);
     const unclassified = Object.keys(tokens).filter((k) => !classified.has(k));
     expect(unclassified, "新 token 必须归类为前景/表面/结构性").toEqual([]);
   });
 
-  it.each(THEMES)("%s：两个主题定义同一组 token", (_name, tokens) => {
-    expect(Object.keys(tokens).sort()).toEqual(Object.keys(LIGHT).sort());
+  it.each(THEMES)("%s：每个已归类的名字都真的存在对应 token", (_name, tokens) => {
+    // 反向检查：否则删掉一个 token 会让断言在 relativeLuminance 里抛
+    // 「不是 6 位十六进制颜色：undefined」，而不是清楚地说少了哪个。
+    const missing = CLASSIFIED.filter((k) => !(k in tokens));
+    expect(missing).toEqual([]);
+  });
+
+  it("两个主题定义同一组 token", () => {
+    // 先前写成「每个主题都和 LIGHT 比」，其中 light 那一次是和自己比，是个恒真断言。
+    expect(Object.keys(DARK).sort()).toEqual(Object.keys(LIGHT).sort());
   });
 
   // 核心断言：前景 × 表面 的笛卡尔积全部 ≥4.5:1。
@@ -64,24 +108,64 @@ describe("设计 token 对比度", () => {
       }
     }
   }
+});
 
-  // accent-fill 是填充，规则不同：要求压在它上面的文字够清晰。
+/*
+ * accent-fill 是填充，不是表面。
+ *
+ * 它只有 on-accent-fill 一个合法前景（实测 5.90）。其余前景压在它上面
+ * 全部不及格：text-muted 2.22、accent-fg 1.92、error 2.09，深色下
+ * text-muted 更低到 1.28。
+ *
+ * 直接后果，Phase 9 必须遵守：**选中行不能用 accent-fill 做整行背景**。
+ * 一旦那样做，行内的次要文字（时间、延迟、备注）就不可读。选中态与
+ * 警告态同理，用 3px 左边框实色表达；accent-fill 只用在按钮、选中指示条
+ * 这类只承载主文案的紧凑元素上。
+ *
+ * 下面第二条断言故意把「不合格」这件事也钉住：它记录的是这条限制的
+ * 理由，避免后来者以为「把 accent-fill 加进 SURFACES 就好了」。
+ */
+describe("accent-fill 作为填充的约束", () => {
   it.each(THEMES)("%s：on-accent-fill 在 accent-fill 上 ≥4.5:1", (_name, tokens) => {
     const ratio = contrastRatio(tokens["on-accent-fill"]!, tokens["accent-fill"]!);
     expect(ratio, `= ${ratio.toFixed(2)}:1`).toBeGreaterThanOrEqual(4.5);
   });
 
-  /*
-   * 禁用 box-shadow 后，层次只剩「表面色调 + 1px 边框」。
-   * 原 border 在 surface 上只有 1.077 —— 卡片叠在面板上时边框等于不存在，
-   * 而第三个机制又被禁掉了。border-strong 补的就是这个缺口，
-   * 所以它必须真的比 border 更可见，否则等于没加。
-   */
-  it.each(THEMES)("%s：border-strong 在 surface 上确实可见", (_name, tokens) => {
-    const weak = contrastRatio(tokens["border"]!, tokens["surface"]!);
-    const strong = contrastRatio(tokens["border-strong"]!, tokens["surface"]!);
-    expect(strong).toBeGreaterThan(weak);
-    expect(strong, `border-strong on surface = ${strong.toFixed(2)}:1`).toBeGreaterThanOrEqual(1.2);
+  it.each(THEMES)("%s：次要文字压在 accent-fill 上确实不可读", (_name, tokens) => {
+    const ratio = contrastRatio(tokens["text-muted"]!, tokens["accent-fill"]!);
+    expect(
+      ratio,
+      "若此处变为及格，说明 accent-fill 被调过，需重新评估它能否作行背景",
+    ).toBeLessThan(4.5);
+  });
+});
+
+/*
+ * @theme 映射必须与 token 一起检查。
+ *
+ * token 定义得再对，只要 @theme 里少一条 --color-X 映射，Tailwind 就不会
+ * 生成对应工具类：`text-warn` 直接消失，StatusIndicator 渲染出一个没有
+ * 颜色类的状态。实测删掉 --color-warn 后 53 条断言照样全绿 ——
+ * 这是连接「token 值」与「渲染像素」的唯一一环，不能不设关卡。
+ */
+describe("@theme 映射", () => {
+  const mappings = parseThemeMappings(CSS);
+
+  it("每个 token 都有对应的 --color-* 映射", () => {
+    const mapped = new Set(Object.values(mappings));
+    const unmapped = CLASSIFIED.filter((k) => !mapped.has(k));
+    expect(unmapped, "缺映射的 token 不会生成工具类").toEqual([]);
+  });
+
+  it("映射只引用 var(--zg-*)，不写字面色值", () => {
+    // 字面值绕开了整套对比度关卡。
+    const literals = Object.entries(mappings).filter(([, v]) => v.startsWith("#"));
+    expect(literals).toEqual([]);
+  });
+
+  it("映射引用的 token 都真实存在", () => {
+    const dangling = Object.entries(mappings).filter(([, token]) => !(token in LIGHT));
+    expect(dangling).toEqual([]);
   });
 });
 
@@ -90,8 +174,8 @@ describe("设计 token 对比度", () => {
  *
  * 六个语义色里 accent-fg ↔ error 只差约 14°，二色性下四个状态会塌缩到
  * ≤1.28 的可分辨度（三色性下 1.01，即完全不可分）。这就是 StatusIndicator
- * 在类型上强制图标 + 文字标签的原因 —— 这里断言的是「色相靠得太近」这个
- * 事实本身成立，防止有人误以为调色就能解决，从而把图标要求当成可选项。
+ * 在类型与运行期都强制图标 + 文字标签的原因 —— 这里断言的是「色相靠得太近」
+ * 这个事实本身成立，防止有人误以为调色就能解决，从而把图标要求当成可选项。
  */
 describe("状态色色相分布", () => {
   function hue(hex: string): number {

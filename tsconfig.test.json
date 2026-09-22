@@ -1,0 +1,21 @@
+{
+  "extends": "./tsconfig.base.json",
+  "compilerOptions": {
+    "lib": ["ES2023", "DOM", "DOM.Iterable"],
+    // node：测试与脚本用 node:fs 等；vite/client：main.tsx 里 CSS 的副作用 import 需要它的声明。
+    "types": ["node", "vite/client"],
+    "jsx": "react-jsx",
+    "module": "ESNext",
+    "moduleResolution": "bundler",
+    "noEmit": true
+  },
+  /*
+   * 测试与构建配置先前**两个 project 都不覆盖**：
+   * server 只看 src/{server,core,store,shared}，admin 只看 src/admin + src/shared。
+   * 于是 tests/ 下所有文件（包括 tests/design/color.ts —— 整道无障碍关卡
+   * 赖以成立的 WCAG 算术）连同 vite/vitest 配置从未进过 typecheck。
+   * 实测：往 color.ts 里塞 `const x: number = "字符串"` 后 npm run typecheck 依然退出 0，
+   * 因为 Vitest 只转译不检查。validate 是每个阶段唯一的关卡，不能有盲区。
+   */
+  "include": ["tests/**/*.ts", "tests/**/*.tsx", "src/**/*.ts", "src/**/*.tsx", "*.config.ts"]
+}

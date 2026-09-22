@@ -13,7 +13,7 @@
     "build": "npm run build:server && npm run build:admin",
     "build:server": "tsc -p tsconfig.server.json",
     "build:admin": "vite build",
-    "typecheck": "tsc -p tsconfig.server.json --noEmit && tsc -p tsconfig.admin.json --noEmit",
+    "typecheck": "tsc -p tsconfig.server.json --noEmit && tsc -p tsconfig.admin.json --noEmit && tsc -p tsconfig.test.json",
     "test": "vitest run",
     "test:watch": "vitest",
     "validate": "npm run typecheck && npm run test && npm run build",

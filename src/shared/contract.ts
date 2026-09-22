@@ -11,6 +11,15 @@ export const HealthSchema = z.object({
   ok: z.boolean(),
   version: z.string(),
   uptimeSeconds: z.number().nonnegative(),
+  /**
+   * 应答进程的 pid。
+   *
+   * 供 service.mjs 验明进程身份:光凭状态文件里的数字不能证明那个进程
+   * 是我们的服务(PID 会被系统复用),而能应答这个端口的进程就是占着
+   * 这个端口的进程 —— 这是「该不该给它发 SIGTERM」的强证明。
+   * 管理面仅 loopback,pid 对同一用户不构成信息泄露。
+   */
+  pid: z.number().int().positive(),
 });
 export type Health = z.infer<typeof HealthSchema>;
 

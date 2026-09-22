@@ -1,8 +1,9 @@
 node_modules/
 dist/
 data/
-.env
-.env.*
+# .env* 覆盖 .env / .env.local / .envrc(direnv)——
+# 先前写成 `.env` + `.env.*` 会漏掉 .envrc。
+.env*
 *.log
 .DS_Store
 coverage/

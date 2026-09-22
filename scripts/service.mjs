@@ -2,20 +2,42 @@
 /**
  * 单命令启停。
  *
- * PID 文件判活用 `process.kill(pid, 0)` + 一次 /health 探测两道:
- * 单靠 PID 存活会被 PID 复用骗到(旧进程已退出,同号被别的进程占用),
- * 单靠 /health 又无法区分「我们启的实例」和「用户手工启的实例」。
+ * 核心问题是**进程身份**:光凭 PID 文件里的数字不能证明那个进程是我们的服务。
+ * PID 会被系统复用,于是「崩溃留下 PID 文件 → 系统把该 PID 分给别的进程 →
+ * 用户 npm stop」这条路径会杀掉一个无关进程。所以任何发信号之前都必须先验明身份,
+ * 两条独立途径:
+ *
+ *   1. /health 回报的 pid 与状态文件一致 —— 服务健康时的强证明
+ *      (能应答我们端口的进程,就是占着这个端口的进程)
+ *   2. /proc/<pid>/cmdline 含我们的入口路径 —— 服务卡死不应答时的兜底
+ *
+ * 两条都不成立就拒绝发信号,并说明原因。宁可让用户手工处理,
+ * 也不能替他杀一个不知道是什么的进程。
+ *
+ * 并发启动用排他锁文件(O_EXCL)防住:两个 npm start 同时跑,
+ * 没有锁的话会双双 spawn,一个抢到端口另一个 EADDRINUSE 退出,
+ * 而后写者会把**已死**的 PID 留在状态文件里,活着的那个成为孤儿进程。
  */
 
 import { spawn } from "node:child_process";
-import { mkdir, readFile, rm, writeFile } from "node:fs/promises";
-import { existsSync } from "node:fs";
+import { existsSync, openSync } from "node:fs";
+import { chmod, mkdir, open, readFile, rm, stat, writeFile } from "node:fs/promises";
 import { fileURLToPath } from "node:url";
-import { dirname, join } from "node:path";
+import { dirname, join, resolve } from "node:path";
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
-const DATA_DIR = join(ROOT, "data");
-const PID_FILE = join(DATA_DIR, "zen-gateway.pid");
+
+/**
+ * data/ 的位置可被 ZG_DATA_DIR 覆盖。
+ *
+ * 这不是纯为测试开的后门:本脚本先前完全没有测试,而审核在其中查出四个
+ * 真实缺陷(误杀无关进程、restart 谎报成功、误删活实例的状态文件、并发
+ * 双启动留下孤儿)。要让这些缺陷有常驻回归测试,就必须能把状态文件与端口
+ * 一起隔离,否则测试之间、以及测试与用户真实实例之间会互相踩。
+ */
+const DATA_DIR = process.env.ZG_DATA_DIR ? resolve(process.env.ZG_DATA_DIR) : join(ROOT, "data");
+const STATE_FILE = join(DATA_DIR, "zen-gateway.state.json");
+const LOCK_FILE = join(DATA_DIR, "zen-gateway.lock");
 const LOG_FILE = join(DATA_DIR, "zen-gateway.log");
 const ENTRY = join(ROOT, "dist", "server", "server", "index.js");
 
@@ -25,8 +47,76 @@ const BASE = `http://127.0.0.1:${PORT}`;
 const HEALTH_TIMEOUT_MS = 20_000;
 const HEALTH_INTERVAL_MS = 250;
 const STOP_TIMEOUT_MS = 10_000;
+const LOCK_STALE_MS = 60_000;
+
+/** data/ 与其中的文件都可能含凭证,一律只对属主开放。 */
+const FILE_MODE = 0o600;
+const DIR_MODE = 0o700;
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
+/* ------------------------------------------------------------------ *
+ * 基础设施
+ * ------------------------------------------------------------------ */
+
+/**
+ * mkdir 的 mode 只在**创建时**生效。已存在且权限松的 data/ 不会被纠正,
+ * 于是日志与状态文件所在目录可能是 755,其他本地用户能列出并读取。
+ */
+async function ensureDataDir() {
+  await mkdir(DATA_DIR, { recursive: true, mode: DIR_MODE });
+  try {
+    const st = await stat(DATA_DIR);
+    if ((st.mode & 0o777) !== DIR_MODE) await chmod(DATA_DIR, DIR_MODE);
+  } catch {
+    // 改不动不阻塞启动;doctor 会单独报这一项。
+  }
+}
+
+async function readState() {
+  try {
+    const raw = JSON.parse(await readFile(STATE_FILE, "utf8"));
+    const pid = Number.parseInt(raw?.pid, 10);
+    if (!Number.isInteger(pid) || pid <= 0) return null;
+    return { pid, port: Number(raw?.port) || PORT, startedAt: raw?.startedAt ?? null };
+  } catch {
+    return null;
+  }
+}
+
+async function writeState(pid) {
+  await writeFile(
+    STATE_FILE,
+    `${JSON.stringify({ pid, port: PORT, startedAt: new Date().toISOString() })}\n`,
+    { mode: FILE_MODE },
+  );
+}
+
+function pidAlive(pid) {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (err) {
+    // EPERM = 进程存在但不属于当前用户 —— 存活,但绝不是我们启的。
+    return err?.code === "EPERM";
+  }
+}
+
+/**
+ * 身份验证途径 2:进程的 cmdline 是否指向我们的入口。
+ *
+ * 服务卡死不应答 /health 时,这是唯一还能用的证明。没有它就只能在
+ * 「拒绝停止一个卡死的服务」和「盲杀一个 PID」之间二选一。
+ */
+async function pidLooksLikeOurs(pid) {
+  try {
+    const cmdline = await readFile(`/proc/${pid}/cmdline`, "utf8");
+    return cmdline.split("\0").some((arg) => arg === ENTRY);
+  } catch {
+    // 非 Linux 或无权读取 → 这条途径不可用,交给调用方判断。
+    return null;
+  }
+}
 
 async function probeHealth(timeoutMs = 1000) {
   try {
@@ -39,97 +129,215 @@ async function probeHealth(timeoutMs = 1000) {
   }
 }
 
-async function readPid() {
-  try {
-    const raw = await readFile(PID_FILE, "utf8");
-    const pid = Number.parseInt(raw.trim(), 10);
-    return Number.isInteger(pid) && pid > 0 ? pid : null;
-  } catch {
-    return null;
-  }
-}
-
-function pidAlive(pid) {
-  try {
-    process.kill(pid, 0);
-    return true;
-  } catch {
-    return false;
-  }
-}
-
-/** 返回 { pid, healthy } —— 并顺手清掉陈旧 PID 文件。 */
+/**
+ * 把「端口上在跑什么」「状态文件指向什么」「它是不是我们的」一次问清。
+ *
+ * 只读,不做任何清理 —— 先前的实现顺手删陈旧状态文件,结果在
+ * 「本服务存活但不健康」这条路径上删掉了**活着的**实例的状态文件,
+ * 之后 stop 与 status 都报「未在运行」,只能手工 ss/kill 收场。
+ */
 async function inspect() {
-  const pid = await readPid();
-  const alive = pid !== null && pidAlive(pid);
-  if (pid !== null && !alive) await rm(PID_FILE, { force: true });
+  const state = await readState();
   const health = await probeHealth();
-  return { pid: alive ? pid : null, healthy: health !== null, health };
+  const alive = state !== null && pidAlive(state.pid);
+
+  let identity = "unknown";
+  if (alive) {
+    if (health !== null) {
+      // 能应答我们端口的进程就是占着这个端口的进程。
+      identity = health.pid === state.pid ? "ours" : "foreign";
+    } else {
+      const byCmdline = await pidLooksLikeOurs(state.pid);
+      if (byCmdline === true) identity = "ours";
+      else if (byCmdline === false) identity = "foreign";
+    }
+  }
+
+  return {
+    state,
+    health,
+    alive,
+    identity,
+    healthy: health !== null,
+    /** 端口上有服务,但不是状态文件记录的那个(或根本没有状态文件)。 */
+    foreignOnPort: health !== null && (state === null || health.pid !== state.pid),
+  };
 }
+
+/** 排他锁:防止两个 start 同时 spawn。 */
+async function acquireLock() {
+  for (let attempt = 0; attempt < 2; attempt += 1) {
+    try {
+      const handle = await open(LOCK_FILE, "wx", FILE_MODE);
+      await handle.writeFile(`${process.pid}\n`, "utf8");
+      await handle.close();
+      return true;
+    } catch (err) {
+      if (err?.code !== "EEXIST") throw err;
+
+      // 锁可能是崩溃留下的。持有者已死、或锁文件过旧,才允许抢占。
+      let stale = false;
+      try {
+        const holder = Number.parseInt(await readFile(LOCK_FILE, "utf8"), 10);
+        const age = Date.now() - (await stat(LOCK_FILE)).mtimeMs;
+        stale = (Number.isInteger(holder) && !pidAlive(holder)) || age > LOCK_STALE_MS;
+      } catch {
+        stale = true;
+      }
+      if (!stale) return false;
+      await rm(LOCK_FILE, { force: true });
+    }
+  }
+  return false;
+}
+
+const releaseLock = () => rm(LOCK_FILE, { force: true });
+
+/* ------------------------------------------------------------------ *
+ * 命令
+ * ------------------------------------------------------------------ */
 
 async function start() {
-  const state = await inspect();
-  if (state.pid !== null && state.healthy) {
-    console.log(`已在运行(pid ${state.pid}) → ${BASE}`);
-    return 0;
-  }
-  if (state.healthy) {
-    console.error(`端口 ${PORT} 上已有别的 zen-gateway 实例在响应,但不是本脚本启动的。`);
-    console.error("先 npm stop 或手工结束该进程,避免两个实例抢同一份 data/。");
+  await ensureDataDir();
+
+  if (!(await acquireLock())) {
+    console.error("另一个 start 正在进行中(data/zen-gateway.lock 被持有)。");
     return 1;
   }
 
-  if (!existsSync(ENTRY)) {
-    console.error(`未找到 ${ENTRY},先 npm run build`);
-    return 1;
-  }
+  try {
+    const st = await inspect();
 
-  // data/ 存凭证与 runtime.db,只对当前用户开放。
-  await mkdir(DATA_DIR, { recursive: true, mode: 0o700 });
-
-  const { openSync } = await import("node:fs");
-  const log = openSync(LOG_FILE, "a");
-  const child = spawn(process.execPath, [ENTRY], {
-    cwd: ROOT,
-    detached: true,
-    stdio: ["ignore", log, log],
-    env: process.env,
-  });
-  child.unref();
-  await writeFile(PID_FILE, String(child.pid), { mode: 0o600 });
-
-  const deadline = Date.now() + HEALTH_TIMEOUT_MS;
-  while (Date.now() < deadline) {
-    const health = await probeHealth();
-    if (health) {
-      console.log(`zen-gateway 已启动(pid ${child.pid}) → ${BASE}`);
+    if (st.identity === "ours" && st.healthy) {
+      console.log(`已在运行(pid ${st.state.pid}) → ${BASE}`);
       return 0;
     }
-    if (!pidAlive(child.pid)) {
-      console.error(`进程已退出,日志见 ${LOG_FILE}`);
-      await rm(PID_FILE, { force: true });
+
+    if (st.foreignOnPort) {
+      console.error(`端口 ${PORT} 已被另一个进程占用(pid ${st.health.pid}),不是本脚本启动的。`);
+      console.error("先停掉它,否则两个实例会抢同一份 data/。");
       return 1;
     }
-    await sleep(HEALTH_INTERVAL_MS);
-  }
 
-  console.error(`启动后 ${HEALTH_TIMEOUT_MS / 1000}s 内未通过健康检查,日志见 ${LOG_FILE}`);
-  return 1;
+    /*
+     * 本服务的实例存活但不健康。
+     * 此时绝不能再 spawn:新进程会因 EADDRINUSE 立刻死掉,
+     * 而清理逻辑会把**原实例**的状态文件一起删掉,把它变成孤儿。
+     */
+    if (st.identity === "ours" && !st.healthy) {
+      console.error(`本服务实例(pid ${st.state.pid})存活但健康检查未通过。`);
+      console.error(`先 npm stop,或查看日志:${LOG_FILE}`);
+      return 1;
+    }
+
+    if (st.alive && st.identity === "unknown") {
+      console.error(`状态文件记录的 pid ${st.state.pid} 存活,但无法确认是本服务。`);
+      console.error(`请手工确认该进程后删除 ${STATE_FILE}`);
+      return 1;
+    }
+
+    /*
+     * 状态文件指向一个存活但**确认不是**本服务的进程(PID 已被系统复用)。
+     *
+     * 这里刻意继续启动,与 stop 的谨慎是**有意的不对称**:
+     * stop 要发 SIGTERM,是不可逆的破坏性操作,认不准身份就必须拒绝;
+     * start 只需要端口空闲,而那条陈旧记录对我们毫无价值 —— 拒绝启动
+     * 只会逼用户手工删文件,却挡不住任何危险。
+     *
+     * 端口若真被别人占着,上面的 foreignOnPort 分支已经拦下了。
+     */
+    if (st.alive && st.identity === "foreign") {
+      console.log(`状态文件中的 pid ${st.state.pid} 已属于其他进程,忽略该陈旧记录。`);
+    }
+
+    // 到这里:没有状态文件、记录的进程已死、或记录已被复用 —— 都可以安全启动。
+    if (st.state !== null && !st.alive) await rm(STATE_FILE, { force: true });
+
+    if (!existsSync(ENTRY)) {
+      console.error(`未找到构建产物,先 npm run build`);
+      return 1;
+    }
+
+    // 日志可能落进上游错误与堆栈,按凭证文件对待。
+    const log = openSync(LOG_FILE, "a", FILE_MODE);
+    try {
+      await chmod(LOG_FILE, FILE_MODE);
+    } catch {
+      /* 已存在且改不动时不阻塞 */
+    }
+
+    const child = spawn(process.execPath, [ENTRY], {
+      cwd: ROOT,
+      detached: true,
+      stdio: ["ignore", log, log],
+      env: process.env,
+    });
+    child.unref();
+    await writeState(child.pid);
+
+    const deadline = Date.now() + HEALTH_TIMEOUT_MS;
+    while (Date.now() < deadline) {
+      const health = await probeHealth();
+      if (health?.pid === child.pid) {
+        console.log(`zen-gateway 已启动(pid ${child.pid}) → ${BASE}`);
+        return 0;
+      }
+      if (!pidAlive(child.pid)) {
+        console.error(`进程已退出,日志见 ${LOG_FILE}`);
+        // 只删我们刚写的那份,不碰别人的。
+        const current = await readState();
+        if (current?.pid === child.pid) await rm(STATE_FILE, { force: true });
+        return 1;
+      }
+      await sleep(HEALTH_INTERVAL_MS);
+    }
+
+    console.error(`启动后 ${HEALTH_TIMEOUT_MS / 1000}s 内未通过健康检查,日志见 ${LOG_FILE}`);
+    return 1;
+  } finally {
+    await releaseLock();
+  }
 }
 
 async function stop() {
-  const pid = await readPid();
-  if (pid === null || !pidAlive(pid)) {
-    await rm(PID_FILE, { force: true });
+  const st = await inspect();
+
+  if (st.state === null) {
+    if (st.healthy) {
+      console.error(`端口 ${PORT} 上有实例(pid ${st.health.pid}),但不是本脚本启动的,未停止。`);
+      return 1;
+    }
     console.log("未在运行");
     return 0;
   }
 
+  if (!st.alive) {
+    await rm(STATE_FILE, { force: true });
+    if (st.healthy) {
+      console.error(`状态文件已过期;端口上另有实例(pid ${st.health.pid}),未停止。`);
+      return 1;
+    }
+    console.log("未在运行");
+    return 0;
+  }
+
+  /*
+   * 存活但两条身份途径都没给出肯定答案 —— 拒绝发信号。
+   * 这正是 PID 复用会踩的坑:状态文件里的数字可能已经属于别人的进程。
+   */
+  if (st.identity !== "ours") {
+    console.error(`无法确认 pid ${st.state.pid} 是本服务(端口无应答且 cmdline 不匹配),未发送信号。`);
+    console.error(`请手工确认:ps -p ${st.state.pid} -o pid,cmd`);
+    return 1;
+  }
+
+  const pid = st.state.pid;
   process.kill(pid, "SIGTERM");
+
   const deadline = Date.now() + STOP_TIMEOUT_MS;
   while (Date.now() < deadline) {
     if (!pidAlive(pid)) {
-      await rm(PID_FILE, { force: true });
+      await rm(STATE_FILE, { force: true });
       console.log(`已停止(pid ${pid})`);
       return 0;
     }
@@ -142,34 +350,66 @@ async function stop() {
 }
 
 async function status() {
-  const state = await inspect();
-  if (state.pid === null && !state.healthy) {
-    console.log("未在运行");
-    return 1;
-  }
-  if (state.healthy) {
-    const owner = state.pid === null ? "外部启动" : `pid ${state.pid}`;
-    console.log(`运行中(${owner}) · v${state.health.version} · 已运行 ${state.health.uptimeSeconds}s → ${BASE}`);
+  const st = await inspect();
+
+  if (st.identity === "ours" && st.healthy) {
+    console.log(
+      `运行中(pid ${st.state.pid}) · v${st.health.version} · 已运行 ${st.health.uptimeSeconds}s → ${BASE}`,
+    );
     return 0;
   }
-  console.log(`进程存活(pid ${state.pid})但健康检查未通过,日志见 ${LOG_FILE}`);
+  if (st.foreignOnPort) {
+    console.log(`端口 ${PORT} 上有非本脚本启动的实例(pid ${st.health.pid})`);
+    return 1;
+  }
+  if (st.alive) {
+    const who = st.identity === "ours" ? "本服务实例" : `pid ${st.state.pid}(身份未确认)`;
+    console.log(`${who}存活但健康检查未通过,日志见 ${LOG_FILE}`);
+    return 1;
+  }
+  console.log("未在运行");
   return 1;
 }
 
-const cmd = process.argv[2] ?? "status";
-const actions = {
-  start,
-  stop,
-  status,
-  restart: async () => {
-    await stop();
-    return start();
-  },
-};
+async function restart() {
+  const code = await stop();
+  /*
+   * stop 失败就不能继续。
+   *
+   * 先前实现丢弃了 stop 的返回码:遇到一个不响应 SIGTERM 的进程时,
+   * stop 正确地失败了,而随后的 start 看到「存活且健康」便打印
+   * 「已在运行」并返回 0 —— 用户以为部署了新版本,实际跑的还是旧进程。
+   */
+  if (code !== 0) {
+    console.error("stop 未成功,已中止 restart(避免误以为新版本已生效)。");
+    return code;
+  }
+  return start();
+}
 
-const action = actions[cmd];
+/* ------------------------------------------------------------------ *
+ * 分发
+ * ------------------------------------------------------------------ */
+
+/*
+ * 用 Map 而不是对象字面量。
+ *
+ * 对象字面量会让 actions[cmd] 命中 Object.prototype 上的成员:
+ * `service.mjs hasOwnProperty` 能越过「未知命令」的检查,
+ * 调用继承来的方法后抛出未捕获 TypeError,堆栈里带着安装的绝对路径,
+ * 且退出码是 1 而不是「用法错误」的 2。
+ */
+const ACTIONS = new Map([
+  ["start", start],
+  ["stop", stop],
+  ["status", status],
+  ["restart", restart],
+]);
+
+const cmd = process.argv[2] ?? "status";
+const action = ACTIONS.get(cmd);
 if (!action) {
-  console.error(`未知命令:${cmd}(可用:${Object.keys(actions).join(" / ")})`);
+  console.error(`未知命令:${cmd}(可用:${[...ACTIONS.keys()].join(" / ")})`);
   process.exit(2);
 }
 process.exit(await action());

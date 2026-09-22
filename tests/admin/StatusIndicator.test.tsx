@@ -28,12 +28,36 @@ describe("StatusIndicator", () => {
 
   /*
    * 去掉 icon 或 label 是 TS 编译错误,运行期测不到。
-   * 这条测试守的是另一半:即使有人绕过类型(as any / 从 JS 调用),
-   * 空标签也不能静默渲染成一个只有颜色的状态。
+   * 这些测试守的是另一半:有人绕过类型(as any / 从 JS 调用)时,
+   * 空值形态不能静默退化成一个只有颜色的状态。
    */
   it("空标签直接抛错,不静默退化为只有颜色", () => {
     expect(() => render(<StatusIndicator tone="info" icon="i" label="   " />)).toThrow(
       /label 不能为空/,
     );
+  });
+
+  /*
+   * `icon: ReactNode` 曾经接受 null/undefined/false/"",四者都能通过
+   * typecheck 并渲染出一个空的 aria-hidden span —— 第二条信息通道被
+   * 静默丢掉,而这正是本组件唯一的存在理由。类型已改为排除这些形态,
+   * 这里守运行期。
+   */
+  it.each([
+    ["null", null],
+    ["undefined", undefined],
+    ["false", false],
+    ["空字符串", ""],
+    ["空白字符串", "  "],
+    ["空数组", []],
+  ])("空图标(%s)直接抛错", (_label, icon) => {
+    expect(() =>
+      // 模拟绕过类型的调用方。
+      render(<StatusIndicator tone="error" icon={icon as never} label="鉴权失败" />),
+    ).toThrow(/icon 不能为空/);
+  });
+
+  it("合法图标正常渲染,不误报", () => {
+    expect(() => render(<StatusIndicator tone="success" icon="✓" label="就绪" />)).not.toThrow();
   });
 });

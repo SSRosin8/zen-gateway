@@ -45,7 +45,7 @@ describe("App 首次启动", () => {
       vi.fn(() =>
         Promise.resolve({
           ok: true,
-          json: () => Promise.resolve({ ok: true, version: "0.1.0", uptimeSeconds: 12 }),
+          json: () => Promise.resolve({ ok: true, version: "0.1.0", uptimeSeconds: 12, pid: 4242 }),
         }),
       ),
     );
@@ -54,5 +54,25 @@ describe("App 首次启动", () => {
     await waitFor(() => {
       expect(screen.getByText("运行中 · v0.1.0")).toBeInTheDocument();
     });
+  });
+
+  it("HTTP 500 带 JSON 体时显示未连接,不当成正常响应", async () => {
+    // 不检查 r.ok 的话,错误响应体会被送去 HealthSchema.parse。
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(() =>
+        Promise.resolve({
+          ok: false,
+          status: 500,
+          json: () => Promise.resolve({ ok: true, version: "伪造", uptimeSeconds: 0, pid: 1 }),
+        }),
+      ),
+    );
+    render(<App />);
+
+    await waitFor(() => {
+      expect(screen.getByText("未连接到网关服务")).toBeInTheDocument();
+    });
+    expect(screen.queryByText(/伪造/)).not.toBeInTheDocument();
   });
 });

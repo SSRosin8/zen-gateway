@@ -32,7 +32,11 @@ export function App() {
   useEffect(() => {
     const ctrl = new AbortController();
     fetch("/health", { signal: ctrl.signal })
-      .then((r) => r.json())
+      .then((r) => {
+        // 不检查 ok 的话,一个带 JSON 体的 500 会被当成正常响应送去 parse。
+        if (!r.ok) throw new Error(`健康检查返回 ${r.status}`);
+        return r.json();
+      })
       .then((raw) => setHealth(HealthSchema.parse(raw)))
       .catch((e: unknown) => {
         if (!ctrl.signal.aborted) setError(e instanceof Error ? e.message : String(e));

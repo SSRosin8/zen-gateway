@@ -13,6 +13,8 @@ export function createApp(): Hono {
       ok: true,
       version: VERSION,
       uptimeSeconds: Math.floor((Date.now() - STARTED_AT) / 1000),
+      // service.mjs 靠这个验明进程身份,决定能否安全发送 SIGTERM。
+      pid: process.pid,
     });
     return c.json(body);
   });
