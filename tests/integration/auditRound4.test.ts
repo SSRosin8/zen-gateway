@@ -44,6 +44,8 @@ function surf(id: ProtocolId, paths: string[]): ProtocolSurface {
     wantsStream: readStreamField,
     sessionKeyFrom: () => undefined,
     extraUpstreamHeaders: () => ({}),
+    // 本文件测鉴权覆盖与路由装配,不测用量。
+    parseUsage: () => null,
   };
 }
 

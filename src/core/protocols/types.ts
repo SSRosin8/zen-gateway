@@ -1,4 +1,5 @@
 import type { ProtocolId } from "../../shared/schema.ts";
+import type { TokenUsage } from "../models/usage.ts";
 
 /**
  * 协议面接口 —— 新增一个客户端协议只需实现它并注册。
@@ -55,6 +56,20 @@ export type ProtocolSurface = {
    * 统一处理,这里只放**面特有**的,例如 Anthropic 面的 `anthropic-version`。
    */
   extraUpstreamHeaders(ctx: UpstreamHeaderCtx): Record<string, string>;
+  /**
+   * 从上游响应载荷里取 token 用量。
+   *
+   * 入参是**一个已解析的 JSON 值** —— 非流式响应的整个体,或流式响应的
+   * 单个 SSE 事件。两者都传给同一个方法,因为各面的 usage 信封在两种形态下
+   * 只差一层嵌套,分成两个方法会让每个面多一处可以接错的地方。
+   *
+   * 取不到返回 null。**「没报用量」与「用了 0 个 token」必须区分开** ——
+   * 返回全零对象会让 Phase 7 的 usage 覆盖率指标永远是 100%,
+   * 而那个指标存在的意义正是发现没覆盖到的面。
+   *
+   * 字段名的归一化在 `core/models/usage.ts`,这里只负责走到 usage 对象。
+   */
+  parseUsage(payload: unknown): TokenUsage | null;
 };
 
 export type UpstreamHeaderCtx = {

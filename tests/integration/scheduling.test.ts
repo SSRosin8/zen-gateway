@@ -655,6 +655,8 @@ describe("体内会话指针(Phase 6 的 responses 面形态)", () => {
       return typeof value === "string" && value !== "" ? value : undefined;
     },
     extraUpstreamHeaders: () => ({}),
+    // 本文件测调度与会话亲和,不测用量。
+    parseUsage: () => null,
   };
 
   function appWith(cfg: Config, sched: Scheduler) {

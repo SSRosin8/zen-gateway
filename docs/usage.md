@@ -71,7 +71,9 @@ opencode run --model opencode/big-pickle "hello"
     "freeSuffix": "-free",
     "extraFreeIds": ["big-pickle"],   // 无后缀但零费率的模型
     "defaultSurfaces": ["chat", "responses"],
-    "surfaceOverrides": {}
+    "surfaceOverrides": {},
+    "catalogTtlMs": 1800000,          // 在架目录的**新鲜期**（不是硬过期）
+    "enforceCatalog": true            // 免费判定是否与在架目录求交集
   },
   "workers": [],
   "proxies": [],
@@ -109,6 +111,53 @@ opencode run --model opencode/big-pickle "hello"
   要避免的事（客户端回放的加密推理块会被上游拒）。
 - **会话键超过 4096 字符时不参与亲和**（退化成策略排序），而不是被截断。
   截断发生在哈希之前等于摘要被截断 —— 前缀相同的两个会话会共用一个绑定。
+- **`catalogTtlMs` 是新鲜期，不是硬过期**：过期只触发一次后台刷新，拉不到就
+  继续用旧的，而且旧目录**永不因为太旧而失效**。一份三天前的目录远好于
+  "网关拒绝一切"。默认 30 分钟 —— 目录以天为单位变化，更短没意义。
+- **`enforceCatalog` 关掉的是交集，不是免费判定**：后缀与名单照常生效。
+  留这个开关是因为交集依赖能联网拉到目录，而离线环境或本地假上游拉不到 ——
+  那种情况下你应当能明确关掉它，而不是困在"模型全说已下架"里。
+
+### 免费判定：（后缀 ∪ 名单）∩ 在架目录
+
+三条依据缺一不可，而**交集是已下架模型自动失效的唯一机制**：
+
+```bash
+# 已下架的 glm-5-free 后缀命中，但不在上游在架目录里 → 403，且**不打上游**
+# → "模型 glm-5-free 已不在上游在架目录中(它符合免费约定,但上游已下架)"
+```
+
+少了交集它会被放行，再由上游返回 400 `Model is unavailable.` —— 你看到的是
+上游措辞，指不到"把这个 id 从 `extraFreeIds` 里删掉"。
+
+**有一个不对称必须知道**：交集能自动剔除**下架**的，但**新出现的无后缀免费
+模型无法自动发现** —— 上游的 `/models` 给在架性却不给价格。所以新的零费率
+无后缀模型只能手工补进 `extraFreeIds`（`big-pickle` 就是这么来的）。
+**点一下刷新不会自动拿到全部免费模型。**
+
+`/v1/models` 的响应体里带一个 `zen_gateway_catalog` 诊断字段（网关自己加的，
+不属于 OpenAI 契约），可以直接看目录状态：
+
+```bash
+curl -s -H "authorization: Bearer <relayToken>" http://127.0.0.1:9877/v1/models \
+  | node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>console.log(JSON.parse(s).zen_gateway_catalog))'
+# { slot: 'keyed', total: 41, free: 9, fetched_at: 1790166659242, fresh: true }
+```
+
+`total` 是上游在架总数，`free` 是过滤后你能用的数量，`fresh` 是这份目录是否还在
+新鲜期内。**连续多次查询 `fetched_at` 不变**就说明缓存在工作（没有每次都打上游）。
+
+### 三个协议面
+
+| 客户端路径 | 面 | 说明 |
+|---|---|---|
+| `/v1/chat/completions`、`/chat/completions` | `chat` | OpenCode 默认用这个 |
+| `/v1/responses`、`/responses` | `responses` | 体内 `previous_response_id` 作会话指针 |
+| `/v1/messages`、`/messages` | `messages` | Anthropic Messages 形状 |
+
+三个面都收带 `/v1` 与不带的两种路径（客户端 `baseURL` 两种写法都常见），
+且**都经同一道鉴权与免费判定**。`models.defaultSurfaces` 与 `surfaceOverrides`
+记录"哪个模型支持哪些面"，供后台展示用；放行判定只看免费集，不看这两张表。
 
 ### 各类失败冷却多久
 
@@ -217,11 +266,14 @@ curl -s http://127.0.0.1:9090/connections \
 | 症状 | 可能原因 |
 |---|---|
 | 401 | Relay Token 不对，或客户端没带 `Authorization` |
-| 403 `model_not_allowed` | 网关的免费闸门拦的，模型不在免费集 |
+| 403 `model_not_allowed`，消息说"不在免费集内" | 网关的免费闸门拦的：后缀不命中且不在 `extraFreeIds` 里 |
+| 403 `model_not_allowed`，消息说"已不在上游在架目录中" | 交集拦的：它符合免费约定但上游已下架，把它从 `extraFreeIds` 里删掉 |
 | 403 `FreeTierError` | **上游**拦的，与 key 无关（闸门查请求形态） |
-| 400 `Model is unavailable.` | 模型已下架，或你这种身份看不到它（目录按「带 key／免 key」区分） |
+| 400 `Model is unavailable.` | 模型已下架而本地目录还没刷新，或这个账号看不到它（整份目录按账号不同，见 `upstream-quirks.md` §7） |
+| 500 且用的是 `/v1/messages` | 上游那个面从 `x-api-key` 读凭证。本网关已镜像，若仍出现说明镜像失效了 —— 见 `upstream-quirks.md` §8 |
 | 503 `egress_unavailable` | 本机出口配置问题：代理停用、Clash 没开、缺 selector 分组 |
 | 502 | 上游不可达（传输层失败） |
+| 502 "无法获取上游模型目录" | 从没成功拉到过目录（上游或出口不通）。**不是**空模型列表 —— 那两件事刻意分开报 |
 | 启动即退出 | 配置校验失败或端口被占，看 `data/zen-gateway.log` |
 
 **确认流量真的经过网关**：停掉网关，同一条客户端命令必须失败
@@ -258,9 +310,28 @@ curl -s http://127.0.0.1:9090/connections \
 见 [`upstream-quirks.md`](upstream-quirks.md)，每条带日期、触发条件与原始响应。
 `npm run discover:upstream` 可随时重验，上游行为一变就退出 1。
 
-最需要知道的两条：
+最需要知道的三条：
 
 - **免费模型对手搓 curl 返回 403，但真实 OpenCode 客户端经本网关可用** ——
   闸门查的是请求**形态**，而原样透传不改变形态。
+- **`/messages` 面从 `x-api-key` 读凭证，只给 Bearer 会 500**（§8）。网关已经
+  自动镜像，你不需要做什么 —— 但值得知道，因为那个 500 会被归类成"上游错误"
+  并**归咎于 Worker**，于是少了这个头就会把整池 Worker 打进冷却。
 - **401 的 content-type 是 `text/plain` 但体是 JSON**（403/400 是
   `application/json`）。网关原样透传不纠错，否则这个上游 bug 会被藏起来。
+
+---
+
+## 日志里能看到什么
+
+`data/zen-gateway.log`（0600）。除了启动行与失败原因，转发成功时会记一行用量：
+
+```
+用量 chat/big-pickle: in=10929 out=21 total=10950 cacheRead=3392
+```
+
+格式是 `面/模型`，随后是 token 数。为 0 的缓存字段不打印。
+**只有数字，不含任何响应内容** —— 对话正文绝不进日志。
+
+上游没报用量时**不打这一行**（免费模型未必报），所以看不到它不代表出错。
+写进数据库并按模型／Worker 聚合是 Phase 7 的事，眼下只有这行日志。

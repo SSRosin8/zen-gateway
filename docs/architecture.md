@@ -12,14 +12,17 @@
 ```
 src/
 ├── shared/      # 三端唯一契约 —— 必须浏览器可移植（admin 会打包它）
-│   ├── schema.ts    zod schema + 推导类型 + 引用完整性（438 行，最大的单文件）
+│   ├── schema.ts    zod schema + 推导类型 + 引用完整性（468 行）
 │   ├── contract.ts  /health 与 poolHealth 的契约
 │   ├── redact.ts    脱敏的单点定义
 │   └── ip.ts        IP 校验（WHATWG URL 实现，不用 node:net —— 见下）
 ├── core/
 │   ├── failures.ts      失败分类：仅依据 status + headers，绝不看 body
-│   ├── protocols/       协议面注册表（types / registry / chat）
-│   ├── models/free.ts   免费判定（读配置规则）
+│   ├── protocols/       协议面注册表（types / registry / chat / responses / messages）
+│   ├── models/
+│   │   ├── free.ts      免费判定：(后缀 ∪ 名单) ∩ 在架目录
+│   │   ├── catalog.ts   在架目录缓存（两个身份槽位，校验过的最后成功缓存）
+│   │   └── usage.ts     token 用量：字段归一化 + 跨 SSE 事件合并
 │   ├── routing/         调度状态机（Phase 5）
 │   │   ├── workerPool.ts  Worker 集合与就绪判定（唯一持可变状态的一块）
 │   │   ├── cooldown.ts    分级冷却（纯函数，注入时钟与抖动）
@@ -169,13 +172,68 @@ schema：实测 +57ms，而 `service.mjs status` 全程只有 51ms。
 路由由 `registry.paths()` **动态挂载**，路由层没有任何面 id 的字面量；
 鉴权守卫的挂载点也从同一个注册表推导，所以加一个面自动多一道守卫。
 
-当前只注册了 `chat`（`/v1/chat/completions` + `/chat/completions`）。
-`responses` 与 `messages` 在 Phase 6，那也是这个抽象的验收：
-新增面若还需要改路由或调度，抽象即失败。
+**Phase 6 兑现了这个验收条件**：加 `responses` 与 `messages` 时，`src/server/`
+下唯一的改动是 `buildRegistry()` 里那两行 `.register(...)`。路由装配、鉴权、
+调度、重试、透传都一行未改。三个面共六条路径（各含无前缀别名）。
+
+> 对比第四轮审核：那时守卫是手写的三条路径字面量，按当时注释承诺的 Phase 6
+> 形态注册两个面之后，`/responses` 与 `/messages` 两条无前缀别名**完全绕过鉴权**。
+> 现在这条从"假想"变成了对真实装配的回归守卫（`tests/integration/phase6.test.ts`）。
 
 接口**全部是只读判定**，在解析副本上做。规划里曾设计 `transformRequest`
 改写请求体，实际去掉了：三个面在 Zen 各有原生端点（同形状换路径），
 而改写需要 JSON 往返，与"原样透传"冲突。
+
+三个面各自带来的新东西不在装配层：
+
+| 面 | 独有的事 |
+|---|---|
+| `chat` | 无体内会话标识，亲和只能靠 `x-opencode-session` |
+| `responses` | `previous_response_id` 是**体内**会话指针，优先于头 |
+| `messages` | 必须把 key 镜像到 `x-api-key`（否则上游 500），并发 `anthropic-version` |
+
+`messages` 那条是本阶段实测出来的，且失败方式最糟：只给 Bearer 时上游返回 500，
+归 `upstream_error` → 可重试且**归咎 Worker** → 客户端一用 Messages 面就把
+整池 Worker 打进冷却。详见 `upstream-quirks.md` §8。
+
+`parseUsage` 在 Phase 6 一并落地（规划列了它，而先前全仓不存在）。它的**生产
+调用点**在 `relay.ts` 的流末尾结算钩子里，与失效推理扫描共用同一个 `onText`。
+刻意不等到 Phase 7 才接：一个只有接口与实现、没有调用点的成员，就是第四轮那个
+`streaming` 字段的形态 —— 声明了却不设防。
+
+---
+
+### 免费判定与在架目录
+
+完整判定是 **（后缀命中 ∪ `extraFreeIds`）∩ 在架目录**。交集是已下架 id
+自动失效的**唯一**机制：`glm-5-free` 后缀命中，少了交集就会被放行，
+再由上游返回 400 `Model is unavailable.` —— 用户看到的是上游措辞，
+指不到"这个 id 已经下架了"。
+
+**不对称要说清**：交集能自动剔除下架的，但**新出现的无后缀免费模型无法自动
+发现** —— `/zen/v1/models` 给在架性却**不给价格**。所以新的零费率无后缀模型
+只能人工补进 `extraFreeIds`（`big-pickle` 就是这么来的）。
+
+目录缓存（`core/models/catalog.ts`）三条性质：
+
+- **校验过的最后成功缓存**：空 `data`、缺 `data`、条目数离谱的响应**一律不采纳**。
+  采纳一份空目录会让免费集清空 → 网关拒绝一切，比拉取失败更糟。
+- **旧的永不硬过期**：拉不到就继续用旧的。一份三天前的目录远好于"网关不可用"。
+- **两个身份槽位**（带 key／免 key），不是 per-Worker 的 N 个。依据见
+  `upstream-quirks.md` §7 —— 注意那条结论被修正过两次，现在站得住的版本比
+  "目录按身份区分"**更窄**：整份目录确实按账号不同，但**免费子集三账号一致**。
+
+**目录缺失时放行而不是拒绝**，与"默认拒绝"不冲突：默认拒绝针对"判定不出免费"
+（放行代价是真金白银），而目录缺失时免费依据仍成立，缺的只是"是否还在架"，
+而那唯一的后果是上游拒绝，不产生费用。反过来做的话，一次上游抖动就会让网关
+拒绝一切。
+
+刷新时机：**启动预热** + `/v1/models` 被访问时。转发路径**只读缓存，不发请求**
+（唯一例外是判出"已下架"时刷一次 —— 那是过期目录唯一能造成实际伤害的情形）。
+
+> 我第一版在每个转发请求上刷目录，结果一次客户端请求变成两次上游请求，
+> 且拉取失败不填缓存 → 下个请求又发 → 稳态永久 ×2。13 条既有集成测试
+> 一起报红查出来的，纯单测看不见"一次请求发了几次上游"。
 
 ---
 
@@ -273,52 +331,45 @@ schema：实测 +57ms，而 `service.mjs status` 全程只有 51ms。
 | 3 | 转发骨架 + 协议注册表 + 鉴权 + 错误映射 | ✅ |
 | 4 | 上游协议发现（范围按实测缩减，见 `upstream-quirks.md`） | ✅ |
 | 5 | 调度状态机：`workerPool` / `cooldown` / `affinity` / `select` / `scheduler` | ✅ |
-| 6 | 其余协议面 + 完整免费注册表（与在架目录求交集） | 待做 |
+| 6 | 其余协议面（`responses`/`messages`）+ 免费注册表与在架目录求交集 + `parseUsage` | ✅ |
 | 7 | 统计 SQL 聚合 + 亲和持久化 | 待做 |
 | 8 | `setup.mjs`（一键配置）、`doctor.mjs`（分层诊断） | 待做 |
 | 9 | 管理后台 6 页 + 首启向导 + 批量探测长任务状态机 | 待做 |
 | 10 | 订阅拉取与多格式解析、多 Clash 内核择优 | 待做 |
 | 11 | 精简 `AGENTS.md`、4 个 skill、`docs/` 补全 | 部分 |
 
-**1094 测试全绿**（35 个文件：unit 25 / integration 7 / design 1 / admin 2）。
-源码 6752 行 / 测试 10819 行。经四轮独立子 agent 审核，共修复 44 项确认缺陷。
+**1266 测试全绿**（39 个文件：unit 28 / integration 8 / design 1 / admin 2）。
+源码 8189 行 / 测试 13445 行。经五轮独立子 agent 审核。
 
 ### 当前已知缺口
 
-1. **免费判定还没有与在架目录求交集**。完整判定是「（后缀命中 ∪ `extraFreeIds`）∩ 在架目录」，
-   缺交集会**放得偏宽**：已下架的 `xxx-free` 会被放行，然后由上游返回
-   400 `Model is unavailable.`（→ Phase 6）
-2. **`/v1/models` 每次请求都打一次上游**，没有启动预热与最后成功缓存 —— 上游抖动时目录会跟着消失（→ Phase 6）
-3. **目录按「带 key／免 key」两种身份区分，不是 per-Worker**。先前这条写的是
-   「目录是 per-Worker 的，所以缓存键必须含 Worker 身份」，而它给的证据
-   （带 key 与免 key 看到不同目录）**只能证明这两种身份不同**。
-   `upstream-quirks.md` §7 的实测进一步查明：**两个不同账号看到的差异项完全相同** ——
-   所以那不是账号个体差异。Phase 6 的缓存因此只需两个槽位，而不是 N 个
-   （→ Phase 6）
-4. **配置热更新只有形状没有入口**：`configOf()` 已做成函数，但没有改配置的 API（→ Phase 9）
-5. **亲和只在内存里**：`session_affinity` / `blob_affinity` 两张表结构已就绪，但服务端
+1. **配置热更新只有形状没有入口**：`configOf()` 已做成函数，但没有改配置的 API（→ Phase 9）
+2. **亲和只在内存里**：`session_affinity` / `blob_affinity` 两张表结构已就绪，但服务端
    还没打开 `runtime.db`。重启会丢绑定 —— 后果是每条进行中的会话下一轮重挑一次
    Worker，不是数据损坏（→ Phase 7）
-6. **探测目标与转发目标不同域**（见上文出口隔离节）
-7. ~~**`routing.strategy` 无实际效果**~~ —— **这条先前是错的，已删除**。
-   我曾断言「匿名 Worker 需要空 apiKey，所以可排序的类别只剩一种」，
-   而 `WorkerSchema` 的 `refine` 是**单向**的：它只要求 authenticated 必须有 key，
-   对 anonymous **不作任何约束**。所以 `{kind:"anonymous", apiKey:"..."}` 合法且可用
-   （`isUsable` 只看 key 不看 kind），三个策略取值产出三种不同顺序，而
-   `anonymous_first` 正是 schema 默认值 —— 默认配置下就生效。
-   空的是**实践**输入集（关闭免 key 通道后没人有理由这么配），不是**合法**输入集。
-8. **调度状态没有查看入口**：`Scheduler.snapshot()` 已实现（每个 Worker 的就绪态、
-   剩余冷却、连续失败数、最近失败类别，且不含凭证），但 `npm run status` 只报进程
-   信息，也还没有管理 API 读它。眼下只能从响应头 `x-zen-gateway-route` 与
-   `x-zen-gateway-worker` 推断（→ Phase 8 的 `doctor.mjs` / Phase 9 的管理 API）
-9. **`ProtocolSurface` 缺 `parseUsage`**：规划的接口列了这个成员（从上游响应里取
-   token 用量），而全仓不存在。Phase 7 的门槛明确依赖它（per-model token、
-   缓存命中、usage 覆盖率），且 Phase 6 每新增一个面都要实现它 —— 越晚加成本越高
-   （→ Phase 6/7）
-10. **`assertEveryRouteGuarded` 只检查"有没有守卫"，不检查"是哪个"**：一条只挂
+3. **用量只进日志，没有聚合**：`parseUsage` 已接在流末尾结算钩子上（三个面都实现了），
+   但消费方式只有一行日志。写进 `runtime.db` 并按 model／Worker 聚合是 Phase 7（→ Phase 7）
+4. **探测目标与转发目标不同域**（见上文出口隔离节）
+5. **调度与目录状态没有查看入口**：`Scheduler.snapshot()` 与 `ModelCatalog.status()`
+   都已实现且不含凭证，但 `npm run status` 只报进程信息，也还没有管理 API 读它们。
+   眼下只能从响应头 `x-zen-gateway-route`／`x-zen-gateway-worker` 与 `/v1/models`
+   响应体里的 `zen_gateway_catalog` 字段推断（→ Phase 8 的 `doctor.mjs` / Phase 9 的管理 API）
+6. **目录的免费子集一致性没有本地守卫，也守不住**：两个槽位的设计依赖"免费子集
+   三账号一致"（`upstream-quirks.md` §7），而那是**上游的**性质，单测无论怎么写都只是
+   在断言自造的 fixture。复核办法是拿多个账号各拉一次目录比对免费子集。
+   本地能守的是它不成立时的处置（多一个 → 上游 400 自限；少一个 → 触发刷新），那已有用例
+7. **`assertEveryRouteGuarded` 只检查"有没有守卫"，不检查"是哪个"**：一条只挂
    `relayAuth` 而没挂 `loopbackOnly` 的管理路由能通过断言。当前无活缺陷
    （管理面只有 `/api/ping`），但 Phase 9 加管理 API 时这正是第四轮那个缺陷的变体
    （→ Phase 9）
-11. **管理面的 body 上限尚无处可设**：约束「管理 JSON body 有上限而转发透传无界」
+8. **管理面的 body 上限尚无处可设**：约束「管理 JSON body 有上限而转发透传无界」
    目前是**空洞成立**的 —— 管理侧没有任何读 body 的代码。Phase 9 加管理 POST 时
    必须同时加，否则这条约束会静默变成"不成立"（→ Phase 9）
+9. **`models.defaultSurfaces` / `surfaceOverrides` 声明了但不设防**：`surfacesFor()`
+   已实现且有单测，但**全仓没有生产调用点** —— 这与第四轮那个 `streaming` 字段
+   是同一个形态（声明了却不读）。
+
+   **但不能顺手"补上"**：默认值是 `["chat", "responses"]`，若按它放行，
+   默认配置下**所有**模型的 `/v1/messages` 请求都会被拒 —— 而那个面刚刚验证可用。
+   所以这里要先定清楚它的语义（是"放行闸门"还是"后台展示用的提示"），
+   再决定默认值。眼下当作后备展示数据，不参与判定（→ Phase 9 的 Models 页）

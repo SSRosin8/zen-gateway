@@ -3,6 +3,7 @@ import { createApp } from "./app.ts";
 import { loadConfig } from "../store/config.ts";
 import { resolvePort } from "../store/port.ts";
 import { EgressService } from "../core/proxy/egress.ts";
+import { ModelCatalog, catalogIdentityOf } from "../core/models/catalog.ts";
 import { ConfigError } from "../store/config.ts";
 
 /**
@@ -51,9 +52,12 @@ async function main(): Promise<void> {
    * Phase 3 还没有改配置的入口,所以这里返回的始终是启动时那份;
    * 但把形状定成函数,Phase 9 加管理 API 时就不必回头改所有调用点。
    */
+  const catalog = new ModelCatalog({ log: (message) => console.error(message) });
+
   const app = createApp({
     configOf: () => config,
     egress,
+    catalog,
     log: (message) => console.error(message),
   });
 
@@ -96,6 +100,24 @@ async function main(): Promise<void> {
     if (created) {
       console.log("已生成默认配置与 Relay Token;运行 npm run status 查看。");
     }
+
+    /*
+     * 目录预热 —— 在**开始监听之后**,且刻意不 await。
+     *
+     * 顺序要紧:预热要发网络请求,而它放在 `listen` 之前会把启动时间挂在
+     * 上游的响应速度上。`service.mjs` 的健康等待有超时,于是一次上游慢响应
+     * 会被报成「启动失败」,而服务其实完全正常 —— 那正是 Phase 3 端口脱节
+     * 时踩过的同一种误报。
+     *
+     * 失败无所谓:`refreshIfStale` 自己吞异常并记失败时刻,而
+     * `/v1/models` 被访问时会再试一次(`ensure`)。预热只是让**第一个**
+     * 转发请求就能享受交集,而不是等到有人先去拉一次模型列表。
+     */
+    catalog.refreshIfStale(
+      catalogIdentityOf(config),
+      config,
+      (cfg) => egress.upstreamDeps(cfg),
+    );
   });
 
   server.on("error", (err: NodeJS.ErrnoException) => {

@@ -3,6 +3,8 @@ import type { Config } from "../../shared/schema.ts";
 import type { ProtocolRegistry } from "../../core/protocols/registry.ts";
 import type { ProtocolSurface } from "../../core/protocols/types.ts";
 import { judgeFree } from "../../core/models/free.ts";
+import { ModelCatalog, catalogIdentityOf } from "../../core/models/catalog.ts";
+import { createUsageCollector, describeUsage } from "../../core/models/usage.ts";
 import { buildUpstreamHeaders } from "../../core/upstream/headers.ts";
 import { upstreamUrl } from "../../core/upstream/url.ts";
 import type { UpstreamDeps } from "../../core/upstream/fetch.ts";
@@ -58,6 +60,13 @@ export type RelayDeps = {
    * 于是「这个 Worker 在冷却」取决于请求碰巧走到哪一份。
    */
   readonly scheduler: Scheduler;
+  /**
+   * 在架目录缓存。与 `/v1/models` **共用同一个** —— 见 `app.ts`。
+   *
+   * 转发路径只读已缓存的那份,**绝不 await 一次目录拉取**:那会给每个转发
+   * 请求加上第二个网络依赖,而目录只是个放行判定的辅助。
+   */
+  readonly catalog: ModelCatalog;
   /** 注入以便测试。 */
   readonly newId?: () => string;
   /** 注入以便测试断言确切的冷却与 TTL 边界。 */
@@ -133,7 +142,43 @@ async function handleRelay(
   }
 
   /* ---- 3. 免费判定(在请求出去之前) ---- */
-  const verdict = judgeFree(model, config.models);
+
+  /*
+   * 目录交集用 `"keyed"` 槽位,而且**只读缓存,绝不发请求**。
+   *
+   * 槽位是确定的:转发候选链里每个 Worker 都有 key(`isUsable` 只看 key),
+   * 所以这条路径的身份恒为「带 key」。
+   *
+   * ## 一个槽位的目录用于**所有** Worker,依据是免费子集一致
+   *
+   * 本阶段实测(三个付费账号,三轮稳定):整份目录**按账号不同**
+   * (两个账号 41 个模型、一个 79 个),但**免费子集三个账号完全一致**
+   * (各 9 个,逐 id 相同)。交集要的恰好是那个一致的子集,所以这里不需要
+   * 知道最终路由到哪个 Worker(那在第 5 步才定)。
+   *
+   * 我先前在这里写的是"目录按带 key／免 key 区分,不按账号个体" ——
+   * **那句是错的**,第三个账号就推翻了它。详见 `catalog.ts` 文件头记的
+   * 三次修正。现在这条注释只声称被测量支持的那个更弱的性质。
+   *
+   * 若免费子集哪天也按账号分化,两侧后果不对称:缓存里**多**一个 →
+   * 上游 400 `bad_request`,不重试不归咎,自限;缓存里**少**一个 →
+   * 误拒可用模型,所以下面 `retired` 那支会触发一次刷新。
+   *
+   * ## 为什么转发路径不在这里刷目录
+   *
+   * 我第一版在每个转发请求上调 `refreshIfStale`,想让"繁忙的网关自然保持
+   * 目录新鲜"。那是**错的耦合**,而集成测试立刻查出来了:一次客户端请求
+   * 变成两次上游请求(POST 转发 + GET 目录)。更糟的是它不收敛 ——
+   * 拉取失败不填缓存,于是下个请求发现仍然过期又发一次,稳态下永久 ×2,
+   * 而这个放大恰好发生在上游已经不稳的时候。
+   *
+   * 目录该由**它自己的**路径维护:启动预热 + `/v1/models` 被访问时。
+   * OpenCode 本来就会拉模型列表,所以那条路径有真实流量。
+   *
+   * 拿不到目录时退回"只看后缀与名单"(见 `judgeFree` 里"目录缺失时放行"
+   * 那节 —— 拒绝的代价是全面不可用,而放行的代价只是由上游拒绝,不产生费用)。
+   */
+  const verdict = judgeFree(model, config.models, deps.catalog.cached("keyed"));
   if (!verdict.free) {
     /*
      * 消息里带上模型 id。
@@ -141,14 +186,31 @@ async function handleRelay(
      * 这与「校验消息不回显用户数据」不冲突:模型 id 是客户端自己刚发来的、
      * 且是公开目录里的标识,不是凭证也不是他人数据。而没有它这条错误就无法自查
      * —— 用户看到「模型不允许」却不知道是哪个模型被拒。
+     *
+     * 两种拒绝分开措辞。`retired` 是 Phase 6 才有的新结局:模型的**免费依据
+     * 成立**(后缀或名单命中)但它**已不在上游在架目录**里。先前这类请求会被
+     * 放行然后由上游返回 400 `Model is unavailable.`,用户看到的是上游措辞,
+     * 完全指不到"这个 id 已经下架了,把它从 extraFreeIds 里删掉"。
      */
-    return c.json(
-      gatewayError(
-        "model_not_allowed",
-        `模型 ${model} 不在免费集内。本网关只放行免费模型;可在配置的 models.extraFreeIds 中调整`,
-      ),
-      403,
-    );
+    if (verdict.reason === "retired") {
+      /*
+       * **唯一**在转发路径上刷目录的地方,而且只在过期时刷一次。
+       *
+       * 理由很窄:一份过期目录唯一能造成的实际伤害就是这一个 ——
+       * 上游**新上架**了这个模型而我们手里的旧目录里没有,于是拒掉一个
+       * 本可用的请求。其余情形下旧目录只是"可能多放行一个已下架的",
+       * 而那由上游拒绝,代价可见且不花钱。
+       *
+       * 不怕被刷:刷成功后目录就是新鲜的,同一个模型的后续请求不会再触发
+       * (`isFresh` 为真);刷失败则有失败退避压着。两条都在 catalog.ts 里。
+       */
+      deps.catalog.refreshIfStale(catalogIdentityOf(config), config, deps.upstreamOf);
+    }
+    const message =
+      verdict.reason === "retired"
+        ? `模型 ${model} 已不在上游在架目录中(它符合免费约定,但上游已下架)。可刷新 /v1/models 确认,并从配置的 models.extraFreeIds 中移除`
+        : `模型 ${model} 不在免费集内。本网关只放行免费模型;可在配置的 models.extraFreeIds 中调整`;
+    return c.json(gatewayError("model_not_allowed", message), 403);
   }
 
   /* ---- 4. 流式能力校验(在选 Worker 之前:这是请求本身的问题) ---- */
@@ -314,10 +376,42 @@ async function handleRelay(
      * 更新亲和映射,那时响应早已完整发给客户端。
      */
     const scanner = createOverlapScanner(STALE_PATTERN_WINDOW, containsStaleReasoning);
+    /*
+     * 用量收集 —— `ProtocolSurface.parseUsage` 的**生产调用点**。
+     *
+     * 这一条刻意与面一同落地,而不是等到 Phase 7 需要它时再接。第四轮审核的
+     * `streaming` 字段就是反面教材:它被声明、被文档说明、却**全仓没有一处读它**,
+     * 把 `chatSurface` 的 `"optional"` 改成 `"none"` 后 859 条测试全绿 ——
+     * 一个声明了却不设防的能力位。`parseUsage` 若只有接口与实现而没有调用点,
+     * 就是同一个形态:三个面各写一份解析,而它们是否接对了没有任何东西会发现。
+     *
+     * 现在它有了唯一真实读者,于是"面接错了信封"会在集成测试里表现出来。
+     *
+     * 眼下的消费方式只有日志(Phase 7 才把它写进 `runtime.db` 做聚合)——
+     * 但这是**真的调用**,不是占位:接错面、改坏字段归一化、把跨事件合并
+     * 去掉,都会让日志里的数字变错并被测试抓住。
+     */
+    const usage = createUsageCollector((payload) => surface.parseUsage(payload));
     try {
       return pipeUpstreamResponse(upstream, extra, {
-        onText: (text) => scanner.feed(text),
+        onText: (text) => {
+          scanner.feed(text);
+          usage.feed(text);
+        },
         onDone: (error) => {
+          /*
+           * 用量日志。
+           *
+           * 只在拿到用量时打 —— 免费模型的响应**未必**带 usage,
+           * 而每个请求打一行"用量: 无"只会淹没日志。
+           *
+           * `describeUsage` 只输出数字,不含任何响应内容。
+           */
+          const totals = usage.usage();
+          if (totals !== null) {
+            deps.log?.(`用量 ${surface.id}/${model}: ${describeUsage(totals)}`);
+          }
+
           deps.scheduler.settleStream({
             workerId,
             sessionHash,

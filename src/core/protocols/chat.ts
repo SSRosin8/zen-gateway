@@ -1,5 +1,6 @@
 import type { ProtocolSurface } from "./types.ts";
 import { isRecord, readModelField, readStreamField } from "./types.ts";
+import { readUsage, type TokenUsage } from "../models/usage.ts";
 
 /**
  * OpenAI Chat Completions 面 —— Phase 3 的第一个面。
@@ -34,6 +35,21 @@ export const chatSurface: ProtocolSurface = {
   /** 本面无特有头;鉴权与 OpenCode 身份头由 upstream/headers.ts 统一加。 */
   extraUpstreamHeaders(): Record<string, string> {
     return {};
+  },
+
+  /**
+   * 用量信封:本面**只在顶层** `usage`,两种形态都一样。
+   *
+   * 流式时它出现在末帧(`stream_options.include_usage` 那条约定),
+   * 非流式时就是响应体的顶层字段 —— 所以不需要看任何嵌套层。
+   *
+   * 刻意**不**顺手认 `response.usage` 或 `message.usage`:那是另两个面的
+   * 信封,而一个"什么都认"的解析会让接错面这种错误不产生任何症状,
+   * 只是统计数字静默变错。
+   */
+  parseUsage(payload: unknown): TokenUsage | null {
+    if (!isRecord(payload)) return null;
+    return readUsage(payload["usage"]);
   },
 };
 

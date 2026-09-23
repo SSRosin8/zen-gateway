@@ -3,8 +3,11 @@ import { HealthSchema } from "../shared/contract.ts";
 import type { Config } from "../shared/schema.ts";
 import { ProtocolRegistry } from "../core/protocols/registry.ts";
 import { chatSurface, MODELS_PATHS } from "../core/protocols/chat.ts";
+import { responsesSurface } from "../core/protocols/responses.ts";
+import { messagesSurface } from "../core/protocols/messages.ts";
 import { EgressService } from "../core/proxy/egress.ts";
 import { Scheduler } from "../core/routing/scheduler.ts";
+import { ModelCatalog } from "../core/models/catalog.ts";
 import { relayAuth } from "./middleware/relayAuth.ts";
 import { loopbackOnly } from "./middleware/loopbackOnly.ts";
 import { createRelayRoutes } from "./routes/relay.ts";
@@ -18,9 +21,18 @@ export const VERSION = "0.1.0";
  *
  * ## 注册表在这里建立,面在这里注册 —— 且仅此一处
  *
- * Phase 6 新增 `responses` 与 `messages` 时,**唯一**需要改的是下面
- * `buildRegistry()` 里的注册行。路由装配、鉴权、免费判定、重试、透传
- * 都不该因为多一个面而改动 —— 那是规划里对这个抽象的验收条件。
+ * 规划对这个抽象的验收条件是「新增一个面 = 加一个文件 + 注册一行,**不动**
+ * 路由装配、鉴权、免费判定、重试、透传」。
+ *
+ * **Phase 6 兑现了它**:加 `responses` 与 `messages` 时,`src/server/` 下
+ * 唯一的改动就是下面那两行 `.register(...)`。路由(`registry.paths()` 动态
+ * 挂载)、鉴权守卫(同源推导)、调度、重试、透传都**一行未改** ——
+ * 而第四轮审核时守卫还是手写的三条路径字面量,那时加这两个面会让
+ * `/responses`、`/messages` 两条无前缀别名成为免鉴权中继。
+ *
+ * 两个面各自带来的新东西不在装配层:`responses` 让「体内会话指针优先于头」
+ * 那条接线第一次真的可执行,`messages` 需要把 key 镜像到 `x-api-key`
+ * (否则上游 500 → 整池 Worker 被冷却)。两者都由**面自己**表达。
  *
  * ## 为什么把 registry 做成参数可注入
  *
@@ -29,8 +41,10 @@ export const VERSION = "0.1.0";
  * 而那需要能构造出冲突的注册表。
  */
 export function buildRegistry(): ProtocolRegistry {
-  return new ProtocolRegistry().register(chatSurface);
-  // Phase 6: .register(responsesSurface).register(messagesSurface)
+  return new ProtocolRegistry()
+    .register(chatSurface)
+    .register(responsesSurface)
+    .register(messagesSurface);
 }
 
 export type AppDeps = {
@@ -52,6 +66,14 @@ export type AppDeps = {
    * 能持有同一个实例来断言跨请求的状态(冷却生效、粘滞命中)。
    */
   readonly scheduler?: Scheduler;
+  /**
+   * 在架目录缓存。不传则建一个 —— 但**每个 app 只能有一个**。
+   *
+   * 与 scheduler 同理:两份缓存会让"这个模型在不在架"取决于请求走到哪一份,
+   * 而且会把上游目录请求数翻倍。可注入是为了让测试预置一份目录,
+   * 免得每个转发测试都要去打上游。
+   */
+  readonly catalog?: ModelCatalog;
   readonly newId?: () => string;
   /** 注入以便测试推进时间。 */
   readonly clock?: () => number;
@@ -84,6 +106,19 @@ export function createApp(deps?: AppDeps): Hono {
 
   const registry = deps.registry ?? buildRegistry();
   const upstreamOf = (config: Config) => deps.egress.upstreamDeps(config);
+  /*
+   * 目录缓存在进程内唯一 —— 见 AppDeps.catalog。
+   *
+   * 刻意**不**在这里预热:`createApp` 是同步的,而预热要发网络请求。
+   * 预热放在 `server/index.ts`(它本来就是 async),于是测试里建 app
+   * 不会顺带打一次上游 —— 那种隐式网络依赖会让单测偶发失败。
+   */
+  const catalog =
+    deps.catalog ??
+    new ModelCatalog({
+      ...(deps.clock !== undefined ? { clock: deps.clock } : {}),
+      ...(deps.log !== undefined ? { log: deps.log } : {}),
+    });
 
   /*
    * 转发面:先鉴权,再进路由。
@@ -118,6 +153,7 @@ export function createApp(deps?: AppDeps): Hono {
     registry,
     upstreamOf,
     scheduler: deps.scheduler ?? new Scheduler(),
+    catalog,
     ...(deps.newId !== undefined ? { newId: deps.newId } : {}),
     ...(deps.clock !== undefined ? { clock: deps.clock } : {}),
     ...(deps.log !== undefined ? { log: deps.log } : {}),
@@ -129,6 +165,7 @@ export function createApp(deps?: AppDeps): Hono {
     createModelsRoutes({
       configOf: deps.configOf,
       upstreamOf,
+      catalog,
       ...(deps.log !== undefined ? { log: deps.log } : {}),
     }),
   );

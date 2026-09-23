@@ -377,6 +377,8 @@ describe("协议面的流式能力声明", () => {
     wantsStream: readStreamField,
     sessionKeyFrom: () => undefined,
     extraUpstreamHeaders: () => ({}),
+    // 本组测的是流式能力声明,不是用量。
+    parseUsage: () => null,
   };
 
   function appWithNoStream(cfg: Config = config()) {
