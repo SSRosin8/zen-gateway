@@ -4,6 +4,10 @@ import { once } from "node:events";
 import { createApp } from "../../src/server/app.ts";
 import { EgressService } from "../../src/core/proxy/egress.ts";
 import { ConfigSchema, type Config } from "../../src/shared/schema.ts";
+import { ProtocolRegistry } from "../../src/core/protocols/registry.ts";
+import { chatSurface } from "../../src/core/protocols/chat.ts";
+import { readModelField, readStreamField } from "../../src/core/protocols/types.ts";
+import type { ProtocolSurface } from "../../src/core/protocols/types.ts";
 
 /**
  * 转发链路的集成测试 —— 对着**真实 HTTP 假上游**跑。
@@ -343,6 +347,92 @@ describe("免费模型闸门", () => {
       models: { ...cfg.models, extraFreeIds: ["some-promo-model"] },
     });
     const res = await app(custom).request("/v1/chat/completions", relay({ model: "some-promo-model", messages: [] }));
+    expect(res.status).toBe(200);
+  });
+});
+
+/* ================================================================== *
+ * 面声明的流式能力必须真的被执行
+ * ================================================================== */
+
+/**
+ * `ProtocolSurface.streaming` 曾是一个**声明了却不设防的能力位**。
+ *
+ * 它被声明、被文档说明「`"none"` 为 jev 这类非流式面预留」,但全仓没有任何
+ * 一处读它 —— 把 `chatSurface` 的 `"optional"` 改成 `"none"` 后 859 条测试全绿
+ * (2026-09-23 变异 M1 实测)。规划里 Phase 6 明确要新增这样的面,
+ * 届时客户端发 `stream: true` 会被照常加上 `Accept: text/event-stream`
+ * 并走流式泵,而上游那个面根本不产生 SSE。
+ *
+ * 这正是 [[verification-discipline]] 第 1 条的形态:接口字段存在不等于约束成立。
+ */
+describe("协议面的流式能力声明", () => {
+  /** 一个非流式面 —— 形态对应规划里的 jev。 */
+  const noStreamSurface: ProtocolSurface = {
+    id: "responses",
+    clientPaths: ["/v1/nostream"],
+    upstreamPath: "/nostream",
+    streaming: "none",
+    extractModel: readModelField,
+    wantsStream: readStreamField,
+    sessionKeyFrom: () => undefined,
+    extraUpstreamHeaders: () => ({}),
+  };
+
+  function appWithNoStream(cfg: Config = config()) {
+    const registry = new ProtocolRegistry().register(chatSurface).register(noStreamSurface);
+    return createApp({ configOf: () => cfg, egress, registry, log: () => {} });
+  }
+
+  it("非流式面收到 stream:true → 400,且**不打上游**", async () => {
+    const res = await appWithNoStream().request(
+      "/v1/nostream",
+      relay({ model: "big-pickle", stream: true, messages: [] }),
+    );
+
+    expect(res.status).toBe(400);
+    // 这是请求本身的问题,本机就能定论 —— 不该花一次上游调用去换已知的答案。
+    expect(upstreamCalls).toHaveLength(0);
+    const body = (await res.json()) as { error: { type: string; message: string } };
+    expect(body.error.type).toBe("invalid_request");
+    // 消息要指出是哪个面,否则用户不知道该改哪个请求。
+    expect(body.error.message).toContain("responses");
+  });
+
+  it("非流式面收到非流式请求 → 正常放行", async () => {
+    handler = (_req, res) => res.end('{"ok":true}');
+    const res = await appWithNoStream().request(
+      "/v1/nostream",
+      relay({ model: "big-pickle", messages: [] }),
+    );
+    expect(res.status).toBe(200);
+    expect(upstreamCalls).toHaveLength(1);
+  });
+
+  it("`optional` 面的流式请求不受影响 —— 只拦 `none`", async () => {
+    handler = (_req, res) => res.end('{"ok":true}');
+    const res = await appWithNoStream().request(
+      "/v1/chat/completions",
+      relay({ model: "big-pickle", stream: true, messages: [] }),
+    );
+    expect(res.status).toBe(200);
+  });
+
+  it("只声明 `sse` 的面**不**强制流式 —— 那会拦掉合法请求", async () => {
+    /*
+     * 反向断言,记录这条限制的边界。Anthropic Messages 这类面两者都支持,
+     * 把「只声明了 sse」当成「必须流式」是一个会拒掉合法请求的过度收紧。
+     */
+    handler = (_req, res) => res.end('{"ok":true}');
+    const sseSurface: ProtocolSurface = { ...noStreamSurface, streaming: "sse" };
+    const registry = new ProtocolRegistry().register(chatSurface).register(sseSurface);
+    const res = await createApp({
+      configOf: () => config(),
+      egress,
+      registry,
+      log: () => {},
+    }).request("/v1/nostream", relay({ model: "big-pickle", messages: [] }));
+
     expect(res.status).toBe(200);
   });
 });

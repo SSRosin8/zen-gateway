@@ -25,17 +25,19 @@ import {
  *   1. 读**原始请求体字节**(只读一次)
  *   2. 解析一份**副本**用于判定(模型、是否流式)
  *   3. 免费判定 —— 不通过则在**请求出去之前**拒绝
- *   4. 选 Worker
- *   5. 重试链(只看 status+headers,body 不消费)
- *   6. 流式透传(唯一写字节的地方)
+ *   4. 流式能力校验(面声明 `streaming: "none"` 时拒绝流式请求)
+ *   5. 选 Worker
+ *   6. 重试链(只看 status+headers,body 不消费)
+ *   7. 流式透传(唯一写字节的地方)
  *
  * 第 1 与第 2 步分开是「原样透传」的要求:转发出去的必须是客户端发来的原始
  * 字节。实测 `JSON.parse` → `stringify` 往返**不是无损的**
  * (`{"n":1.0}` → `{"n":1}`),而这个网关的存在意义就是让 OpenCode 像直连
  * 上游一样工作 —— 我们不该引入任何客户端察觉得到的差异。
  *
- * 第 3 步必须在第 5 步之前:放行一个付费模型的代价是真金白银,
- * 而它一旦发出去就无法收回。
+ * 第 3、4 步都必须在第 6 步之前:它们判定的都是**请求本身**的问题,
+ * 在本机就能定论,不该花一次上游调用去换一个我们已经知道的答案。
+ * 第 3 步尤其如此 —— 放行一个付费模型的代价是真金白银,一旦发出去无法收回。
  */
 
 export type RelayDeps = {
@@ -135,7 +137,34 @@ async function handleRelay(
     );
   }
 
-  /* ---- 4. 选 Worker ---- */
+  /* ---- 4. 流式能力校验(在选 Worker 之前:这是请求本身的问题) ---- */
+  const streaming = surface.wantsStream(parsed);
+
+  /*
+   * 面声明的流式能力必须真的被执行,否则 `streaming` 只是一个注释。
+   *
+   * 这条先前不存在:`ProtocolSurface.streaming` 被声明、被文档说明「`"none"`
+   * 为 jev 这类非流式面预留」,但全仓没有任何一处读它 —— 把 `chatSurface`
+   * 的 `"optional"` 改成 `"none"` 后 859 条测试全绿。那是一个**声明了却不设防
+   * 的能力位**:Phase 6 若按规划新增一个 `streaming: "none"` 的面,客户端发
+   * `stream: true` 会被照常加上 `Accept: text/event-stream` 并走流式泵,
+   * 而上游那个面根本不产生 SSE —— 症状是挂住或拿到一段解析不了的响应。
+   *
+   * 只拦不含歧义的那个方向:`"none"` 面收到流式请求 → 400。
+   * `"sse"` 面收到非流式请求**不拦** —— Anthropic Messages 这类面两者都支持,
+   * 把「只声明了 sse」当成「必须流式」会拦掉合法请求。
+   */
+  if (surface.streaming === "none" && streaming) {
+    return c.json(
+      gatewayError(
+        "invalid_request",
+        `协议面 ${surface.id} 不支持流式,请去掉 stream: true`,
+      ),
+      400,
+    );
+  }
+
+  /* ---- 5. 选 Worker ---- */
   const targets: AttemptTarget[] = selectTargets(config);
   if (targets.length === 0) {
     return c.json(
@@ -144,10 +173,9 @@ async function handleRelay(
     );
   }
 
-  const streaming = surface.wantsStream(parsed);
   const clientHeaders = c.req.header();
 
-  /* ---- 5. 重试链 ---- */
+  /* ---- 6. 重试链 ---- */
   let result;
   try {
     result = await runRetryChain({
@@ -173,7 +201,7 @@ async function handleRelay(
     return c.json(mapped.body, mapped.status as 400 | 500);
   }
 
-  /* ---- 6. 透传 ---- */
+  /* ---- 7. 透传 ---- */
 
   /*
    * 透传包一层兜底。
