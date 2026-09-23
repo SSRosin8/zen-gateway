@@ -1,6 +1,7 @@
 import { serve } from "@hono/node-server";
 import { createApp } from "./app.ts";
 import { loadConfig } from "../store/config.ts";
+import { resolvePort } from "../store/port.ts";
 import { EgressService } from "../core/proxy/egress.ts";
 import { ConfigError } from "../store/config.ts";
 
@@ -57,28 +58,23 @@ async function main(): Promise<void> {
   });
 
   /*
-   * 端口:ZG_PORT 覆盖配置。
+   * 端口由 `store/port.ts` 单点解析 —— `ZG_PORT` > `config.gateway.port` > 9876。
    *
-   * 两个来源都要认。配置里的 `gateway.port` 是用户的正式设置;而 ZG_PORT
-   * 让测试能把端口与 `ZG_DATA_DIR` 一起隔离 —— service.mjs 的注释已说明
-   * 那不是为测试开的后门,而是让「误杀无关进程」「restart 谎报成功」这类
-   * 缺陷能有常驻回归测试的前提。
+   * 这里刻意**不**自己读 `config.gateway.port`,尽管配置已在内存里:端口先前在
+   * 三处各自手写解析(本文件、`service.mjs`、`vite.config.ts`),而 Phase 3 就因
+   * 两处脱节炸过一次 —— 我把监听端口改成读配置却没同步脚本,脚本于是去探一个
+   * 没人监听的端口,健康等待超时后报「启动失败」,而服务其实已经起来了。
+   * 第三处(vite 代理)到 2026-09-23 梳理时还是硬编码的 9876。
    *
-   * **service.mjs 必须按同一优先级解析端口**,否则它会去探一个没人监听的
-   * 端口,然后在健康等待超时后报「启动失败」,而服务其实已经起来了。
-   * 我这一版最初只读配置、丢掉了 ZG_PORT,`service.mjs` 的 6 条集成测试
-   * 因此全红 —— 两处的优先级必须一致。
+   * 必须在 `loadConfig()` **之后**调用:首启时那一步才会把默认配置落盘。
    */
-  const envPort = process.env["ZG_PORT"];
-  let port = config.gateway.port;
-  if (envPort !== undefined && envPort !== "") {
-    const parsed = Number(envPort);
-    if (!Number.isInteger(parsed) || parsed < 1 || parsed > 65535) {
-      console.error(`ZG_PORT 不是合法端口:${envPort}`);
-      process.exitCode = 1;
-      return;
-    }
-    port = parsed;
+  let port: number;
+  try {
+    port = resolvePort();
+  } catch (err) {
+    console.error(err instanceof Error ? err.message : String(err));
+    process.exitCode = 1;
+    return;
   }
 
   /*

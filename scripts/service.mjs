@@ -20,10 +20,11 @@
  */
 
 import { spawn } from "node:child_process";
-import { existsSync, openSync, readFileSync } from "node:fs";
+import { existsSync, openSync } from "node:fs";
 import { chmod, mkdir, open, readFile, readlink, rm, stat, writeFile } from "node:fs/promises";
 import { fileURLToPath } from "node:url";
 import { dirname, join, resolve } from "node:path";
+import { resolvePort } from "../src/store/port.ts";
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
 
@@ -44,38 +45,45 @@ const ENTRY = join(ROOT, "dist", "server", "server", "index.js");
 const SCRIPT = fileURLToPath(import.meta.url);
 
 /**
- * 端口解析必须与 `src/server/index.ts` **完全一致**:
- * `ZG_PORT` > `config.json` 的 `gateway.port` > 9876。
+ * 端口解析复用 `src/store/port.ts`,**不在本文件重写一份**。
  *
- * 两处若不一致,本脚本会去探一个没人监听的端口,然后在健康等待超时后报
- * 「启动失败」—— 而服务其实已经起来了。这是本阶段真实发生过的回归:
- * 服务端改成读配置里的 port、本脚本仍只认 ZG_PORT,6 条集成测试全红。
+ * 先前这里是一份手写副本,注释还写着「必须与 src/server/index.ts 完全一致」——
+ * 而那种"靠注释维持一致"的两份实现恰恰是本项目反复踩到的坑:Phase 3 就发生过
+ * 一次真实回归(服务端改成读配置的 port、本脚本仍只认 ZG_PORT,6 条集成测试全红)。
+ * 2026-09-23 的梳理又发现**第三处** `vite.config.ts` 还硬编码着 9876。
  *
- * 这里刻意**不**校验配置的其他部分,也绝不打印配置内容(整个文件都可能是凭证)。
- * 配置坏了由服务端在启动时如实报错,本脚本只需要一个用于探活的端口号。
+ * 三份并行手写的解析逻辑,脱节方向必然是"有一处被漏掉"。现在三处都从
+ * `resolvePort()` 取值,加一处调用点不会再多一份需要同步的副本。
+ *
+ * 引入成本实测 29ms(其中 17ms 是 Node 对 TS 的 strip-only 开销,与 zod 无关 ——
+ * `resolvePort` 刻意只依赖 `paths.ts`,不碰 `config.ts`,因为那会拖进整个 schema,
+ * 把一个常用 CLI 的启动时间翻倍)。
+ *
+ * **传 root 的方式必须与上面 DATA_DIR 的算法完全对应**,否则两者会指向不同的
+ * config.json,于是本脚本探的端口与服务端监听的端口不一致 —— 正是这次要消除的
+ * 那类脱节。对应关系:
+ *   - `ZG_DATA_DIR` 已设 → 传 `undefined`,让 `paths.ts` 自己去认那个环境变量
+ *     (它的约定是「显式 root 优先于 ZG_DATA_DIR」,传了 ROOT 反而会把它盖掉)
+ *   - 未设 → 传 `ROOT`,与 `join(ROOT, "data")` 一致。**不能依赖 cwd**:
+ *     用户可能从任意目录执行 `node /path/to/zen-gateway/scripts/service.mjs`,
+ *     而 `paths.ts` 不传 root 时回落到 `cwd/data`。
+ *
+ * 非法 `ZG_PORT` 时 `resolvePort` 抛错,这里必须接住:在模块顶层任由它抛会打出
+ * 一整段栈,而那段栈**带着安装的绝对路径**。第二轮审核在本文件查出过同一类问题
+ * (原型链命令分发泄漏路径且退出码错误)。
+ *
+ * 退出码沿用先前的 **1**,不改成 2。本次改动的目的是把三处端口解析合并成一处,
+ * 不该顺手变更一个已被 `service.test.ts` 钉住的对外行为 —— 那属于范围之外。
+ * (顺带记下一处不一致:未知命令退出 2「用法错误」,而非法 ZG_PORT 退出 1,
+ * 两者其实同类。要统一的话该单独做,并同步那条既有断言。)
  */
-function resolvePort() {
-  const fromEnv = process.env.ZG_PORT;
-  if (fromEnv !== undefined && fromEnv !== "") {
-    const parsed = Number(fromEnv);
-    if (Number.isInteger(parsed) && parsed >= 1 && parsed <= 65535) return parsed;
-    // 非法值不静默回落:那会让「我明明设了 ZG_PORT」变成一个查不出的问题。
-    console.error(`ZG_PORT 不是合法端口:${fromEnv}`);
-    process.exit(1);
-  }
-
-  try {
-    const raw = JSON.parse(readFileSync(join(DATA_DIR, "config.json"), "utf8"));
-    const p = raw?.gateway?.port;
-    if (Number.isInteger(p) && p >= 1 && p <= 65535) return p;
-  } catch {
-    // 配置不存在(首启)或不可解析 —— 用默认端口,服务端会报真正的原因。
-  }
-
-  return 9876;
+let PORT;
+try {
+  PORT = resolvePort(process.env.ZG_DATA_DIR ? undefined : ROOT);
+} catch (err) {
+  console.error(err instanceof Error ? err.message : String(err));
+  process.exit(1);
 }
-
-const PORT = resolvePort();
 const BASE = `http://127.0.0.1:${PORT}`;
 
 const HEALTH_TIMEOUT_MS = 20_000;

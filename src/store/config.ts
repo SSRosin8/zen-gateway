@@ -2,6 +2,7 @@ import { randomBytes } from "node:crypto";
 import { constants as fsConstants } from "node:fs";
 import { access, chmod, mkdir, open, readFile, rename, stat, unlink } from "node:fs/promises";
 import { dirname, join, resolve } from "node:path";
+import { configPath, dataDir } from "./paths.ts";
 import { CONFIG_VERSION, ConfigSchema, type Config } from "../shared/schema.ts";
 import { safeErrorMessage } from "../shared/redact.ts";
 
@@ -17,24 +18,20 @@ const FILE_MODE = 0o600;
 const DIR_MODE = 0o700;
 
 /**
- * data/ 的位置。
+ * data/ 的位置与 config.json 的路径。
  *
- * 显式传 `root` 时以它为准(测试用临时目录走这条路)。不传时才看
- * `ZG_DATA_DIR` —— 必须与 `scripts/service.mjs` 认的是同一个环境变量,
- * 否则 service.mjs 在一个目录里管状态文件,而服务端从另一个目录读配置,
- * 凭证与运行时数据被劈成两份。Phase 0-2 的服务端还不读配置,所以现在
- * 只是个陷阱;Phase 3 起就是真 bug。
+ * 实现已移到 `paths.ts` —— `scripts/service.mjs` 与 `vite.config.ts` 需要这两个
+ * 函数来定位配置文件,但它们不需要解析配置。留在本文件会让引用方连带拖入
+ * `zod` 与整个 schema(实测 +57ms,而 `service.mjs status` 全程只有 51ms)。
+ *
+ * 这里转出来,让既有调用方(`db/open.ts`、测试)不必改 import 路径。
+ *
+ * 注意是**先 import 再 export**,而不是 `export { x } from "./paths.ts"`:
+ * 后者只是转发,**不会**把名字带进本模块作用域,而本文件内部有三处用到
+ * `configPath`。只写 re-export 时 tsc 报 `TS2304: Cannot find name 'configPath'`
+ * —— 这正是四份 tsconfig 里 `tsconfig.server.json` 覆盖 src/ 的用处。
  */
-export function dataDir(root?: string): string {
-  if (root !== undefined) return resolve(root, "data");
-
-  const override = process.env["ZG_DATA_DIR"];
-  return override !== undefined && override !== "" ? resolve(override) : resolve(process.cwd(), "data");
-}
-
-export function configPath(root?: string): string {
-  return join(dataDir(root), "config.json");
-}
+export { dataDir, configPath };
 
 /** 首启生成的 Relay Token：32 字节 → 43 个 URL-safe 字符。 */
 export function generateRelayToken(): string {
