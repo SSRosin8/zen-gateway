@@ -77,7 +77,16 @@ opencode run --model opencode/big-pickle "hello"
   "proxies": [],
   "subscriptions": [],
   "clash": { "enabled": false, "selectionMode": "auto", "activeBridgeId": null, "bridges": [] },
-  "routing": { /* cooldown 与 affinityTtlMs —— Phase 5 才生效 */ }
+  "routing": {
+    "strategy": "anonymous_first",
+    "cooldown": {
+      "rateLimitMs": 900000,      // 限流冷却；上游的 Retry-After 优先
+      "authFailMs": 60000,        // 鉴权失败：固定短退避，不随次数增长
+      "transportBaseMs": 2000,    // 传输失败的指数退避起点
+      "transportMaxMs": 120000
+    },
+    "affinityTtlMs": 3600000      // 会话粘滞的**闲置**上限（滑动）
+  }
 }
 ```
 
@@ -90,8 +99,35 @@ opencode run --model opencode/big-pickle "hello"
   而出口隔离是这个项目存在的理由。
 - **缺 `version` 即视为配置损坏**，不做旧项目配置迁移。
 - **损坏的配置绝不自动覆盖**（会连凭证一起丢）。报错只给字节位置，不回显内容。
-- `routing.strategy` 默认值是 `anonymous_first`，但**匿名 Worker 这条通道不实现**
-  （上游已关闭第三方免费额度），且 Phase 3 的调度还没读这个字段。
+- `routing.strategy` 现已生效，但两个非 `mixed` 的取值**当前无实际效果**：
+  匿名 Worker 需要空 apiKey，而调度要求有 key（上游已关闭免 key 通道），
+  所以可排序的类别只剩一种。改这个字段不会有可见变化。
+- **`affinityTtlMs` 是闲置时长，不是绑定寿命**：每次请求都会刷新，所以一条持续
+  活跃的会话永不换 Worker。固定寿命会在长对话中途强制换人，而那恰好是粘滞
+  要避免的事（客户端回放的加密推理块会被上游拒）。
+
+### 各类失败冷却多久
+
+| 类别 | 冷却 | 常见原因 |
+|---|---|---|
+| `rate_limit` | `Retry-After` 或 15 分钟 | 上游限流 |
+| `auth` | 固定 60 秒 | key 粘错、被吊销、额度耗尽 |
+| `transport`/`timeout` | 2 秒起指数增长，上限 2 分钟 | 出口不通、Clash 没开 |
+| `bad_request` | **不冷却** | 请求本身的问题，与 Worker 无关 |
+
+`auth` 刻意用固定短退避而不是指数增长：配错的 key 应该**反复暴露**，
+而指数增长会让"key 配错了"逐渐变成"网关有点慢"。
+
+> **冷却状态目前没有查看入口。** `npm run status` 只报进程信息（pid／版本／
+> 运行时长／URL），不含 Worker 就绪数。调度器的 `snapshot()`（每个 Worker 的
+> 就绪态、剩余冷却、连续失败数、最近失败类别）已经实现且不含凭证，
+> 但要等 Phase 9 的管理 API 才有地方读它。眼下只能从响应头
+> `x-zen-gateway-route` 推断（见下文「排查」）。
+
+一个实际现象：**任何非 OpenCode 客户端**（curl、别的网关）打进来都会拿 403
+`FreeTierError`，而 403 归 `auth` —— 于是全部 Worker 被打进 60 秒冷却。
+这是自愈的（短退避 + 全员冷却时给最早恢复的那个），不影响真实 CLI，
+但若你刚用 curl 探过，随后一分钟内的请求会带 `x-zen-gateway-route: all_cooling`。
 
 ---
 
@@ -179,8 +215,17 @@ curl -s http://127.0.0.1:9090/connections \
 **确认流量真的经过网关**：停掉网关，同一条客户端命令必须失败
 （`ConnectionRefused`）。这比读日志硬 —— 它排除了"客户端其实走了别的 provider"。
 
-诊断响应头：`x-zen-gateway-worker`（这次由哪个 Worker 承接）、
-`x-zen-gateway-attempts`（失败时尝试了几次）。
+诊断响应头：
+
+| 头 | 含义 |
+|---|---|
+| `x-zen-gateway-worker` | 这次由哪个 Worker 承接（仅成功时） |
+| `x-zen-gateway-route` | 为什么是它：`sticky`（会话粘滞）／`blob_hint`（推理指纹提示）／`strategy`（按策略排序）／`all_cooling`（全员冷却，给了最早恢复的那个） |
+| `x-zen-gateway-attempts` | 失败时尝试了几个 Worker |
+
+`x-zen-gateway-route` 是排查「为什么这次换了 Worker」的入口。看到
+`all_cooling` 就说明所有 Worker 都在冷却中 —— 此时响应里带的是上游的真实错误，
+不是网关自造的 503。
 
 ---
 

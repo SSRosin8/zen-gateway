@@ -1,43 +1,227 @@
-import type { Config, Worker } from "../../shared/schema.ts";
+import type { Config, RoutingStrategy, WorkerKind } from "../../shared/schema.ts";
 import type { AttemptTarget } from "../upstream/retry.ts";
+import { isUsable, WorkerPool, type WorkerRuntime } from "./workerPool.ts";
+import { AffinityMap, digestOf, normalizeSessionKey } from "./affinity.ts";
 
 /**
- * Worker 选择 —— Phase 3 的**最小**实现。
+ * Worker 选择 —— 把冷却、粘滞、策略三件事合成一条**有序候选链**。
  *
- * Phase 5 会把这里扩成完整的调度状态机(分级冷却、会话粘滞、
- * 亲和指纹、全员冷却时选最早恢复的)。本阶段只需「按可用顺序排出候选」,
- * 好让转发链路能端到端跑通。
+ * ## 为什么返回一条链而不是单个 Worker
  *
- * 刻意**不**在这里放冷却或粘滞的半成品:一个半实现的粘滞比没有粘滞更糟 ——
- * 它会在部分情况下生效,于是「为什么这次换了 Worker」变成不可推理的问题。
- * 要么完整要么没有,这是 Phase 5 的边界。
+ * 旧项目的 `pick()` 每次只给一个 Worker,重试链要换人就再调一次 pick ——
+ * 于是"这次请求会依次试哪些 Worker"这个问题在代码里没有答案,只能靠读
+ * 那个 432 行 class 的隐式状态推。返回一条链之后,`retry.ts` 只需按序走,
+ * 而"为什么是这个顺序"完全由本文件回答。
+ *
+ * ## 排序规则(优先级从高到低)
+ *
+ *   1. **粘滞命中且就绪**的 Worker —— 严格粘滞,不被策略抢占
+ *   2. 其余**就绪**的 Worker,按策略排序
+ *   3. 若一个都不就绪:只给**最早恢复**的那一个
+ *
+ * 第 3 条不是轮转槽位,也不是"把所有冷却中的都排上"。两者都错:
+ *
+ * - 轮转槽位会在全员冷却时把请求散到恢复最晚的那个,重试互相错过。
+ * - 把冷却中的 Worker 排进候选尾巴,等于让"有健康 Worker 时也可能打到
+ *   冷却中的",而冷却存在的理由正是别再打它 —— 尤其 429:上游刚说了
+ *   `Retry-After: 900`,我们在 2 秒后又发一次只会换来更长的封禁。
+ *
+ * 所以规则是:**有就绪的就只用就绪的**;一个都没有时给一个最接近恢复的,
+ * 让客户端拿到一次真实的上游错误(而不是网关自造的 503)。
  */
 
-/** Worker 是否可用于转发。 */
-export function isUsable(worker: Worker): boolean {
-  if (!worker.enabled) return false;
-  /*
-   * 必须有上游 key。
-   *
-   * schema 里 `kind: "anonymous"` 允许空 apiKey,那是为「免鉴权免费额度」
-   * 留的形态 —— 而上游已于 2026-09-16 前后关闭该通道(免 key 请求免费模型
-   * 返回 403 FreeTierError)。没有 key 的 Worker 发出去必定失败,
-   * 放进候选链只会白占一次尝试并把真实原因(没配 key)埋进重试日志。
-   *
-   * 这里按「有没有 key」判断而不按 kind:kind 是用户的声明,
-   * key 是能不能用的事实,后者才是调度该依据的。
-   */
-  return worker.apiKey.trim() !== "";
+/** 策略 → 优先的 Worker 类别;`null` 表示不排序(按配置顺序)。 */
+function preferredKind(strategy: RoutingStrategy): WorkerKind | null {
+  switch (strategy) {
+    /*
+     * 注意:匿名 Worker 现在**不可能进入候选** —— `isUsable` 要求有 apiKey,
+     * 而匿名的定义就是没有 key(上游已于 2026-09-16 前后关闭免 key 通道)。
+     * 所以 `anonymous_first`(schema 的默认值)当前等价于"按配置顺序"。
+     *
+     * 刻意保留这个分支而不是删掉:它是**正确的**表达,只是输入类别恰好为空。
+     * 若上游哪天重开免费通道(`discover-upstream.mjs` 有常驻探针监测),
+     * 这个默认值立刻恢复意义。
+     */
+    case "anonymous_first":
+      return "anonymous";
+    case "authenticated_first":
+      return "authenticated";
+    case "mixed":
+      return null;
+    default: {
+      const exhaustive: never = strategy;
+      throw new Error(`未处理的调度策略:${String(exhaustive)}`);
+    }
+  }
+}
+
+function toTarget(worker: WorkerRuntime): AttemptTarget {
+  return { workerId: worker.id, apiKey: worker.apiKey, proxyId: worker.proxyId };
+}
+
+/** 本次选择用到的亲和上下文。全部可缺 —— 缺了就退化成纯策略排序。 */
+export type AffinityContext = {
+  readonly map: AffinityMap;
+  /** 已归一化并哈希的会话键;拿不到会话标识时为 null。 */
+  readonly sessionHash: string | null;
+  /** 请求体里加密推理块的 sha256 指纹。 */
+  readonly blobHashes: readonly string[];
+};
+
+export type SelectInput = {
+  readonly pool: WorkerPool;
+  readonly config: Config;
+  readonly now: number;
+  readonly affinity?: AffinityContext;
+};
+
+/** 选择结果。`reason` 只用于诊断,不参与任何判断。 */
+export type Selection = {
+  readonly targets: readonly AttemptTarget[];
+  /** 链首 Worker 是怎么定下来的。 */
+  readonly reason: "sticky" | "blob_hint" | "strategy" | "all_cooling" | "empty";
+  /** 命中粘滞时是哪个 Worker,便于日志与诊断头。 */
+  readonly stickyWorkerId: string | null;
+};
+
+/**
+ * 排出候选链。
+ *
+ * **有副作用**:命中亲和提示或新选出 Worker 时会写入会话绑定。
+ * 绑定发生在**选择时**而不是成功之后,有两个理由:
+ *
+ * 1. 同一会话的并发请求要落到同一个 Worker。若等成功才绑,两个同时进来的
+ *    turn 会各自挑一个,而它们回放的是同一批推理块 —— 其中一个必定被上游拒。
+ * 2. 绑定本身是自纠正的:被绑的 Worker 一旦进入冷却,下一轮
+ *    `lookupSession` 就查不到它,自动解绑重挑。
+ *
+ * ## TTL 是滑动的,不是从首次绑定起算
+ *
+ * 每次选择都重写绑定时间,所以 `affinityTtlMs` 度量的是**闲置**时长:
+ * 一条持续活跃的会话永不解绑,闲置超过 TTL 才失效。
+ *
+ * 固定 TTL(从首次绑定起算)会在一条**正在进行**的长对话中途强制换 Worker,
+ * 而那恰好是粘滞要避免的事 —— 换了 Worker,客户端回放的加密推理块就会被
+ * 上游拒掉,表现为对话到某个时刻突然开始报错。TTL 的目的是清理**已结束**的
+ * 会话(腾出容量、不让几个月前的绑定钉住未来的会话),活跃会话不在其列。
+ */
+export function select(input: SelectInput): Selection {
+  const { pool, config, now } = input;
+  const all = pool.all();
+  if (all.length === 0) {
+    return { targets: [], reason: "empty", stickyWorkerId: null };
+  }
+
+  const ttlMs = config.routing.affinityTtlMs;
+  const exists = (id: string): boolean => pool.has(id);
+  const ready = all.filter((w) => w.cooldownUntil <= now);
+
+  /* ---- 1. 粘滞 ---- */
+  let sticky: WorkerRuntime | null = null;
+  let reason: Selection["reason"] = "strategy";
+
+  const ctx = input.affinity;
+  if (ctx !== undefined && ctx.sessionHash !== null) {
+    const bound = ctx.map.lookupSession(ctx.sessionHash, now, ttlMs, exists);
+    /*
+     * 绑定存在但该 Worker 在冷却 → 放弃粘滞,重新挑。
+     *
+     * 等它恢复是错的:冷却可能长达 15 分钟,而客户端只会看到网关卡住。
+     * 代价是这一轮的推理连续性丢失(上游会拒掉回放的推理块),
+     * 但那是**上游的**错误,客户端能看到并开一个新 turn ——
+     * 好于我们自己把请求挂住。
+     */
+    if (bound !== null && pool.isReady(bound, now)) {
+      sticky = pool.get(bound);
+      reason = "sticky";
+    } else if (bound !== null) {
+      ctx.map.unbindSession(ctx.sessionHash);
+    }
+  }
+
+  /* ---- 2. 推理指纹提示(仅在没有会话绑定时) ---- */
+  if (sticky === null && ctx !== undefined && ctx.blobHashes.length > 0) {
+    const hinted = ctx.map.findBlobWorker(ctx.blobHashes, now, ttlMs, exists);
+    if (hinted !== null && pool.isReady(hinted, now)) {
+      sticky = pool.get(hinted);
+      reason = "blob_hint";
+    }
+  }
+
+  /* ---- 3. 全员冷却:只给最早恢复的那一个 ---- */
+  if (ready.length === 0) {
+    const earliest = all.reduce((best, w) => (w.cooldownUntil < best.cooldownUntil ? w : best));
+    bind(ctx, earliest.id, now);
+    return {
+      targets: [toTarget(earliest)],
+      reason: "all_cooling",
+      stickyWorkerId: null,
+    };
+  }
+
+  /* ---- 4. 就绪的按策略排序,粘滞的提到最前 ---- */
+  const preferred = preferredKind(config.routing.strategy);
+  const ordered =
+    preferred === null
+      ? [...ready]
+      : /*
+         * `sort` 自 ES2019 起**保证稳定**,所以同类别内部保持配置顺序 ——
+         * 用户手工排的优先级不会被策略打乱。
+         */
+        [...ready].sort((a, b) => rank(a, preferred) - rank(b, preferred));
+
+  const targets =
+    sticky === null
+      ? ordered.map(toTarget)
+      : [toTarget(sticky), ...ordered.filter((w) => w.id !== sticky.id).map(toTarget)];
+
+  const head = targets[0];
+  if (head !== undefined) bind(ctx, head.workerId, now);
+
+  return { targets, reason, stickyWorkerId: sticky?.id ?? null };
+}
+
+function rank(worker: WorkerRuntime, preferred: WorkerKind): number {
+  return worker.kind === preferred ? 0 : 1;
+}
+
+function bind(ctx: AffinityContext | undefined, workerId: string, now: number): void {
+  if (ctx === undefined || ctx.sessionHash === null) return;
+  ctx.map.bindSession(ctx.sessionHash, workerId, now);
 }
 
 /**
- * 排出候选 Worker。
+ * 从客户端头与请求体解析会话哈希。
  *
- * Phase 3 的顺序就是配置里的顺序 —— 稳定、可预测、便于用户自己排优先级。
- * `routing.strategy`(anonymous_first 等)在 Phase 5 接入;
- * 现在就读它会得到一个「看起来在生效其实没管住」的分支。
+ * `x-opencode-session` 是 chat 面**唯一**的会话依据(该面请求体里没有会话
+ * 标识),而 `headers.ts` 保证它一定存在 —— 客户端没发时网关合成一个。
+ * 但合成的那个每请求都不同,所以对亲和没有帮助:那种情况下粘滞自然失效,
+ * 这是正确的(我们确实不知道这是不是同一条会话)。
+ *
+ * `sessionKeyFrom` 给 Responses 面用 —— 它的 `previous_response_id` 是体内的
+ * 会话指针。体内标识**优先**于头:它是协议自己的语义,比客户端的自定义头更权威。
  */
-export function selectTargets(config: Config): AttemptTarget[] {
+export function sessionHashFrom(input: {
+  readonly bodyKey: string | undefined;
+  readonly headerValue: string | undefined;
+}): string | null {
+  const raw = normalizeSessionKey(input.bodyKey) ?? normalizeSessionKey(input.headerValue);
+  return raw === null ? null : digestOf(raw);
+}
+
+/* ------------------------------------------------------------------ *
+ * 兼容既有调用点
+ * ------------------------------------------------------------------ */
+
+/**
+ * 不含调度状态的候选链 —— 供 `/v1/models` 使用。
+ *
+ * 目录查询是幂等只读的,且**不走重试链**:它只需要"任意一个能用的 key"。
+ * 让它也建一个 WorkerPool 是多余的,而让它共用转发面的池更糟 ——
+ * 一次目录查询失败会把 Worker 打进冷却,于是**一个只读查询影响了转发的
+ * 候选顺序**。两者刻意不共享状态。
+ */
+export function usableTargets(config: Config): AttemptTarget[] {
   return config.workers.filter(isUsable).map((w) => ({
     workerId: w.id,
     apiKey: w.apiKey,
@@ -56,3 +240,5 @@ export function describeNoWorker(config: Config): string {
   }
   return "所有已启用的 Worker 都缺少上游 API key";
 }
+
+export { isUsable };

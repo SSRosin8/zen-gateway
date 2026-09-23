@@ -8,7 +8,14 @@ import { upstreamUrl } from "../../core/upstream/url.ts";
 import type { UpstreamDeps } from "../../core/upstream/fetch.ts";
 import { runRetryChain, type AttemptTarget } from "../../core/upstream/retry.ts";
 import { pipeUpstreamResponse } from "../../core/upstream/pipe.ts";
-import { describeNoWorker, selectTargets } from "../../core/routing/select.ts";
+import { createOverlapScanner } from "../../core/upstream/tap.ts";
+import { describeNoWorker, sessionHashFrom } from "../../core/routing/select.ts";
+import type { Scheduler } from "../../core/routing/scheduler.ts";
+import {
+  containsStaleReasoning,
+  extractBlobHashes,
+  STALE_PATTERN_WINDOW,
+} from "../../core/routing/affinity.ts";
 import {
   errorBodyFromException,
   gatewayError,
@@ -46,8 +53,15 @@ export type RelayDeps = {
   readonly registry: ProtocolRegistry;
   /** 上游依赖(dispatcher 池、锁、Controller)。 */
   readonly upstreamOf: (config: Config) => UpstreamDeps;
+  /**
+   * 调度器。**进程内唯一** —— 两个调度器意味着两份冷却状态,
+   * 于是「这个 Worker 在冷却」取决于请求碰巧走到哪一份。
+   */
+  readonly scheduler: Scheduler;
   /** 注入以便测试。 */
   readonly newId?: () => string;
+  /** 注入以便测试断言确切的冷却与 TTL 边界。 */
+  readonly clock?: () => number;
   readonly log?: (message: string) => void;
 };
 
@@ -164,16 +178,35 @@ async function handleRelay(
     );
   }
 
-  /* ---- 5. 选 Worker ---- */
-  const targets: AttemptTarget[] = selectTargets(config);
+  const clientHeaders = c.req.header();
+  const now = deps.clock?.() ?? Date.now();
+
+  /* ---- 5. 选 Worker(调度状态机) ---- */
+
+  /*
+   * 亲和的两条依据。
+   *
+   * `sessionHashFrom` 优先用体内的会话指针(Responses 面的
+   * `previous_response_id`),没有才用 `x-opencode-session` 头。
+   *
+   * 注意这里读的是**客户端发来的**头:`headers.ts` 在客户端没发时会合成一个,
+   * 但那个每请求都不同,对亲和没有帮助 —— 那种情况下粘滞自然失效,
+   * 而这是正确的(我们确实无法判断这是不是同一条会话)。
+   */
+  const sessionHash = sessionHashFrom({
+    bodyKey: surface.sessionKeyFrom(parsed),
+    headerValue: clientHeaders["x-opencode-session"],
+  });
+  const blobHashes = extractBlobHashes(parsed);
+
+  const plan = deps.scheduler.plan({ config, now, sessionHash, blobHashes });
+  const targets: readonly AttemptTarget[] = plan.targets;
   if (targets.length === 0) {
     return c.json(
       gatewayError("no_worker_available", describeNoWorker(config)),
       503,
     );
   }
-
-  const clientHeaders = c.req.header();
 
   /* ---- 6. 重试链 ---- */
   let result;
@@ -185,6 +218,13 @@ async function handleRelay(
       method: "POST",
       body: raw,
       deps: deps.upstreamOf(config),
+      /*
+       * 冷却记账。逐次回调,而不是等链结束一次性记 ——
+       * 链中每一次尝试都是一个独立的事实:`w1 限流 → w2 传输失败 → w3 成功`
+       * 这条链里三个 Worker 的处置完全不同,只记最后一个会让前两个的故障
+       * 消失,于是下一条请求又把它们重试一遍。
+       */
+      onAttempt: (record) => deps.scheduler.record(record, config, now),
       buildHeaders: (target) =>
         buildUpstreamHeaders({
           clientHeaders,
@@ -218,9 +258,35 @@ async function handleRelay(
   const pipeOrFail = (
     upstream: NonNullable<typeof result.response>,
     extra: Record<string, string>,
+    /** 承接者;失败路径为 null —— 见 `Scheduler.settleStream` 的说明。 */
+    workerId: string | null,
   ): Response => {
+    /*
+     * 不变量 #3 的结算钩子。
+     *
+     * 扫描器**跨块**工作:要匹配的拒绝消息可能正好被切在两个 SSE 块之间,
+     * 逐块独立匹配会漏 —— 而漏掉的症状取决于上游的分块位置,时有时无。
+     *
+     * 这不违反不变量 #1:这里不做任何重试决定,回调只在流彻底结束之后
+     * 更新亲和映射,那时响应早已完整发给客户端。
+     */
+    const scanner = createOverlapScanner(STALE_PATTERN_WINDOW, containsStaleReasoning);
     try {
-      return pipeUpstreamResponse(upstream, extra);
+      return pipeUpstreamResponse(upstream, extra, {
+        onText: (text) => scanner.feed(text),
+        onDone: (error) => {
+          deps.scheduler.settleStream({
+            workerId,
+            sessionHash,
+            blobHashes,
+            status: upstream.status,
+            staleHit: scanner.hit(),
+            // 上游中断或下游取消 → 内容不完整,既不学习也不遗忘。
+            complete: error === null,
+            now: deps.clock?.() ?? Date.now(),
+          });
+        },
+      });
     } catch (err) {
       // 释放上游连接 —— 不释放会让它悬挂到超时。
       void upstream.body?.cancel().catch(() => {});
@@ -233,10 +299,30 @@ async function handleRelay(
   };
 
   if (result.ok) {
-    return pipeOrFail(result.response, {
-      // 诊断头:这次由哪个 Worker 承接。便于用户核对出口隔离是否按预期生效。
-      "x-zen-gateway-worker": result.workerId,
-    });
+    /*
+     * 会话改绑到**实际**承接的 Worker。
+     *
+     * `plan` 绑的是候选链首位,而重试链可能往后走:一条
+     * 「w1 拿到 429 → w2 成功」的链里签发推理块的是 w2。不改绑的话,
+     * 等 w1 冷却结束下一轮就回到它,而客户端回放的是 w2 签发的推理块 ——
+     * 上游必拒。症状是「对话隔一会儿报一次错」,且只在限流之后出现。
+     *
+     * 放在这里而不是流末尾的结算里:会话身份在链 settled 的这一刻就已确定,
+     * 而 `settleStream` 只在客户端**真的读完响应**时触发 —— 放那里的话
+     * 一次提前断开就会让绑定停在错误的 Worker 上。
+     */
+    deps.scheduler.rebind(sessionHash, result.workerId, now);
+
+    return pipeOrFail(
+      result.response,
+      {
+        // 诊断头:这次由哪个 Worker 承接。便于用户核对出口隔离是否按预期生效。
+        "x-zen-gateway-worker": result.workerId,
+        // 为什么是它 —— 粘滞/指纹提示/策略/全员冷却。排查"为什么换了 Worker"用。
+        "x-zen-gateway-route": plan.reason,
+      },
+      result.workerId,
+    );
   }
 
   /*
@@ -245,11 +331,17 @@ async function handleRelay(
    * 客户端应当看到上游真实的错误负载(429 的 retry-after 说明、
    * 400 的字段级报错),而不是网关的转述。这也是唯一能让用户看到
    * 上游真实拒绝原因(例如 FreeTierError)的路径。
+   *
+   * 这条路径**也要结算**:上游对"回放了别人的推理块"的拒绝正是一个 400,
+   * 而不结算会让下一轮回到同一个必败 Worker。状态码非 2xx,所以只会
+   * 解绑与遗忘,不会学习 —— 因此 workerId 传 null(见 `settleStream` 的说明)。
    */
   if (result.response !== null) {
-    return pipeOrFail(result.response, {
-      "x-zen-gateway-attempts": String(result.attempts.length),
-    });
+    return pipeOrFail(
+      result.response,
+      { "x-zen-gateway-attempts": String(result.attempts.length) },
+      null,
+    );
   }
 
   /*

@@ -5,7 +5,7 @@ import { upstreamUrl } from "../../core/upstream/url.ts";
 import type { UpstreamDeps } from "../../core/upstream/fetch.ts";
 import { fetchUpstream } from "../../core/upstream/fetch.ts";
 import { buildUpstreamHeaders } from "../../core/upstream/headers.ts";
-import { selectTargets } from "../../core/routing/select.ts";
+import { usableTargets } from "../../core/routing/select.ts";
 import { classifyStatus } from "../../core/failures.ts";
 import { safeErrorMessage } from "../../shared/redact.ts";
 import { gatewayError } from "../middleware/errorMap.ts";
@@ -65,12 +65,16 @@ async function handleModels(c: Context, deps: ModelsDeps): Promise<Response> {
   /*
    * 目录查询用第一个可用 Worker 的 key。
    *
-   * 不走重试链:目录是幂等的只读查询,失败直接如实报错比换 Worker 重试更
-   * 容易定位问题。没有 Worker 时仍尝试一次无 key 请求 —— 有些上游的目录
-   * 端点免鉴权可读(实测 Zen 如此),那种情况下首次配置前也能看到目录,
-   * 对「方便简单」有实际帮助。
+   * 不走重试链,也**不经调度器**:目录是幂等的只读查询,失败直接如实报错比
+   * 换 Worker 重试更容易定位问题。更要紧的是不共享冷却状态 —— 让一次目录
+   * 查询失败把 Worker 打进冷却,等于**一个只读查询改变了转发的候选顺序**,
+   * 而用户完全看不出这两件事有关系。
+   *
+   * 没有 Worker 时仍尝试一次无 key 请求 —— 有些上游的目录端点免鉴权可读
+   * (实测 Zen 如此),那种情况下首次配置前也能看到目录,对「方便简单」
+   * 有实际帮助。
    */
-  const targets = selectTargets(config);
+  const targets = usableTargets(config);
   const apiKey = targets[0]?.apiKey ?? "";
   const proxyId = targets[0]?.proxyId ?? null;
 

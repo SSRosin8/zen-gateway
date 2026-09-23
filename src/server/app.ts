@@ -4,6 +4,7 @@ import type { Config } from "../shared/schema.ts";
 import { ProtocolRegistry } from "../core/protocols/registry.ts";
 import { chatSurface, MODELS_PATHS } from "../core/protocols/chat.ts";
 import { EgressService } from "../core/proxy/egress.ts";
+import { Scheduler } from "../core/routing/scheduler.ts";
 import { relayAuth } from "./middleware/relayAuth.ts";
 import { loopbackOnly } from "./middleware/loopbackOnly.ts";
 import { createRelayRoutes } from "./routes/relay.ts";
@@ -43,7 +44,17 @@ export type AppDeps = {
   readonly registry?: ProtocolRegistry;
   /** 出口服务。转发与探测必须共用同一个 —— 见 EgressService.upstreamDeps。 */
   readonly egress: EgressService;
+  /**
+   * 调度器。不传则建一个 —— 但**每个 app 只能有一个**。
+   *
+   * 与 egress 同理:两份冷却状态会让「这个 Worker 在冷却」取决于请求碰巧
+   * 走到哪一份,而冷却存在的理由正是别再打那个上游。可注入是为了让测试
+   * 能持有同一个实例来断言跨请求的状态(冷却生效、粘滞命中)。
+   */
+  readonly scheduler?: Scheduler;
   readonly newId?: () => string;
+  /** 注入以便测试推进时间。 */
+  readonly clock?: () => number;
   readonly log?: (message: string) => void;
 };
 
@@ -106,7 +117,9 @@ export function createApp(deps?: AppDeps): Hono {
     configOf: deps.configOf,
     registry,
     upstreamOf,
+    scheduler: deps.scheduler ?? new Scheduler(),
     ...(deps.newId !== undefined ? { newId: deps.newId } : {}),
+    ...(deps.clock !== undefined ? { clock: deps.clock } : {}),
     ...(deps.log !== undefined ? { log: deps.log } : {}),
   };
 

@@ -10,21 +10,32 @@
  * 这个错误就无法在后续阶段被偷偷引入。
  */
 
-export type FailureKind =
+/**
+ * 全部失败类别。
+ *
+ * 类型由这个数组**推导**,而不是另写一份联合类型 —— 冷却与重试的测试需要
+ * 「对每一个 kind 都断言一遍」,而那要求有一份运行期可枚举的清单。
+ * 两份并行的清单必然分叉,且分叉方向是漏:新增一个 kind 时类型会更新、
+ * 手写的数组不会,于是穷举测试静默地少测一项。
+ */
+export const FAILURE_KINDS = [
   /** 限流。尊重 Retry-After,长冷却。 */
-  | "rate_limit"
+  "rate_limit",
   /** 鉴权失败。短退避 —— 配错的 key 应该反复暴露,而不是安静消失 15 分钟。 */
-  | "auth"
+  "auth",
   /** 上游 5xx。可重试。 */
-  | "upstream_error"
+  "upstream_error",
   /** 连接层失败(DNS/TCP/TLS/代理拒绝)。指数退避 + 抖动。 */
-  | "transport"
+  "transport",
   /** 超时。 */
-  | "timeout"
+  "timeout",
   /** 请求本身的问题(400/422 等)。**不是 Worker 的错**,不该冷却它。 */
-  | "bad_request"
+  "bad_request",
   /** 分类不明。保守处理:不重试、不冷却。 */
-  | "unknown";
+  "unknown",
+] as const;
+
+export type FailureKind = (typeof FAILURE_KINDS)[number];
 
 /** 分类所需的最小信息 —— 故意不含 body,见文件头说明。 */
 export type ResponseFacts = {

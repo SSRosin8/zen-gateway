@@ -1,4 +1,5 @@
 import type { Response as UndiciResponse } from "undici";
+import { tapReadable, type StreamTap } from "./tap.ts";
 
 /**
  * 流式透传 —— **唯一**写出客户端响应字节的地方。
@@ -72,6 +73,14 @@ const STRIPPED_RESPONSE_HEADERS = new Set([
 export function pipeUpstreamResponse(
   upstream: UndiciResponse,
   extraHeaders?: Readonly<Record<string, string>>,
+  /**
+   * 旁路观察(不变量 #3 的挂点)。
+   *
+   * 字节**不经过**它 —— 见 `tap.ts`:返回的流与入参逐字节相同,时序也不变。
+   * 可选参数而不是必填:目录查询与测试都不需要结算,强制它们传一个空实现
+   * 只会让"没有结算"和"结算是空的"看起来一样。
+   */
+  tap?: StreamTap,
 ): Response {
   const headers = new Headers();
 
@@ -96,13 +105,33 @@ export function pipeUpstreamResponse(
   }
 
   /*
-   * body 直接传引用,不读、不拷贝。
+   * body 不读、不拷贝、不反序列化。
+   *
+   * 传了 `tap` 时经一层旁路中转,但那一层同样不改字节也不改时序
+   * (见 `tap.ts`)—— 它只是把解码后的**副本**交给扫描器。
    *
    * 204/304 与 HEAD 的响应没有 body,此时必须传 null ——
    * 给一个「不该有体」的状态码配上流会被 Response 构造函数拒绝。
    */
   const body = upstream.body as ReadableStream<Uint8Array> | null;
   const hasBody = body !== null && upstream.status !== 204 && upstream.status !== 304;
+
+  /*
+   * 没有 body 时也要通知结算方一次。
+   *
+   * 少了这一条,`tap.onDone` 在 204/HEAD 这类响应上**永不触发** ——
+   * 而结算方(`Scheduler.settleStream`)是靠它决定"这次到底算不算完成"的,
+   * 于是一次本该学习绑定的成功被静默丢掉。症状是粘滞偶发失效,
+   * 且只在上游返回无体响应时出现。
+   */
+  const outBody = hasBody && tap !== undefined ? tapReadable(body, tap) : hasBody ? body : null;
+  if (!hasBody && tap !== undefined) {
+    try {
+      tap.onDone(null);
+    } catch {
+      /* 结算失败不影响响应本身 */
+    }
+  }
 
   /*
    * `statusText` 也来自上游,同样可能畸形。
@@ -113,12 +142,12 @@ export function pipeUpstreamResponse(
    * 失败时退回不带 statusText 的构造:状态码与 body 才是语义所在。
    */
   try {
-    return new Response(hasBody ? body : null, {
+    return new Response(outBody, {
       status: upstream.status,
       statusText: upstream.statusText,
       headers,
     });
   } catch {
-    return new Response(hasBody ? body : null, { status: upstream.status, headers });
+    return new Response(outBody, { status: upstream.status, headers });
   }
 }
