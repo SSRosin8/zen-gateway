@@ -12,3 +12,5 @@ coverage/
 # 审核子 agent 的 git worktree 副本。它们是临时工作区，
 # 且内含指向主仓库 node_modules 的符号链接，绝不该进版本库。
 .claude/worktrees/
+# 本机测试用:含 Relay Token,绝不提交
+opencode.json
