@@ -1,6 +1,6 @@
 import type { Config, RoutingStrategy, WorkerKind } from "../../shared/schema.ts";
 import type { AttemptTarget } from "../upstream/retry.ts";
-import { isUsable, WorkerPool, type WorkerRuntime } from "./workerPool.ts";
+import { isUsable, isWorkerReady, WorkerPool, type WorkerRuntime } from "./workerPool.ts";
 import { AffinityMap, digestOf, normalizeSessionKey } from "./affinity.ts";
 
 /**
@@ -34,13 +34,27 @@ import { AffinityMap, digestOf, normalizeSessionKey } from "./affinity.ts";
 function preferredKind(strategy: RoutingStrategy): WorkerKind | null {
   switch (strategy) {
     /*
-     * 注意:匿名 Worker 现在**不可能进入候选** —— `isUsable` 要求有 apiKey,
-     * 而匿名的定义就是没有 key(上游已于 2026-09-16 前后关闭免 key 通道)。
-     * 所以 `anonymous_first`(schema 的默认值)当前等价于"按配置顺序"。
+     * 三个取值都**真的生效**,产出三种不同的候选顺序。
      *
-     * 刻意保留这个分支而不是删掉:它是**正确的**表达,只是输入类别恰好为空。
-     * 若上游哪天重开免费通道(`discover-upstream.mjs` 有常驻探针监测),
-     * 这个默认值立刻恢复意义。
+     * 我先前在这里(以及 `docs/architecture.md` 的缺口清单、plan)断言
+     * 「匿名 Worker 的定义就是没有 key,所以这个分支的输入集恒为空」。
+     * 第五轮审核证伪了它,两个独立 agent 从不同入口撞上同一条 —— 因为
+     * `WorkerSchema` 的 refine 是**单向**的:
+     *
+     * ```ts
+     * .refine((w) => w.kind === "anonymous" || w.apiKey.trim() !== "")
+     * ```
+     *
+     * 它只要求「authenticated 必须有 key」,对 anonymous **不作任何约束**。
+     * 所以 `{ kind: "anonymous", apiKey: "..." }` 既合法又可用(`isUsable`
+     * 只看 key 不看 kind),排序真的按 kind 生效,而且 `anonymous_first`
+     * 正是 schema 的默认值 —— 默认配置下就生效。
+     *
+     * 我那个错误推理正是纪律 #6 的形态:把一次测量(免 key 通道已关闭)
+     * 推广成一个结构性结论(这个分支不可能有输入)。空的是**实践**输入集
+     * (关闭免 key 通道后,没人有理由配一个 kind 为 anonymous 却带 key 的
+     * Worker),不是**合法**输入集。差别很实在:前者用户现在就能造出来看到
+     * 效果,后者意味着"改这个字段不会有可见变化"—— 而那句话是假的。
      */
     case "anonymous_first":
       return "anonymous";
@@ -114,28 +128,44 @@ export function select(input: SelectInput): Selection {
 
   const ttlMs = config.routing.affinityTtlMs;
   const exists = (id: string): boolean => pool.has(id);
-  const ready = all.filter((w) => w.cooldownUntil <= now);
+  /*
+   * 就绪判定走 `isWorkerReady` 这个唯一定义,不在这里手写 `<= now`。
+   *
+   * 先前这里是第四份手写的同一个比较(另三份在 `workerPool.ts`),而更糟的是
+   * **同一个函数里两份判定并存**:这个过滤器用手写的,下面的粘滞校验用
+   * `pool.isReady`。按纪律 #4,并行的判断必然分叉,方向是漏。
+   */
+  const ready = all.filter((w) => isWorkerReady(w.cooldownUntil, now));
 
   /* ---- 1. 粘滞 ---- */
   let sticky: WorkerRuntime | null = null;
   let reason: Selection["reason"] = "strategy";
+  /**
+   * 会话绑定的 Worker,**可能正在冷却**。
+   *
+   * 记住它而不是立刻解绑:第 3 步(全员冷却)需要知道"这条会话本来属于谁",
+   * 否则会把绑定迁走。见那里的说明。
+   */
+  let boundId: string | null = null;
 
   const ctx = input.affinity;
   if (ctx !== undefined && ctx.sessionHash !== null) {
-    const bound = ctx.map.lookupSession(ctx.sessionHash, now, ttlMs, exists);
+    boundId = ctx.map.lookupSession(ctx.sessionHash, now, ttlMs, exists);
     /*
-     * 绑定存在但该 Worker 在冷却 → 放弃粘滞,重新挑。
+     * 绑定存在且就绪 → 严格粘滞。
      *
-     * 等它恢复是错的:冷却可能长达 15 分钟,而客户端只会看到网关卡住。
-     * 代价是这一轮的推理连续性丢失(上游会拒掉回放的推理块),
-     * 但那是**上游的**错误,客户端能看到并开一个新 turn ——
-     * 好于我们自己把请求挂住。
+     * 绑定存在但在冷却 → 放弃粘滞,重新挑(不在这里解绑)。等它恢复是错的:
+     * 冷却可能长达 15 分钟,而客户端只会看到网关卡住。代价是这一轮的推理
+     * 连续性丢失(上游会拒掉回放的推理块),但那是**上游的**错误,
+     * 客户端能看到并开一个新 turn —— 好于我们自己把请求挂住。
+     *
+     * 先前这里有一句显式 `unbindSession()`。去掉它有两个理由:
+     * 一是第 4 步的 `bind(head)` 本来就会覆盖那条绑定(变异测试证实那行是
+     * 死代码);二是第 3 步**需要**它还在。
      */
-    if (bound !== null && pool.isReady(bound, now)) {
-      sticky = pool.get(bound);
+    if (boundId !== null && pool.isReady(boundId, now)) {
+      sticky = pool.get(boundId);
       reason = "sticky";
-    } else if (bound !== null) {
-      ctx.map.unbindSession(ctx.sessionHash);
     }
   }
 
@@ -148,13 +178,38 @@ export function select(input: SelectInput): Selection {
     }
   }
 
-  /* ---- 3. 全员冷却:只给最早恢复的那一个 ---- */
+  /* ---- 3. 全员冷却:只给最早恢复的那一个,且**不动会话绑定** ---- */
   if (ready.length === 0) {
     const earliest = all.reduce((best, w) => (w.cooldownUntil < best.cooldownUntil ? w : best));
-    bind(ctx, earliest.id, now);
+
+    /*
+     * 这里**刻意不 bind**。
+     *
+     * 第五轮审核查出的缺陷:先前这条分支无条件 `bind(earliest)`,于是一次
+     * 短暂的全员冷却窗口就能把会话绑定**永久**迁走。实测:
+     *
+     * ```
+     * 轮1 链: [w1, w2]                      绑定 w1(w1 签发了推理块)
+     * 轮2 链: [w2]  reason = all_cooling    → 改绑 w2
+     * 轮3 链: [w2, w1] reason = sticky      ← 指纹真相是 w1
+     * ```
+     *
+     * 指纹映射保留了正确答案 w1,但第 2 步的指纹提示只在 `sticky === null`
+     * 时才查 —— 会话绑定已命中,那份正确信息永远读不到。症状与我用集成测试
+     * 查出的那个缺陷完全一致:对话隔一会儿报一次错,只在限流之后出现。
+     *
+     * 为什么不 bind 是安全的:这一轮打的是一个正在冷却的 Worker,很可能失败;
+     * 若它**成功**了,`relay.ts` 的 `rebind()` 会把绑定落到实际承接者身上 ——
+     * 那才是正确的时机(那时才知道推理块是谁签发的)。
+     *
+     * 为什么仍选"最早恢复"而不是选绑定的那个:全员冷却时无论选谁都在违反
+     * 冷却,而打一个刚被 429 的 Worker 可能换来更长的封禁。最早恢复的那个
+     * 是"违反得最轻"的选择。推理连续性靠**保住绑定**来救,不靠这一轮的选择。
+     */
     return {
       targets: [toTarget(earliest)],
       reason: "all_cooling",
+      // 绑定仍在(如果本来有),但这一轮不是粘滞命中。
       stickyWorkerId: null,
     };
   }
@@ -176,7 +231,7 @@ export function select(input: SelectInput): Selection {
       : [toTarget(sticky), ...ordered.filter((w) => w.id !== sticky.id).map(toTarget)];
 
   const head = targets[0];
-  if (head !== undefined) bind(ctx, head.workerId, now);
+  if (head !== undefined) bind(ctx, head.workerId, now, ttlMs);
 
   return { targets, reason, stickyWorkerId: sticky?.id ?? null };
 }
@@ -185,9 +240,14 @@ function rank(worker: WorkerRuntime, preferred: WorkerKind): number {
   return worker.kind === preferred ? 0 : 1;
 }
 
-function bind(ctx: AffinityContext | undefined, workerId: string, now: number): void {
+function bind(
+  ctx: AffinityContext | undefined,
+  workerId: string,
+  now: number,
+  ttlMs: number,
+): void {
   if (ctx === undefined || ctx.sessionHash === null) return;
-  ctx.map.bindSession(ctx.sessionHash, workerId, now);
+  ctx.map.bindSession(ctx.sessionHash, workerId, now, ttlMs);
 }
 
 /**

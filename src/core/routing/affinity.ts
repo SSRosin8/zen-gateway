@@ -39,8 +39,14 @@ import { createHash } from "node:crypto";
 const SESSION_CAP = 10_000;
 const BLOB_CAP = 5_000;
 
-/** 会话键在哈希之前的长度上限 —— 客户端头不可信,不能让它无界增长。 */
-const MAX_SESSION_KEY_LENGTH = 256;
+/**
+ * 会话键的长度上限。**超过就不参与亲和**,而不是截断 —— 见下。
+ *
+ * 数值放宽到 4096:头本身已被 Node 的 `maxHeaderSize`(16 KB)兜住,而体内的
+ * 会话指针(Responses 面的 `previous_response_id`)没有那个约束,所以仍需一个
+ * 上限防止对一个 64 MB 的字符串做 sha256。
+ */
+const MAX_SESSION_KEY_LENGTH = 4096;
 
 /** sha256 十六进制摘要,64 个小写十六进制字符。 */
 export function digestOf(value: string): string {
@@ -48,18 +54,41 @@ export function digestOf(value: string): string {
 }
 
 /**
- * 归一化客户端给的会话键。
+ * 归一化客户端给的会话键;超长或空则返回 null(不参与亲和)。
  *
  * 去掉 CR/LF/Tab 是因为这个值**先前已经被当作 HTTP 头转发过**
  * (`x-opencode-session`),而 `headers.ts` 对含控制字符的值是**抛错**处理。
  * 这里不抛:亲和只是优化,一个奇怪的会话键不该让请求失败,
  * 归一化后照常用即可。
+ *
+ * ## 超长的键为什么**拒绝**而不是截断
+ *
+ * 先前这里是 `slice(0, 256)` 然后交给 `digestOf`。第五轮审核指出并实测了
+ * 后果:**截断发生在哈希之前,等于摘要被截断**。
+ *
+ * ```
+ * s1 = "x".repeat(256) + "AAA"
+ * s2 = "x".repeat(256) + "BBB"
+ * 两个不同会话键 → 同一摘要? true
+ * ```
+ *
+ * 于是前 256 字符相同的两个会话共用一个绑定:一方的绑定被另一方改写,
+ * 指纹学习也记到错误的 Worker 上。更糟的是它是个廉价的**操控原语** ——
+ * 知道受害者会话键的前 256 字符就能任意改写其绑定。
+ *
+ * 我写那段注释时只想到"长度上限防客户端无界增长",没意识到**截断与哈希的
+ * 顺序**决定了会不会碰撞。
+ *
+ * 返回 null 让这个请求退化成纯策略排序 —— 对一个畸形长度的会话键,
+ * "不做亲和"远好于"把它和别人混在一起"。
  */
 export function normalizeSessionKey(value: unknown): string | null {
   if (typeof value !== "string") return null;
+  // 先按上限拒绝:避免对超大字符串做 replace 与 trim。
+  if (value.length > MAX_SESSION_KEY_LENGTH) return null;
   const clean = value.replace(/[\r\n\t]+/g, " ").trim();
   if (clean === "") return null;
-  return clean.slice(0, MAX_SESSION_KEY_LENGTH);
+  return clean;
 }
 
 /* ------------------------------------------------------------------ *
@@ -71,13 +100,34 @@ const ENCRYPTED_BLOB_KEYS = new Set(["encrypted_content", "signature"]);
 
 /*
  * 遍历上限。请求体来自客户端,可能是深度嵌套的多模态负载;
- * 无界遍历会让一个畸形请求体把 CPU 占满(而且发生在**转发之前**,
- * 所以上游都还没参与)。
+ * 无界遍历会让一个畸形请求体把 CPU 与内存占满(而且发生在**转发之前**,
+ * 所以上游都还没参与,故障完全在我们这边)。
  */
 const MAX_BLOB_VALUES = 64;
 const MAX_BLOB_VALUE_LENGTH = 16_384;
 const MIN_BLOB_VALUE_LENGTH = 16;
-const MAX_TRAVERSED_NODES = 20_000;
+/**
+ * 预算:**入栈**与出栈都计入。
+ *
+ * 先前只数出栈(`pop` 次数),而数组分支在**一次 pop 里把全部元素压栈** ——
+ * 于是这个上限只约束"访问几个节点",完全不约束"压栈几个"。
+ * `MAX_TRAVERSE_DEPTH` 也挡不住:恶意形态是**宽**而非深,深度恒为 1。
+ *
+ * 第五轮审核实测(一个 355 万元素的扁平数组,JSON 约 64 MB,在 64 MB 体上限内):
+ *
+ * ```
+ * 恶意"宽而扁"体: 141ms | heapUsed +222MB | 提取到指纹 0 个
+ * 真实多模态体:   0.4ms |                 | 提取到 1 个
+ * ```
+ *
+ * 开销换来的信息量为零。攻击需要 Relay Token(鉴权在读体之前),而能读
+ * 0600 `opencode.json` 的进程本来就能直接偷 Worker key —— 所以这不是越权,
+ * 是一个**本机自伤**的放大器:事件循环被占住,同时进来的正常请求一起变慢。
+ *
+ * 超预算时静默少提取几个指纹是可接受的:漏提取只让粘滞退化成策略排序,
+ * 而那是这个功能的降级形态,不是错误行为。
+ */
+const MAX_TRAVERSAL_BUDGET = 20_000;
 const MAX_TRAVERSE_DEPTH = 16;
 
 /**
@@ -94,23 +144,39 @@ export function extractBlobHashes(body: unknown): string[] {
 
   const hashes = new Set<string>();
   const stack: Array<{ value: unknown; depth: number }> = [{ value: body, depth: 0 }];
-  let visited = 0;
 
-  while (stack.length > 0 && hashes.size < MAX_BLOB_VALUES && visited < MAX_TRAVERSED_NODES) {
+  /*
+   * 单一预算,**每个被检视的元素都扣一次** —— 出栈、数组元素、对象字段一视同仁。
+   *
+   * 关键是数组元素与对象字段在**压栈之前**就扣:先前只在出栈时扣,于是
+   * 「一次 pop 压入 355 万个元素」完全不受约束(见上面常量的说明)。
+   *
+   * 数组元素被扣两次(压栈 1 + 出栈 1),所以有效预算约为一半。这是保守方向,
+   * 不必修正。
+   */
+  let budget = MAX_TRAVERSAL_BUDGET;
+
+  while (stack.length > 0 && hashes.size < MAX_BLOB_VALUES && budget > 0) {
     const frame = stack.pop();
     if (frame === undefined) break;
-    visited += 1;
+    budget -= 1;
     const { value, depth } = frame;
 
     if (Array.isArray(value)) {
       if (depth < MAX_TRAVERSE_DEPTH) {
-        for (const item of value) stack.push({ value: item, depth: depth + 1 });
+        for (const item of value) {
+          if (budget <= 0) break;
+          budget -= 1;
+          stack.push({ value: item, depth: depth + 1 });
+        }
       }
       continue;
     }
     if (value === null || typeof value !== "object" || depth >= MAX_TRAVERSE_DEPTH) continue;
 
     for (const [key, entry] of Object.entries(value)) {
+      if (budget <= 0) break;
+      budget -= 1;
       if (typeof entry === "string" && ENCRYPTED_BLOB_KEYS.has(key)) {
         if (entry.length >= MIN_BLOB_VALUE_LENGTH && entry.length <= MAX_BLOB_VALUE_LENGTH) {
           hashes.add(digestOf(entry));
@@ -164,7 +230,21 @@ type Binding = { workerId: string; at: number };
  * 两张有界的 TTL 映射。
  *
  * TTL 与容量都在**读取时**判定,不起定时器:一个自用网关不值得为过期清理
- * 养一个 interval(它还会在测试里把进程吊住)。`prune()` 由写入路径顺带调用。
+ * 养一个 interval(它还会在测试里把进程吊住)。
+ *
+ * 过期条目的清理有两条路径:
+ *
+ * - `lookupSession` / `findBlobWorker` 读到过期条目时就地删掉
+ * - `evict`(容量满时)**优先清过期**,不够才按 FIFO 淘汰
+ *
+ * `prune()` 是第三条,但它**目前在生产里没有调用方** —— 只有测试与
+ * (将来的)管理面用。先前这里的注释写的是「`prune()` 由写入路径顺带调用」,
+ * 那是假的:写入路径调的是 `evict`。第五轮审核指出这与
+ * 「`npm run status` 会报就绪数」是同一形态的失实(纪律 #7:把"代码里有
+ * 这个能力"写成"它在被调用")。
+ *
+ * 不接上 `prune` 是有意的:上面两条路径已经保证内存有界,而定期全表扫描
+ * 在个位数 Worker、万级条目的规模上没有收益。
  */
 export class AffinityMap {
   #sessions = new Map<string, Binding>();
@@ -192,11 +272,17 @@ export class AffinityMap {
     return found.workerId;
   }
 
-  bindSession(sessionHash: string, workerId: string, now: number): void {
+  /**
+   * 绑定会话。`ttlMs` 用于容量淘汰时优先清过期项 —— 见 `evict`。
+   *
+   * 写入方法也要 ttlMs,与读取方法(`lookupSession`/`findBlobWorker`/`prune`)
+   * 一致:这张表的每个操作都需要知道"什么算过期"。
+   */
+  bindSession(sessionHash: string, workerId: string, now: number, ttlMs: number): void {
     // 先删再插:Map 按插入顺序迭代,这样重新绑定的会话回到队尾,淘汰的是最老的。
     this.#sessions.delete(sessionHash);
     this.#sessions.set(sessionHash, { workerId, at: now });
-    evict(this.#sessions, SESSION_CAP);
+    evict(this.#sessions, SESSION_CAP, now, ttlMs);
   }
 
   unbindSession(sessionHash: string): void {
@@ -231,12 +317,13 @@ export class AffinityMap {
     return candidate;
   }
 
-  learnBlobs(hashes: readonly string[], workerId: string, now: number): void {
+  /** 学习指纹。`ttlMs` 用于容量淘汰时优先清过期项 —— 见 `evict`。 */
+  learnBlobs(hashes: readonly string[], workerId: string, now: number, ttlMs: number): void {
     for (const hash of hashes) {
       this.#blobs.delete(hash);
       this.#blobs.set(hash, { workerId, at: now });
     }
-    evict(this.#blobs, BLOB_CAP);
+    evict(this.#blobs, BLOB_CAP, now, ttlMs);
   }
 
   forgetBlobs(hashes: readonly string[]): void {
@@ -275,8 +362,32 @@ function fresh(binding: Binding, now: number, ttlMs: number): boolean {
   return now - binding.at <= ttlMs;
 }
 
-/** 超出容量时从头(最老)开始淘汰。 */
-function evict(map: Map<string, Binding>, cap: number): void {
+/**
+ * 超出容量时腾空间。**先清过期的,不够再按 FIFO 淘汰最老的。**
+ *
+ * 为什么先清过期:先前是无条件 FIFO,于是灌满这张表就能把别人**仍然有效**的
+ * 绑定挤掉。第五轮审核实测了代价 —— 受害者正在进行的长对话丢失粘滞 →
+ * 下一轮换 Worker → 客户端回放的加密推理块被上游拒,也就是
+ * **Phase 5 刻意要避免的那个症状可以被主动诱发**。指纹表更便宜:
+ * 每请求可学 64 个,79 个成功请求就能冲掉整张 5000 条的表。
+ *
+ * 先清过期把成本抬高了一个量级:攻击者要挤掉活跃绑定,得先让表里**全部**
+ * 都是活跃的,也就是在 TTL 窗口内塞满 10000 个不同会话。而过期条目本来就
+ * 该走 —— 它们只是因为「TTL 在读取时判定」才还留着。
+ *
+ * 仍保留 FIFO 兜底:全是活跃条目时总得淘汰一个,而最老的那个是最可能
+ * 已经结束的。
+ */
+function evict(map: Map<string, Binding>, cap: number, now: number, ttlMs: number): void {
+  if (map.size <= cap) return;
+
+  // 第一轮:清过期(含"来自未来"的,见 fresh 的说明)。
+  for (const [key, binding] of map) {
+    if (map.size <= cap) return;
+    if (!fresh(binding, now, ttlMs)) map.delete(key);
+  }
+
+  // 第二轮:仍超出说明全是活跃条目 —— 按插入顺序淘汰最老的。
   while (map.size > cap) {
     const oldest = map.keys().next();
     if (oldest.done === true) break;

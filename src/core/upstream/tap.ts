@@ -63,6 +63,31 @@ export function tapReadable(
   const finish = (error: unknown): void => {
     // 必须幂等:cancel 与 read 的错误路径都可能到这里。
     if (finished) return;
+
+    /*
+     * 收尾 flush:把 decoder 里残留的不完整多字节序列吐出来。
+     *
+     * 不 flush 的后果是**流的最后一个字符永远看不到** —— `{ stream: true }`
+     * 会把跨块切断的字节留在内部缓冲里等下一块,而最后一块之后没有下一块了。
+     * 实测:`"推理 signature invalid"` 去掉末字节后,扫描到的文本是
+     * `"推理 signature invali"`。
+     *
+     * 当前四条失效推理模式(`affinity.ts`)全是 ASCII,所以影响接近零。
+     * 但这是个结构性小洞:Phase 6 若往模式表里加中文措辞就会变成真问题,
+     * 而那时症状是"只有拒绝消息刚好结束在流末尾时才漏检"——极难复现。
+     *
+     * flush 要在 `finished = true` **之前**:`scan` 有一条
+     * `if (finished) return` 的守卫(保证 onText 不越过 onDone)。
+     */
+    if (scanned > 0 && scanned < SCAN_BUDGET_BYTES) {
+      try {
+        const tail = decoder.decode();
+        if (tail !== "") tap.onText(tail);
+      } catch {
+        /* 同 scan:解码问题不影响已转发的响应 */
+      }
+    }
+
     finished = true;
     try {
       tap.onDone(error);
@@ -72,6 +97,21 @@ export function tapReadable(
   };
 
   const scan = (chunk: Uint8Array): void => {
+    /*
+     * `finished` 之后不再扫描 —— 保证 `onText` **绝不越过** `onDone`。
+     *
+     * 结算方在 `onDone` 里采样 `scanner.hit()`,所以越过了的那一块等于
+     * 白扫:拒绝消息被扫到,而 `settleStream` 收到的却是 `staleHit: false`。
+     * 而 `staleHit` 是 `settleStream` 里唯一**先于** `complete` 检查的分支
+     * (刻意设计成"即使流不完整也要解绑"),越界恰好把那条唯一可用的路径关掉。
+     *
+     * 第五轮审核用一个可控的假 reader 复现了这个时序。我随后用**真实**
+     * ReadableStream 复测两种形态(同步入队、异步延迟入队),都无法触发 ——
+     * 真实 reader 在 cancel 之后按规范以 `done: true` 兑现,不会带着值回来。
+     * 所以这是一条**纵深防御**,不是修一个已知可达的缺陷:
+     * 代价是一个布尔判断,而收益是这条时序关系不再依赖 reader 实现的善意。
+     */
+    if (finished) return;
     if (scanned >= SCAN_BUDGET_BYTES) return;
     scanned += chunk.byteLength;
     try {

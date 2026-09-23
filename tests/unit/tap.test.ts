@@ -203,6 +203,53 @@ describe("结束通知", () => {
     expect(c.doneCalls()[0]).toBeInstanceOf(Error);
   });
 
+  it("onText **绝不**越过 onDone(纵深防御,非可达缺陷)", async () => {
+    /*
+     * 结算方在 `onDone` 里采样 `scanner.hit()`,所以越过了的那一块等于白扫:
+     * 拒绝消息被扫到,而 `settleStream` 收到 `staleHit: false`。而 `staleHit`
+     * 是唯一**先于** `complete` 检查的分支(刻意设计成"即使流不完整也要解绑"),
+     * 越界恰好把那条唯一可用的路径关掉。
+     *
+     * ## 这条用假 reader,且它测的不是一个可达的生产缺陷
+     *
+     * 第五轮审核用可控假 reader 复现了这个时序。我随后用**真实** ReadableStream
+     * 复测两种形态(同步入队、异步延迟入队)都无法触发 —— 真实 reader 在 cancel
+     * 之后按规范以 `done: true` 兑现,不会带着值回来。
+     *
+     * 所以这里刻意用一个**不守规范**的假 reader:它代表"如果 reader 实现不善意"。
+     * 按纪律 #1 的分类,这不是"补一个漏掉的断言",而是把
+     * 「onText 与 onDone 的先后」从**依赖第三方善意**变成**本模块自己保证**。
+     * 标注清楚是必要的 —— 否则下一轮会有人以为这是个真实缺陷的回归测试。
+     */
+    const releases: Array<() => void> = [];
+    const fakeReader = {
+      read: () =>
+        new Promise<{ done: boolean; value: Uint8Array }>((resolve) => {
+          releases.push(() => resolve({ done: false, value: bytes("not issued to this caller") }));
+        }),
+      cancel: () => Promise.resolve(),
+    };
+    const fakeBody = { getReader: () => fakeReader } as unknown as ReadableStream<Uint8Array>;
+
+    const events: string[] = [];
+    const wrapped = tapReadable(fakeBody, {
+      onText: () => events.push("onText"),
+      onDone: () => events.push("onDone"),
+    });
+
+    const reader = wrapped.getReader();
+    const pending = reader.read();
+    await Promise.resolve();
+    await reader.cancel("客户端走了");
+    for (const release of releases) release();
+    await pending.catch(() => undefined);
+    await new Promise((r) => { setTimeout(r, 10); });
+
+    // onDone 必须是最后一个事件 —— 其后的 onText 被守卫挡住。
+    expect(events.at(-1)).toBe("onDone");
+    expect(events.filter((e) => e === "onDone")).toHaveLength(1);
+  });
+
   it("读完之后再取消不会重复通知", async () => {
     const c = collector();
     const wrapped = tapReadable(streamOf([bytes("a")]), c.tap);
@@ -275,11 +322,38 @@ describe("createOverlapScanner", () => {
     /*
      * 这条是本文件存在的主要理由。逐块独立匹配会漏,而漏掉的症状取决于
      * 上游的分块位置 —— 时有时无,极难复现。
+     *
+     * ## 第一块必须**长于窗口**,否则这条测试是空壳
+     *
+     * 我第一版的第一次 feed 只有 43 字符,而 window 是 80 —— 于是
+     * `combined.length > window` 为假,走的是 `tail = combined` 那一支,
+     * **`slice` 分支根本没执行**。第五轮变异测试实测:把 `slice(-window)`
+     * 改成 `slice(0, window)`(保留开头而非尾巴,跨块匹配必然失效)后
+     * 这条测试依然全绿。
+     *
+     * 所以这里先垫 200 字符,迫使截断真的发生:此时只有"保留尾巴"才能
+     * 让第二块接上。归类是纪律 #1 的第一类 —— **测的路径根本不存在**。
      */
     const s = scanner();
-    s.feed("data: {\"error\":\"reasoning block was not iss");
+    const padding = "x".repeat(200);
+    s.feed(`${padding}reasoning block was not iss`);
     expect(s.hit()).toBe(false);
-    s.feed("ued to this caller\"}\n\n");
+    s.feed("ued to this caller");
+    expect(s.hit()).toBe(true);
+  });
+
+  it("保留的是**尾巴**而不是开头", () => {
+    /*
+     * 上一条的反向钉子:即便第一块被截断,留下的必须是**末尾** window 个字符。
+     * 保留开头会让跨块拼接必然失败,而两种写法在源码里长得几乎一样
+     * (`slice(-window)` vs `slice(0, window)`)。
+     *
+     * 构造:前缀是与模式完全无关的填充,匹配所需的前半段紧贴第一块末尾。
+     */
+    const s = scanner();
+    s.feed(`${"无关内容".repeat(60)}signature is req`);
+    expect(s.hit()).toBe(false);
+    s.feed("uired");
     expect(s.hit()).toBe(true);
   });
 

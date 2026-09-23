@@ -133,13 +133,62 @@ describe("sync", () => {
     expect(pool.get("w1")).toBeNull();
   });
 
-  it("重新加回来的 Worker 不带旧冷却 —— 状态已随删除消失", () => {
+  it("停用再启用**保留**冷却 —— 停用不是「用户修好了这个账号」", () => {
+    /*
+     * 先前这条断言的是相反的行为(「重新加回来的 Worker 不带旧冷却」),
+     * 理由写的是「状态已随删除消失」。第五轮审核指出那是**实现细节泄漏成契约**:
+     * `sync` 的 `previous` Map 从已被 `filter(isUsable)` 过滤的列表建,
+     * 停用的 Worker 不在里面,于是冷却被清 —— 而这不是任何人的设计意图。
+     *
+     * 实测后果:429 `Retry-After: 900` 之后停用再启用,剩余冷却 900000ms → 0。
+     * Phase 9 的管理后台点两下就能抹掉上游明确要求的等待,而那正是冷却
+     * 存在的理由。
+     *
+     * 判断依据很直接:上游的限流不会因为我在本地改了一行配置而失效。
+     * 只有**换 key** 才是「用户修好了这个账号」的信号(见上一条)。
+     */
+    const cfg = config([{ id: "w1" }, { id: "w2" }]);
+    const pool = new WorkerPool(cfg);
+    pool.markFailure({ workerId: "w1", kind: "rate_limit", retryAfter: "600", config: cfg, now: NOW, jitter: 0 });
+
+    // 停用 → 移出池;再启用 → 冷却仍在。
+    pool.sync(config([{ id: "w1", enabled: false }, { id: "w2" }]));
+    expect(pool.has("w1")).toBe(false);
+    pool.sync(config([{ id: "w1" }, { id: "w2" }]));
+    expect(pool.isReady("w1", NOW)).toBe(false);
+    expect(pool.get("w1")?.cooldownUntil).toBe(NOW + 600_000);
+  });
+
+  it("停用期间换了 key,再启用时仍然重置", () => {
+    /*
+     * 两条规则的交叉:停用保留状态,但换 key 重置。换 key 的信号更强,
+     * 所以它赢 —— 否则「停用 → 换 key → 启用」这条很自然的修复流程
+     * 会让用户看到自己刚换的 key 依然被跳过。
+     */
+    const cfg = config([{ id: "w1", apiKey: "fake-old-key-not-real" }]);
+    const pool = new WorkerPool(cfg);
+    pool.markFailure({ workerId: "w1", kind: "auth", retryAfter: null, config: cfg, now: NOW, jitter: 0 });
+
+    pool.sync(config([{ id: "w1", apiKey: "fake-old-key-not-real", enabled: false }]));
+    pool.sync(config([{ id: "w1", apiKey: "fake-new-key-not-real" }]));
+    expect(pool.isReady("w1", NOW)).toBe(true);
+    expect(pool.get("w1")?.consecutiveFails).toBe(0);
+  });
+
+  it("彻底删掉再加回来也保留 —— 与停用同理", () => {
+    /*
+     * 从 config 里删掉一个 Worker 再加回来,与停用再启用是同一件事:
+     * 上游的限流状态与我的配置编辑无关。
+     *
+     * 这条与上面那条的区别只在「Worker 是否还在 config 里」,而那个区别
+     * 对"该不该继续冷却"不承载任何信息。
+     */
     const cfg = config([{ id: "w1" }]);
     const pool = new WorkerPool(cfg);
     pool.markFailure({ workerId: "w1", kind: "rate_limit", retryAfter: "600", config: cfg, now: NOW, jitter: 0 });
     pool.sync(config([]));
     pool.sync(config([{ id: "w1" }]));
-    expect(pool.isReady("w1", NOW)).toBe(true);
+    expect(pool.isReady("w1", NOW)).toBe(false);
   });
 });
 

@@ -140,7 +140,43 @@ export function pipeUpstreamResponse(
    * 不校验 statusText 的实现,所以生产路径下这一条通常不触发 —— 但单测里
    * 用的是标准 `Response`(会校验),而且我们不该依赖那个替换行为。
    * 失败时退回不带 statusText 的构造:状态码与 body 才是语义所在。
+   *
+   * ## 两次构造都失败时,必须由本函数释放它锁住的流
+   *
+   * 第五轮审核查出的最要紧一条。`tapReadable` 内部 `getReader()` 会**锁住**
+   * 上游 body,而 `new Response()` 仍可能抛 —— 状态码超出 200..599 时
+   * 两次构造都抛 `RangeError`(实测 undici 8.10.2 会原样透传 600/999 这类
+   * 状态行并给出 body 流)。
+   *
+   * 此时 `relay.ts` 那层兜底里的 `upstream.body?.cancel()` 会因流已被锁而
+   * **异步拒绝** `TypeError: Invalid state: ReadableStream is locked`,
+   * 并被它的 `.catch(() => {})` 静默吞掉。实测对照:
+   *
+   * ```
+   * 无 tap: pipe 抛 RangeError | body.locked=false | cancel → resolved
+   * 带 tap: pipe 抛 RangeError | body.locked=true  | cancel → REJECTED
+   * ```
+   *
+   * 后果三重且全静默:上游连接泄漏(上界 = `bodyTimeout`,默认 5 分钟)、
+   * `onDone` **一次都不触发**(不变量 #3 整条漏掉)、客户端拿到裸 500。
+   *
+   * 耐久的结论不是"600 状态码要拦一下" —— 那只是今天能找到的一个触发口。
+   * 真正坏掉的是 `relay.ts` 承诺的那道通用兜底:**加 tap 之后它结构上不可能
+   * 成立**,因为它拿到的 body 已经不是它能释放的那个。所以责任必须回到
+   * **锁住流的这一层**:谁锁的谁负责在自己的失败路径上释放。
+   *
+   * 取消 `outBody`(包装后的流)会经 `tap.ts` 的 cancel 分支传播到上游
+   * reader,同时触发 `onDone(非 null)` —— 于是结算方正确地按"不完整"处理,
+   * 既不学习也不遗忘。
    */
+  const releaseOnFailure = (err: unknown): never => {
+    // 只有我们包装过的流才由我们释放;未包装时 body 仍归调用方处置。
+    if (tap !== undefined && outBody !== null) {
+      void outBody.cancel(err).catch(() => {});
+    }
+    throw err;
+  };
+
   try {
     return new Response(outBody, {
       status: upstream.status,
@@ -148,6 +184,10 @@ export function pipeUpstreamResponse(
       headers,
     });
   } catch {
-    return new Response(outBody, { status: upstream.status, headers });
+    try {
+      return new Response(outBody, { status: upstream.status, headers });
+    } catch (err) {
+      return releaseOnFailure(err);
+    }
   }
 }

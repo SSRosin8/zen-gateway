@@ -45,7 +45,7 @@ src/
 **`src/shared/` 不得 import `node:*`。** 它被管理后台的 Vite 构建打包，
 任何 Node 内置模块都会让构建直接失败。所以 IP 校验在 `shared/ip.ts` 用
 WHATWG `URL` 的 host 解析器实现，而 `node:net.isIP` 只在**测试里**当权威基准
-做模糊对照（70 万次，零分歧）。
+做模糊对照（4 万次，零分歧）。
 
 **端口只有一处解析。** `store/port.ts` 是唯一真相，三个调用点
 （`server/index.ts`、`scripts/service.mjs`、`vite.config.ts`）都从它取值。
@@ -289,17 +289,36 @@ schema：实测 +57ms，而 `service.mjs status` 全程只有 51ms。
    缺交集会**放得偏宽**：已下架的 `xxx-free` 会被放行，然后由上游返回
    400 `Model is unavailable.`（→ Phase 6）
 2. **`/v1/models` 每次请求都打一次上游**，没有启动预热与最后成功缓存 —— 上游抖动时目录会跟着消失（→ Phase 6）
-3. **目录是 per-Worker 的**（实测：带 key 与免 key 看到不同目录），所以缓存键必须含 Worker 身份（→ Phase 6）
+3. **目录按「带 key／免 key」两种身份区分，不是 per-Worker**。先前这条写的是
+   「目录是 per-Worker 的，所以缓存键必须含 Worker 身份」，而它给的证据
+   （带 key 与免 key 看到不同目录）**只能证明这两种身份不同**。
+   `upstream-quirks.md` §7 的实测进一步查明：**两个不同账号看到的差异项完全相同** ——
+   所以那不是账号个体差异。Phase 6 的缓存因此只需两个槽位，而不是 N 个
+   （→ Phase 6）
 4. **配置热更新只有形状没有入口**：`configOf()` 已做成函数，但没有改配置的 API（→ Phase 9）
 5. **亲和只在内存里**：`session_affinity` / `blob_affinity` 两张表结构已就绪，但服务端
    还没打开 `runtime.db`。重启会丢绑定 —— 后果是每条进行中的会话下一轮重挑一次
    Worker，不是数据损坏（→ Phase 7）
 6. **探测目标与转发目标不同域**（见上文出口隔离节）
-7. **`routing.strategy` 的两个非 `mixed` 取值当前无实际效果**：匿名 Worker 需要空
-   apiKey，而 `isUsable` 要求有 key（上游已关闭免 key 通道），所以可排序的类别只剩一种。
-   分支本身是正确的表达，只是输入集恰好为空 —— `discover-upstream.mjs` 有常驻探针
-   监测那条通道是否重开。
+7. ~~**`routing.strategy` 无实际效果**~~ —— **这条先前是错的，已删除**。
+   我曾断言「匿名 Worker 需要空 apiKey，所以可排序的类别只剩一种」，
+   而 `WorkerSchema` 的 `refine` 是**单向**的：它只要求 authenticated 必须有 key，
+   对 anonymous **不作任何约束**。所以 `{kind:"anonymous", apiKey:"..."}` 合法且可用
+   （`isUsable` 只看 key 不看 kind），三个策略取值产出三种不同顺序，而
+   `anonymous_first` 正是 schema 默认值 —— 默认配置下就生效。
+   空的是**实践**输入集（关闭免 key 通道后没人有理由这么配），不是**合法**输入集。
 8. **调度状态没有查看入口**：`Scheduler.snapshot()` 已实现（每个 Worker 的就绪态、
    剩余冷却、连续失败数、最近失败类别，且不含凭证），但 `npm run status` 只报进程
-   信息，也还没有管理 API 读它。眼下只能从响应头 `x-zen-gateway-route` 推断
-   （→ Phase 8 的 `doctor.mjs` / Phase 9 的管理 API）
+   信息，也还没有管理 API 读它。眼下只能从响应头 `x-zen-gateway-route` 与
+   `x-zen-gateway-worker` 推断（→ Phase 8 的 `doctor.mjs` / Phase 9 的管理 API）
+9. **`ProtocolSurface` 缺 `parseUsage`**：规划的接口列了这个成员（从上游响应里取
+   token 用量），而全仓不存在。Phase 7 的门槛明确依赖它（per-model token、
+   缓存命中、usage 覆盖率），且 Phase 6 每新增一个面都要实现它 —— 越晚加成本越高
+   （→ Phase 6/7）
+10. **`assertEveryRouteGuarded` 只检查"有没有守卫"，不检查"是哪个"**：一条只挂
+   `relayAuth` 而没挂 `loopbackOnly` 的管理路由能通过断言。当前无活缺陷
+   （管理面只有 `/api/ping`），但 Phase 9 加管理 API 时这正是第四轮那个缺陷的变体
+   （→ Phase 9）
+11. **管理面的 body 上限尚无处可设**：约束「管理 JSON body 有上限而转发透传无界」
+   目前是**空洞成立**的 —— 管理侧没有任何读 body 的代码。Phase 9 加管理 POST 时
+   必须同时加，否则这条约束会静默变成"不成立"（→ Phase 9）

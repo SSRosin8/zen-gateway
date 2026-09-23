@@ -154,8 +154,102 @@ describe("record:不变量 #4", () => {
     expect(s.snapshot(cfg, NOW).workers[0]).toMatchObject({
       consecutiveFails: 0,
       lastFailure: null,
+    });
+  });
+
+  it("不归咎的失败**不解除**一个已生效的冷却", () => {
+    /*
+     * 第五轮审核查出的缺陷,实测:
+     *
+     * ```
+     * 429 Retry-After:900 之后  剩余 = 895000 ms
+     * 一次出口配置错误之后      剩余 = 0 ms  ready = true
+     * ```
+     *
+     * 先前 `record` 的非归咎分支直接复用 `markSuccess`,而它把
+     * `cooldownUntil` 写 0 —— `markFailure` 里「冷却只延长不缩短」的
+     * `Math.max` 被从旁路整个绕过。上游明确说了等 900 秒,我们 5 秒后
+     * 就认为它可用。
+     *
+     * 触发不需要巧合:全员冷却时 `select` 仍会返回最早恢复的那个,
+     * 所以那个坏请求真的会打到正在冷却的 Worker 上。
+     *
+     * 根因是「记成功」这个动作**过强**:「不归咎于 Worker」不等于
+     * 「证明它现在能用」。出口配置错误尤其 —— 那次请求根本没到上游。
+     */
+    const cfg = config(["w1", "w2"]);
+    const s = scheduler();
+    s.record(
+      attempt({ workerId: "w1", failure: "rate_limit", blameWorker: true, retryAfter: "900" }),
+      cfg,
+      NOW,
+    );
+    expect(s.snapshot(cfg, NOW + 5_000).workers[0]?.cooldownRemainingMs).toBe(895_000);
+
+    // 出口配置错误(retry.ts 里 blameWorker: false)
+    s.record(
+      attempt({ workerId: "w1", failure: "bad_request", blameWorker: false }),
+      cfg,
+      NOW + 5_000,
+    );
+    const after = s.snapshot(cfg, NOW + 5_000).workers[0];
+    expect(after?.cooldownRemainingMs).toBe(895_000);
+    expect(after?.ready).toBe(false);
+    // 计数仍然被清零 —— 那是不变量 #4 原本的目的。
+    expect(after?.consecutiveFails).toBe(0);
+  });
+
+  it("**真正的成功**才解除冷却", () => {
+    /*
+     * 与上一条成对。一次成功的请求是上游用行为否定了先前那次失败的判断,
+     * 所以解除冷却是对的 —— 而"不归咎"只是说这次失败不该算在它头上。
+     */
+    const cfg = config(["w1", "w2"]);
+    const s = scheduler();
+    s.record(
+      attempt({ workerId: "w1", failure: "rate_limit", blameWorker: true, retryAfter: "900" }),
+      cfg,
+      NOW,
+    );
+    s.record(attempt({ workerId: "w1" }), cfg, NOW + 5_000);
+    expect(s.snapshot(cfg, NOW + 5_000).workers[0]).toMatchObject({
+      ready: true,
+      cooldownRemainingMs: 0,
+    });
+  });
+
+  it("`unknown` 不冷却时也不得让失败计数膨胀", () => {
+    /*
+     * 第四处纪律 #4 分叉(第五轮审核发现)。`shouldCooldown()` 把
+     * `bad_request` 与 `unknown` **同等对待**(都不冷却),而 `record` 的
+     * 分支条件只看 `blameWorker` —— 两份判断不是同一个真相。
+     *
+     * `unknown` 的 `blameWorker` 为 true(`retry.ts` 只对出口配置错误置 false),
+     * 于是它走 `markFailure`:计数 +1 而冷却为 null。实测后果:
+     *
+     * ```
+     * 5x bad_request 后一次 transport 冷却 = 2000 ms
+     * 5x unknown     后一次 transport 冷却 = 64000 ms  (上限 120000)
+     * ```
+     *
+     * 也就是 `markSuccess` 注释声称已防住的那个问题,只是入口从
+     * `bad_request` 换成了 `unknown`。
+     */
+    const cfg = config(["w1", "w2"]);
+    const s = scheduler();
+    for (let i = 0; i < 5; i += 1) {
+      s.record(attempt({ workerId: "w1", failure: "unknown", blameWorker: true }), cfg, NOW);
+    }
+    expect(s.snapshot(cfg, NOW).workers[0]).toMatchObject({
+      consecutiveFails: 0,
       ready: true,
     });
+
+    // 随后一次真实故障必须从基准值起跳,而不是 2^5 倍。
+    s.record(attempt({ workerId: "w1", failure: "transport", blameWorker: true }), cfg, NOW);
+    expect(s.snapshot(cfg, NOW).workers[0]?.cooldownRemainingMs).toBe(
+      cfg.routing.cooldown.transportBaseMs,
+    );
   });
 
   it("出口配置错误不得拖慢后续真实故障的恢复", () => {

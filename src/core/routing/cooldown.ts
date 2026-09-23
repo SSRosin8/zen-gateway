@@ -142,8 +142,19 @@ export function cooldownMs(input: CooldownInput): number | null {
  *
  * 与 `cooldownMs` 分开只为让调用方不必自己做加法 —— 那种加法散在多处时,
  * 「是时长还是时刻」的混淆会变成一个定位很久的 bug。
+ *
+ * **`now` 非有限值时返回 null**(不冷却),而不是算出一个 NaN 时刻。
+ * `NaN` 写进 `cooldownUntil` 会让 `NaN <= now` 恒为 false,于是那个 Worker
+ * **永久**不再就绪 —— 一次脏输入把 Worker 悄悄弄没了,没有任何报错。
+ * 这正是 `normalizeFails` 注释描述的后果,而它当时只防住了失败计数一个入口;
+ * 第五轮审核指出 `now` 是这套防护里唯一的缺口。
+ *
+ * 选"不冷却"而不是"用默认时长":`now` 坏了说明调用方的时钟有问题,
+ * 此时任何时长都算不出正确的到期时刻,而不冷却是**保守**方向
+ * (最多多打一次上游,而不是永久丢掉一个 Worker)。
  */
 export function cooldownUntil(input: CooldownInput): number | null {
+  if (!Number.isFinite(input.now)) return null;
   const ms = cooldownMs(input);
   return ms === null ? null : input.now + ms;
 }

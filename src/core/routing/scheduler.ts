@@ -1,5 +1,6 @@
 import type { Config } from "../../shared/schema.ts";
-import type { FailureKind } from "../failures.ts";
+import { RoutingConfigSchema } from "../../shared/schema.ts";
+import { shouldCooldown, type FailureKind } from "../failures.ts";
 import type { AttemptRecord, AttemptTarget } from "../upstream/retry.ts";
 import { AffinityMap, containsStaleReasoning } from "./affinity.ts";
 import { WorkerPool } from "./workerPool.ts";
@@ -23,6 +24,17 @@ import { select, type Selection } from "./select.ts";
  * 在冷却"取决于请求碰巧走到哪一份 —— 而冷却是为了别再打那个上游。
  */
 
+/**
+ * 亲和 TTL 的兜底值,从 **schema 的默认值**推导而不是另写一个字面量。
+ *
+ * 两份默认值必然分叉(纪律 #4),而分叉方向是漏:改了 schema 却没改这里,
+ * 容量淘汰会按一个陈旧的 TTL 判断"什么算过期"。
+ *
+ * 它只在 `plan()`/`record()` 从未被调用过(即还没 sync 过任何配置)时生效 ——
+ * 实际流程里 `plan` 总在 `rebind`/`settleStream` 之前,所以这是纯兜底。
+ */
+const DEFAULT_AFFINITY_TTL_MS = RoutingConfigSchema.parse({}).affinityTtlMs;
+
 export type ScheduleContext = {
   readonly config: Config;
   readonly now: number;
@@ -43,6 +55,17 @@ export class Scheduler {
    * 新对象(schema.parse 的结果),所以引用变化正是"配置换了"的准确信号。
    */
   #syncedFrom: Config | null = null;
+
+  /**
+   * 最近一次 sync 时的亲和 TTL。
+   *
+   * 容量淘汰需要知道"什么算过期"(见 `AffinityMap.evict`),而
+   * `rebind`/`settleStream` 的签名里没有 config —— 它们在链结束与流结束时被
+   * 调用,那时把整份配置再传一遍只是噪音。缓存这一个数值即可。
+   *
+   * 初值从 schema 默认值推导,不写字面量:两份默认值必然分叉(纪律 #4)。
+   */
+  #ttlMs: number = DEFAULT_AFFINITY_TTL_MS;
 
   /** 注入以便测试断言确切的冷却时长。 */
   readonly #jitter: () => number;
@@ -69,18 +92,46 @@ export class Scheduler {
   /**
    * 记一次尝试的结局。由 `retry.ts` 的 `onAttempt` 逐次调用。
    *
-   * 三条分支对应不变量 #4 的完整含义:
+   * `now` 必须是**这次尝试结束的时刻**,不是请求开始的时刻 —— 见
+   * `relay.ts` 里 `nowOf()` 的说明。一次尝试可以耗 60-300 秒(headers/body
+   * 超时),用开始时刻会把冷却算进过去。
    *
-   * - **成功** → 清零(冷却也解除:它证明了这个 Worker 现在能用)
-   * - **失败但不归咎 Worker**(`bad_request`、出口配置错误)→ 也记成功。
-   *   否则一个客户端的坏请求会把所有健康 Worker 逐个打进冷却。
-   * - **失败且归咎 Worker** → 按类别冷却
+   * 三条分支,而分支条件**从 `shouldCooldown` 推导**而不是另写一份:
+   *
+   * - **成功** → `markSuccess`(清零 + 解除冷却)。上游用行为证明了它现在能用。
+   * - **不归咎 Worker,或该类别本就不冷却** → `markNotBlamed`(清零,**保留冷却**)
+   * - 其余 → `markFailure`,按类别冷却
+   *
+   * ## 第二条为什么要带上 `!shouldCooldown`
+   *
+   * 这是第五轮审核查出的第四处「两份并行判断」(纪律 #4)。先前分支只看
+   * `blameWorker`,而 `shouldCooldown()` 把 `bad_request` 与 `unknown`
+   * **同等对待**(都不冷却)—— 两份判断不是同一个真相。后果实测:
+   *
+   * ```
+   * 5x bad_request 后一次 transport 冷却 = 2000 ms
+   * 5x unknown     后一次 transport 冷却 = 64000 ms  (上限 120000)
+   * ```
+   *
+   * `unknown` 的 `blameWorker` 为 true(`retry.ts` 只对出口配置错误置 false),
+   * 于是它走 `markFailure`:计数 +1 而冷却为 null,计数无界膨胀,把后续**真实**
+   * 故障的退避直接推到上限。这正是 `markSuccess` 注释声称已防住的问题,
+   * 只是入口从 `bad_request` 换成了 `unknown`。
+   *
+   * 代价是一个取舍:`transport, unknown, transport, unknown…` 交替时退避
+   * 不会升级。接受它 —— `unknown` 只来自非 `Error` 抛出物(`classifyError`),
+   * 极少见;而「我们没看懂的失败」本就不该拿 Worker 的可用性去赌。
    */
   record(record: AttemptRecord, config: Config, now: number): void {
     this.#ensureSynced(config);
 
-    if (record.failure === null || !record.blameWorker) {
+    if (record.failure === null) {
       this.#pool.markSuccess(record.workerId);
+      return;
+    }
+
+    if (!record.blameWorker || !shouldCooldown(record.failure)) {
+      this.#pool.markNotBlamed(record.workerId);
       return;
     }
 
@@ -119,7 +170,7 @@ export class Scheduler {
   rebind(sessionHash: string | null, workerId: string, now: number): void {
     if (sessionHash === null) return;
     if (!this.#pool.has(workerId)) return;
-    this.#affinity.bindSession(sessionHash, workerId, now);
+    this.#affinity.bindSession(sessionHash, workerId, now, this.#ttlMs);
   }
 
   /**
@@ -175,7 +226,7 @@ export class Scheduler {
     // 走到这里 status 必为 2xx,而 2xx 只出现在成功路径 —— 那里一定有 workerId。
     if (input.workerId === null) return;
 
-    this.#affinity.learnBlobs(input.blobHashes, input.workerId, input.now);
+    this.#affinity.learnBlobs(input.blobHashes, input.workerId, input.now, this.#ttlMs);
   }
 
   /**
@@ -230,6 +281,7 @@ export class Scheduler {
   #ensureSynced(config: Config): void {
     if (this.#syncedFrom === config) return;
     this.#pool.sync(config);
+    this.#ttlMs = config.routing.affinityTtlMs;
     this.#syncedFrom = config;
   }
 }

@@ -58,9 +58,42 @@ describe("normalizeSessionKey", () => {
     expect(normalizeSessionKey("ses\t\t456")).toBe("ses 456");
   });
 
-  it("超长键被截断,不能让客户端头无界增长", () => {
-    const long = "x".repeat(10_000);
-    expect(normalizeSessionKey(long)).toHaveLength(256);
+  it("超长键**不参与亲和**,而不是被截断", () => {
+    /*
+     * 先前这里断言 `toHaveLength(256)`(截断)。第五轮审核指出并实测:
+     * **截断发生在哈希之前,等于摘要被截断** —— 见下一条。
+     *
+     * 改成返回 null(不参与亲和):对一个畸形长度的会话键,
+     * "不做亲和"远好于"把它和别人混在一起"。
+     */
+    expect(normalizeSessionKey("x".repeat(10_000))).toBeNull();
+  });
+
+  it("恰好在上限内的键照常可用,上限外一律拒绝", () => {
+    expect(normalizeSessionKey("x".repeat(4096))).toHaveLength(4096);
+    expect(normalizeSessionKey("x".repeat(4097))).toBeNull();
+  });
+
+  it("前缀相同的长键**不得**产生同一摘要", () => {
+    /*
+     * 这是截断修复的核心断言。旧实现(先 slice(256) 再 digestOf)下:
+     *
+     * ```
+     * s1 = "x".repeat(256) + "AAA"
+     * s2 = "x".repeat(256) + "BBB"
+     * 两个不同会话键 → 同一摘要? true
+     * ```
+     *
+     * 后果不只是"算错":它是一个廉价的**操控原语** —— 知道受害者会话键的
+     * 前 256 字符就能任意改写其绑定,让对方的加密推理块指向错误的 Worker。
+     */
+    const s1 = "x".repeat(256) + "AAA";
+    const s2 = "x".repeat(256) + "BBB";
+    const h1 = normalizeSessionKey(s1);
+    const h2 = normalizeSessionKey(s2);
+    expect(h1).not.toBeNull();
+    expect(h1).not.toBe(h2);
+    expect(digestOf(h1!)).not.toBe(digestOf(h2!));
   });
 });
 
@@ -189,7 +222,7 @@ describe("containsStaleReasoning", () => {
 describe("AffinityMap:会话绑定", () => {
   it("绑定后能查到", () => {
     const map = new AffinityMap();
-    map.bindSession("hash1", "w1", NOW);
+    map.bindSession("hash1", "w1", NOW, TTL);
     expect(map.lookupSession("hash1", NOW, TTL, always)).toBe("w1");
   });
 
@@ -199,7 +232,7 @@ describe("AffinityMap:会话绑定", () => {
 
   it("超过 TTL 后失效", () => {
     const map = new AffinityMap();
-    map.bindSession("hash1", "w1", NOW);
+    map.bindSession("hash1", "w1", NOW, TTL);
     expect(map.lookupSession("hash1", NOW + TTL, TTL, always)).toBe("w1");
     expect(map.lookupSession("hash1", NOW + TTL + 1, TTL, always)).toBeNull();
   });
@@ -210,13 +243,13 @@ describe("AffinityMap:会话绑定", () => {
      * 而原因在别处 —— 查的时候会以为是 TTL 或哈希算错了。
      */
     const map = new AffinityMap();
-    map.bindSession("hash1", "w1", NOW);
+    map.bindSession("hash1", "w1", NOW, TTL);
     expect(map.lookupSession("hash1", NOW, TTL, never)).toBeNull();
   });
 
   it("失效的条目被就地删掉,不只是查不到", () => {
     const map = new AffinityMap();
-    map.bindSession("hash1", "w1", NOW);
+    map.bindSession("hash1", "w1", NOW, TTL);
     map.lookupSession("hash1", NOW + TTL + 1, TTL, always);
     expect(map.sizes().sessions).toBe(0);
   });
@@ -228,21 +261,21 @@ describe("AffinityMap:会话绑定", () => {
      * 事实上**永不过期**。
      */
     const map = new AffinityMap();
-    map.bindSession("hash1", "w1", NOW + 60_000);
+    map.bindSession("hash1", "w1", NOW + 60_000, TTL);
     expect(map.lookupSession("hash1", NOW, TTL, always)).toBeNull();
   });
 
   it("解绑后查不到", () => {
     const map = new AffinityMap();
-    map.bindSession("hash1", "w1", NOW);
+    map.bindSession("hash1", "w1", NOW, TTL);
     map.unbindSession("hash1");
     expect(map.lookupSession("hash1", NOW, TTL, always)).toBeNull();
   });
 
   it("重新绑定覆盖旧的 Worker 与时间", () => {
     const map = new AffinityMap();
-    map.bindSession("hash1", "w1", NOW);
-    map.bindSession("hash1", "w2", NOW + 1000);
+    map.bindSession("hash1", "w1", NOW, TTL);
+    map.bindSession("hash1", "w2", NOW + 1000, TTL);
     expect(map.lookupSession("hash1", NOW + 1000, TTL, always)).toBe("w2");
     expect(map.sizes().sessions).toBe(1);
   });
@@ -255,7 +288,7 @@ describe("AffinityMap:会话绑定", () => {
      * 淘汰最老而不是拒绝新的:新会话是**活跃**的,老会话大概率已结束。
      */
     const map = new AffinityMap();
-    for (let i = 0; i < 10_050; i += 1) map.bindSession(`h${i}`, "w1", NOW + i);
+    for (let i = 0; i < 10_050; i += 1) map.bindSession(`h${i}`, "w1", NOW + i, TTL);
     expect(map.sizes().sessions).toBe(10_000);
     // 最早的那些被挤掉,最新的还在。
     expect(map.lookupSession("h0", NOW + 10_050, TTL, always)).toBeNull();
@@ -266,19 +299,19 @@ describe("AffinityMap:会话绑定", () => {
 describe("AffinityMap:推理指纹", () => {
   it("学习后能提示", () => {
     const map = new AffinityMap();
-    map.learnBlobs(["h1", "h2"], "w1", NOW);
+    map.learnBlobs(["h1", "h2"], "w1", NOW, TTL);
     expect(map.findBlobWorker(["h1", "h2"], NOW, TTL, always)).toBe("w1");
   });
 
   it("空指纹列表不给提示", () => {
     const map = new AffinityMap();
-    map.learnBlobs(["h1"], "w1", NOW);
+    map.learnBlobs(["h1"], "w1", NOW, TTL);
     expect(map.findBlobWorker([], NOW, TTL, always)).toBeNull();
   });
 
   it("任何一个指纹未知就不给提示", () => {
     const map = new AffinityMap();
-    map.learnBlobs(["h1"], "w1", NOW);
+    map.learnBlobs(["h1"], "w1", NOW, TTL);
     expect(map.findBlobWorker(["h1", "unknown"], NOW, TTL, always)).toBeNull();
   });
 
@@ -292,26 +325,26 @@ describe("AffinityMap:推理指纹", () => {
      * 而正常排序至少给了轮到另一个的机会。
      */
     const map = new AffinityMap();
-    map.learnBlobs(["h1"], "w1", NOW);
-    map.learnBlobs(["h2"], "w2", NOW);
+    map.learnBlobs(["h1"], "w1", NOW, TTL);
+    map.learnBlobs(["h2"], "w2", NOW, TTL);
     expect(map.findBlobWorker(["h1", "h2"], NOW, TTL, always)).toBeNull();
   });
 
   it("过期的指纹不给提示", () => {
     const map = new AffinityMap();
-    map.learnBlobs(["h1"], "w1", NOW);
+    map.learnBlobs(["h1"], "w1", NOW, TTL);
     expect(map.findBlobWorker(["h1"], NOW + TTL + 1, TTL, always)).toBeNull();
   });
 
   it("Worker 已删除时不给提示", () => {
     const map = new AffinityMap();
-    map.learnBlobs(["h1"], "w1", NOW);
+    map.learnBlobs(["h1"], "w1", NOW, TTL);
     expect(map.findBlobWorker(["h1"], NOW, TTL, never)).toBeNull();
   });
 
   it("忘掉指纹后不再提示", () => {
     const map = new AffinityMap();
-    map.learnBlobs(["h1", "h2"], "w1", NOW);
+    map.learnBlobs(["h1", "h2"], "w1", NOW, TTL);
     map.forgetBlobs(["h1"]);
     expect(map.findBlobWorker(["h1", "h2"], NOW, TTL, always)).toBeNull();
     expect(map.findBlobWorker(["h2"], NOW, TTL, always)).toBe("w1");
@@ -319,14 +352,14 @@ describe("AffinityMap:推理指纹", () => {
 
   it("重新学习覆盖为新 Worker", () => {
     const map = new AffinityMap();
-    map.learnBlobs(["h1"], "w1", NOW);
-    map.learnBlobs(["h1"], "w2", NOW + 1000);
+    map.learnBlobs(["h1"], "w1", NOW, TTL);
+    map.learnBlobs(["h1"], "w2", NOW + 1000, TTL);
     expect(map.findBlobWorker(["h1"], NOW + 1000, TTL, always)).toBe("w2");
   });
 
   it("超出容量时淘汰最老的", () => {
     const map = new AffinityMap();
-    for (let i = 0; i < 5_050; i += 1) map.learnBlobs([`b${i}`], "w1", NOW + i);
+    for (let i = 0; i < 5_050; i += 1) map.learnBlobs([`b${i}`], "w1", NOW + i, TTL);
     expect(map.sizes().blobs).toBe(5_000);
   });
 });
@@ -334,10 +367,10 @@ describe("AffinityMap:推理指纹", () => {
 describe("AffinityMap.prune", () => {
   it("清掉过期与指向已删除 Worker 的条目", () => {
     const map = new AffinityMap();
-    map.bindSession("fresh", "w1", NOW);
-    map.bindSession("stale", "w1", NOW - TTL - 1);
-    map.learnBlobs(["bfresh"], "w1", NOW);
-    map.learnBlobs(["bstale"], "w1", NOW - TTL - 1);
+    map.bindSession("fresh", "w1", NOW, TTL);
+    map.bindSession("stale", "w1", NOW - TTL - 1, TTL);
+    map.learnBlobs(["bfresh"], "w1", NOW, TTL);
+    map.learnBlobs(["bstale"], "w1", NOW - TTL - 1, TTL);
 
     map.prune(NOW, TTL, always);
     expect(map.sizes()).toEqual({ sessions: 1, blobs: 1 });

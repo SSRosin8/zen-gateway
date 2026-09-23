@@ -179,7 +179,38 @@ async function handleRelay(
   }
 
   const clientHeaders = c.req.header();
-  const now = deps.clock?.() ?? Date.now();
+
+  /*
+   * 时钟取值点:**每个需要时刻的动作各自取一次**,不共用一个。
+   *
+   * 先前这里只取一次 `now` 并让整条链共用,而第五轮审核实测出后果:
+   * 一次尝试可以耗 60-300 秒(headers/body 超时),于是冷却从**请求开始**
+   * 时刻起算,算出来的到期时刻早已成为过去。
+   *
+   * ```
+   * 请求耗时 2515ms (headersTimeout=2000, 名义冷却=1000ms)
+   * 失败后立刻查: ready=true 剩余冷却=0ms lastFailure=timeout
+   * ```
+   *
+   * 更糟的是算术推论:`bodyTimeoutMs` 默认 300000 > `transportMaxMs` 上限
+   * 120000,所以 **body 空闲超时的 Worker 永远不会进入冷却**,失败多少次都不会。
+   * 而 `timeout` 恰好是「上游卡住」这种最需要把 Worker 踢出候选的故障。
+   *
+   * 三个动作各有正确的时刻,它们本来就该分开。规则很简单:
+   * **每个动作用它实际发生的那一刻**。
+   *
+   * | 动作 | 时刻 | 为什么 |
+   * |---|---|---|
+   * | 选 Worker + 落会话绑定 | `planNow` | 同一次请求内的判定要一致 |
+   * | 冷却记账 | 每次尝试**失败时** | 冷却是「从现在起别再打它」 |
+   * | 改绑实际承接者 | 链**结束时** | 那一刻才知道是谁承接的 |
+   * | 指纹学习 | 流**结束时** | TTL 滑动、度量闲置,而签发到流结束才完成 |
+   *
+   * 我原先写在 `scheduler.ts` 的注释说「亲和绑定与冷却必须看同一个 now」——
+   * 那句只对第一行成立,被我错误地推广到了整条链。
+   */
+  const nowOf = (): number => deps.clock?.() ?? Date.now();
+  const planNow = nowOf();
 
   /* ---- 5. 选 Worker(调度状态机) ---- */
 
@@ -199,7 +230,7 @@ async function handleRelay(
   });
   const blobHashes = extractBlobHashes(parsed);
 
-  const plan = deps.scheduler.plan({ config, now, sessionHash, blobHashes });
+  const plan = deps.scheduler.plan({ config, now: planNow, sessionHash, blobHashes });
   const targets: readonly AttemptTarget[] = plan.targets;
   if (targets.length === 0) {
     return c.json(
@@ -223,8 +254,11 @@ async function handleRelay(
        * 链中每一次尝试都是一个独立的事实:`w1 限流 → w2 传输失败 → w3 成功`
        * 这条链里三个 Worker 的处置完全不同,只记最后一个会让前两个的故障
        * 消失,于是下一条请求又把它们重试一遍。
+       *
+       * `nowOf()` 在回调里**现取**,不用 `planNow`:这个回调在该次尝试
+       * 结束时同步触发,所以此刻就是失败发生的时刻。见上面 `nowOf` 的说明。
        */
-      onAttempt: (record) => deps.scheduler.record(record, config, now),
+      onAttempt: (record) => deps.scheduler.record(record, config, nowOf()),
       buildHeaders: (target) =>
         buildUpstreamHeaders({
           clientHeaders,
@@ -246,14 +280,23 @@ async function handleRelay(
   /*
    * 透传包一层兜底。
    *
-   * `pipeUpstreamResponse` 现在内部对畸形头容错,理论上不抛;但这里是
-   * **上游已经成功之后**的位置,一旦抛异常后果特别糟:客户端拿到裸 500
+   * `pipeUpstreamResponse` 对畸形头与畸形 statusText 都已容错,理论上不抛;
+   * 但这里是**上游已经成功之后**的位置,一旦抛异常后果特别糟:客户端拿到裸 500
    * (不是我们的 JSON 错误形状)、上游那次请求已真实计入额度、
-   * 响应体流既不转发也不释放(连接泄漏),而且 `deps.log` 完全不被调用 ——
-   * 异常绕过所有日志路径,故障现场什么都不留。
+   * 而且 `deps.log` 完全不被调用 —— 异常绕过所有日志路径,故障现场什么都不留。
    *
-   * 所以即便 pipe 自己已经容错,这层兜底仍然要在:它保证"无论如何 body
-   * 都被处置、错误都被记录"。
+   * ## body 的释放责任在 pipe,不在这里
+   *
+   * 这一点先前写错了。原注释承诺"这层兜底保证**无论如何 body 都被处置**",
+   * 而第五轮审核指出:加了 tap 之后那个承诺**结构上不可能成立** ——
+   * `tapReadable` 内部 `getReader()` 锁住了流,于是这里的
+   * `upstream.body?.cancel()` 会异步拒绝 `Invalid state: ReadableStream is
+   * locked`,并被 `.catch()` 静默吞掉。实测后果:连接泄漏到 `bodyTimeout`
+   * (5 分钟)、`onDone` 一次都不触发(不变量 #3 整条漏掉)。
+   *
+   * 现在 `pipe.ts` 在自己的失败路径上释放它锁住的流(见那里的
+   * `releaseOnFailure`)—— **谁锁的谁负责**。这里只保留日志与错误形状:
+   * 那两件事仍然只有这一层能做。
    */
   const pipeOrFail = (
     upstream: NonNullable<typeof result.response>,
@@ -283,12 +326,20 @@ async function handleRelay(
             staleHit: scanner.hit(),
             // 上游中断或下游取消 → 内容不完整,既不学习也不遗忘。
             complete: error === null,
-            now: deps.clock?.() ?? Date.now(),
+            // 流结束的时刻 —— 指纹的 TTL 从签发完成起算。见 nowOf 的说明。
+            now: nowOf(),
           });
         },
       });
     } catch (err) {
-      // 释放上游连接 —— 不释放会让它悬挂到超时。
+      /*
+       * 兜底释放 —— 只对**未被 tap 包装**的 body 有效。
+       *
+       * 传了 tap 时流已被 `tapReadable` 锁住,这句会异步拒绝并被吞掉;
+       * 那种情况由 `pipe.ts` 自己释放(见上面的说明)。保留这句是为了覆盖
+       * 「pipe 在锁流**之前**就抛」的路径(例如将来某处在构造 Headers 时抛),
+       * 那时 body 还没被锁,而这里是唯一能释放它的地方。
+       */
       void upstream.body?.cancel().catch(() => {});
       deps.log?.(`响应透传失败(上游已成功): ${logMessageFor(err)}`);
       return c.json(
@@ -311,7 +362,7 @@ async function handleRelay(
      * 而 `settleStream` 只在客户端**真的读完响应**时触发 —— 放那里的话
      * 一次提前断开就会让绑定停在错误的 Worker 上。
      */
-    deps.scheduler.rebind(sessionHash, result.workerId, now);
+    deps.scheduler.rebind(sessionHash, result.workerId, nowOf());
 
     return pipeOrFail(
       result.response,
@@ -335,11 +386,26 @@ async function handleRelay(
    * 这条路径**也要结算**:上游对"回放了别人的推理块"的拒绝正是一个 400,
    * 而不结算会让下一轮回到同一个必败 Worker。状态码非 2xx,所以只会
    * 解绑与遗忘,不会学习 —— 因此 workerId 传 null(见 `settleStream` 的说明)。
+   *
+   * ## 诊断头在失败时**更**需要,先前这里漏了
+   *
+   * 第五轮审核查出:`x-zen-gateway-route` 只在成功路径设置,而我写的文档
+   * 却教用户"全员冷却时看 route 头" —— 那两个条件不可能同时成立
+   * (全员冷却且上游失败时走的正是这条路径)。缺口 #8 还把这个头当作
+   * 「当前唯一的调度状态观察手段」,于是用户在最需要它的时候拿不到。
+   *
+   * `worker` 头也补上:失败时"是哪个账号失败的"是首要问题。取最后一次
+   * 尝试的 Worker —— 那是产出这个响应的那个。
    */
   if (result.response !== null) {
+    const lastWorkerId = result.attempts.at(-1)?.workerId;
     return pipeOrFail(
       result.response,
-      { "x-zen-gateway-attempts": String(result.attempts.length) },
+      {
+        "x-zen-gateway-attempts": String(result.attempts.length),
+        "x-zen-gateway-route": plan.reason,
+        ...(lastWorkerId !== undefined ? { "x-zen-gateway-worker": lastWorkerId } : {}),
+      },
       null,
     );
   }

@@ -4,6 +4,7 @@ import { once } from "node:events";
 import { createApp } from "../../src/server/app.ts";
 import { EgressService } from "../../src/core/proxy/egress.ts";
 import { Scheduler } from "../../src/core/routing/scheduler.ts";
+import { digestOf } from "../../src/core/routing/affinity.ts";
 import { ProtocolRegistry } from "../../src/core/protocols/registry.ts";
 import { readModelField, readStreamField } from "../../src/core/protocols/types.ts";
 import type { ProtocolSurface } from "../../src/core/protocols/types.ts";
@@ -209,6 +210,121 @@ describe("冷却跨请求生效", () => {
     expect(seenKeys).toHaveLength(1);
     expect(res.status).toBe(429);
     expect(await res.json()).toEqual({ error: "上游的原话" });
+  });
+});
+
+describe("冷却按**失败发生**的时刻起算,不是请求开始的时刻", () => {
+  /*
+   * 第五轮审核查出的最严重缺陷。`relay.ts` 先前只取一次 `now` 并让整条链
+   * 共用,而一次尝试可以耗 60-300 秒(headers/body 超时)——于是冷却从
+   * **请求开始**时刻起算,算出来的到期时刻早已成为过去。
+   *
+   * 端到端实测(真实 HTTP 服务器):
+   * ```
+   * 请求耗时 2515ms (headersTimeout=2000, 名义冷却=1000ms)
+   * 失败后立刻查: ready=true 剩余冷却=0ms lastFailure=timeout
+   * ```
+   *
+   * 算术推论更糟:`bodyTimeoutMs` 默认 300000 > `transportMaxMs` 上限 120000,
+   * 所以 **body 空闲超时的 Worker 永远不会进入冷却**,失败多少次都不会。
+   * 而 `timeout` 恰好是「上游卡住」这种最需要把 Worker 踢出候选的故障。
+   *
+   * 这里用注入的时钟模拟"尝试期间时间流逝":假上游在**响应之前**推进 `now`。
+   * 这比真的等 60 秒可靠,也让断言能给出确切数值。
+   */
+  it("上游慢 60 秒才失败:冷却从失败那一刻算,Worker 仍在冷却中", async () => {
+    const cfg = config(["w1"]);
+    const s = scheduler();
+
+    handler = (_req, res) => {
+      // 这次尝试耗了 60 秒才拿到响应头。
+      now += 60_000;
+      res.writeHead(429, { "content-type": "application/json", "retry-after": "10" });
+      res.end("{}");
+    };
+
+    await app(cfg, s).request("/v1/chat/completions", post({ model: "big-pickle", messages: [] }));
+
+    // 失败发生在 START+60_000,冷却 10 秒 → 此刻(仍是 START+60_000)必须未就绪。
+    expect(s.counts(cfg, now)).toEqual({ ready: 0, total: 1 });
+    expect(s.snapshot(cfg, now).workers[0]?.cooldownRemainingMs).toBe(10_000);
+
+    // 旧行为下冷却到期时刻是 START+10_000,而现在已是 START+60_000 → 会是 ready。
+    now += 9_999;
+    expect(s.counts(cfg, now)).toEqual({ ready: 0, total: 1 });
+    now += 1;
+    expect(s.counts(cfg, now)).toEqual({ ready: 1, total: 1 });
+  });
+
+  it("链内多次尝试各按**自己**失败的时刻记账", async () => {
+    /*
+     * 共用一个 `now` 时偏差会累积:「w1 超时 60s → w2 超时 60s」这条链里
+     * w2 的失败发生在 T+120s,而冷却仍按 T 算。
+     */
+    const cfg = config(["w1", "w2"]);
+    const s = scheduler();
+
+    handler = (req, res) => {
+      // 每次尝试都耗 30 秒。
+      now += 30_000;
+      res.writeHead(429, {
+        "content-type": "application/json",
+        // w1 要 100 秒,w2 要 10 秒 —— 用不同值区分两者的起算点。
+        "retry-after": String(req.headers["authorization"]?.toString().includes("w1") ? 100 : 10),
+      });
+      res.end("{}");
+    };
+
+    await app(cfg, s).request("/v1/chat/completions", post({ model: "big-pickle", messages: [] }));
+
+    // w1 在 START+30_000 失败,冷却 100s → 到 START+130_000
+    // w2 在 START+60_000 失败,冷却  10s → 到 START+70_000
+    const snap = s.snapshot(cfg, now).workers;
+    expect(now).toBe(START + 60_000);
+    expect(snap.find((w) => w.id === "w1")?.cooldownRemainingMs).toBe(70_000);
+    expect(snap.find((w) => w.id === "w2")?.cooldownRemainingMs).toBe(10_000);
+  });
+
+  it("指纹学习按**流结束**的时刻起算,不是请求开始", async () => {
+    /*
+     * 第三个时刻。TTL 是滑动的、度量闲置时长,所以指纹绑定的时间戳应当是
+     * "这批推理块实际签发完的时刻"。用请求开始的 `now` 会让一条长 SSE
+     * 的绑定提前过期。
+     */
+    const cfg = config(["w1"]);
+    const s = scheduler();
+
+    handler = (_req, res) => {
+      res.writeHead(200, { "content-type": "text/event-stream" });
+      res.write("data: 开头\n\n");
+      // 流持续了 50 分钟才结束。
+      now += 50 * 60_000;
+      res.end("data: [DONE]\n\n");
+    };
+
+    const res = await app(cfg, s).request(
+      "/v1/chat/completions",
+      post(bodyWithBlob(), { "x-opencode-session": "ses_long_stream" }),
+    );
+    await res.text();
+    expect(s.snapshot(cfg, now).affinity.blobs).toBe(1);
+
+    /*
+     * 默认 affinityTtlMs 是 1 小时。若绑定记的是**请求开始**时刻,那么此刻
+     * (开始后 50 分钟)它只剩 10 分钟寿命;记流结束时刻则还有整 1 小时。
+     * 在开始后 70 分钟这一点上两种实现给出不同答案 —— 用指纹提示是否还
+     * 命中来区分,而不是看计数(计数只在被读到时才清)。
+     */
+    now = START + 70 * 60_000;
+    const hinted = s.plan({
+      config: cfg,
+      now,
+      sessionHash: digestOf("ses_brand_new_session"),
+      blobHashes: [digestOf(BLOB)],
+    });
+    // 从流结束起算只过了 20 分钟,指纹仍有效 → 提示命中。
+    expect(hinted.reason).toBe("blob_hint");
+    expect(hinted.targets[0]?.workerId).toBe("w1");
   });
 });
 

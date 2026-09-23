@@ -14,6 +14,8 @@ import { ConfigSchema, type Config, type RoutingStrategy } from "../../src/share
  */
 
 const NOW = 1_800_000_000_000;
+/** 亲和 TTL —— 与 schema 默认值一致(容量淘汰要据它判断什么算过期)。 */
+const TTL = 3_600_000;
 
 type WorkerSpec = {
   id: string;
@@ -184,18 +186,37 @@ describe("策略排序", () => {
     expect(ids(cfg)).toEqual(["wc", "wa", "wb"]);
   });
 
-  it("默认策略(anonymous_first)当前等价于配置顺序", () => {
+  it("默认策略是 anonymous_first,且它**真的生效**", () => {
     /*
-     * 匿名 Worker 现在不可能进候选 —— `isUsable` 要求有 apiKey,而匿名的
-     * 定义就是没有 key(上游已关闭免 key 通道)。所以 schema 的默认值
-     * 当前等价于"按配置顺序"。
+     * 先前这条的断言与注释都基于一个错误推理:「匿名 Worker 的定义就是没有
+     * key,所以默认策略等价于按配置顺序」。第五轮审核证伪了它 ——
+     * `WorkerSchema` 的 refine 是**单向**的,只要求 authenticated 必须有 key,
+     * 对 anonymous 不作任何约束。所以带 key 的 anonymous Worker 合法且可用,
+     * 默认配置下排序就生效。
      *
-     * 这条断言把这个事实钉住:哪天匿名通道重开,它仍然成立(那时匿名
-     * Worker 才真的会被提前),但若有人误改默认策略,配置顺序会立刻变。
+     * 这条现在断言真实行为:同样的 Worker 列表,只改策略就换顺序。
      */
-    const cfg = config([{ id: "w1" }, { id: "w2" }, { id: "w3" }]);
-    expect(cfg.routing.strategy).toBe("anonymous_first");
-    expect(ids(cfg)).toEqual(["w1", "w2", "w3"]);
+    const workers = [
+      { id: "auth1" },
+      { id: "anon", kind: "anonymous" as const, apiKey: "fake-anon-key-not-real" },
+    ];
+    const byDefault = config(workers);
+    expect(byDefault.routing.strategy).toBe("anonymous_first");
+    // 默认策略把匿名排前 —— 不是"等价于配置顺序"。
+    expect(ids(byDefault)).toEqual(["anon", "auth1"]);
+    expect(ids(config(workers, { strategy: "mixed" }))).toEqual(["auth1", "anon"]);
+  });
+
+  it("全是 authenticated 时三个策略产出同一顺序", () => {
+    /*
+     * 上一条的边界:实践中用户只会配 authenticated(免 key 通道已关闭),
+     * 那种配置下策略确实没有可见效果 —— 但那是**输入集**的性质,
+     * 不是代码分支的性质。两者的区别是上一条要钉住的东西。
+     */
+    const workers = [{ id: "w1" }, { id: "w2" }, { id: "w3" }];
+    for (const strategy of ["anonymous_first", "authenticated_first", "mixed"] as const) {
+      expect(ids(config(workers, { strategy }))).toEqual(["w1", "w2", "w3"]);
+    }
   });
 });
 
@@ -245,7 +266,7 @@ describe("会话粘滞", () => {
     const cfg = config([{ id: "w1" }, { id: "w2" }, { id: "w3" }]);
     const pool = new WorkerPool(cfg);
     const map = new AffinityMap();
-    map.bindSession(sessionHash, "w3", NOW);
+    map.bindSession(sessionHash, "w3", NOW, TTL);
 
     const result = select({
       pool,
@@ -265,7 +286,7 @@ describe("会话粘滞", () => {
     const cfg = config([{ id: "w1" }, { id: "w2" }]);
     const pool = new WorkerPool(cfg);
     const map = new AffinityMap();
-    map.bindSession(sessionHash, "w1", NOW);
+    map.bindSession(sessionHash, "w1", NOW, TTL);
     pool.markFailure({ workerId: "w1", kind: "rate_limit", retryAfter: "900", config: cfg, now: NOW, jitter: 0 });
 
     const result = select({
@@ -284,7 +305,7 @@ describe("会话粘滞", () => {
     const cfg = config([{ id: "w2" }]);
     const pool = new WorkerPool(cfg);
     const map = new AffinityMap();
-    map.bindSession(sessionHash, "deleted", NOW);
+    map.bindSession(sessionHash, "deleted", NOW, TTL);
 
     expect(
       select({ pool, config: cfg, now: NOW, affinity: { map, sessionHash, blobHashes: [] } })
@@ -306,7 +327,7 @@ describe("会话粘滞", () => {
     const pool = new WorkerPool(cfg);
     const map = new AffinityMap();
     const ctx = { map, sessionHash, blobHashes: [] as string[] };
-    map.bindSession(sessionHash, "w2", NOW);
+    map.bindSession(sessionHash, "w2", NOW, TTL);
 
     // 每隔 59 秒来一次:跨越 10 倍 TTL,绑定始终不掉。
     let at = NOW;
@@ -320,7 +341,7 @@ describe("会话粘滞", () => {
     const cfg = config([{ id: "w1" }, { id: "w2" }], { affinityTtlMs: 60_000 });
     const pool = new WorkerPool(cfg);
     const map = new AffinityMap();
-    map.bindSession(sessionHash, "w2", NOW);
+    map.bindSession(sessionHash, "w2", NOW, TTL);
 
     // 边界:恰好 TTL 仍命中。
     expect(
@@ -330,7 +351,7 @@ describe("会话粘滞", () => {
 
     // 重新绑定(上一步刷新了时间),这次真的闲置过头。
     const fresh = new AffinityMap();
-    fresh.bindSession(sessionHash, "w2", NOW);
+    fresh.bindSession(sessionHash, "w2", NOW, TTL);
     expect(
       select({ pool, config: cfg, now: NOW + 60_001, affinity: { map: fresh, sessionHash, blobHashes: [] } })
         .targets[0]?.workerId,
@@ -366,15 +387,85 @@ describe("会话粘滞", () => {
     expect(a.targets[0]?.workerId).toBe(b.targets[0]?.workerId);
   });
 
-  it("全员冷却时也落绑定 —— 否则下一轮又换一个", () => {
+  it("全员冷却时**不动**会话绑定", () => {
+    /*
+     * 先前这条断言的是相反的行为(「全员冷却时也落绑定」),理由写的是
+     * 「否则下一轮又换一个」。第五轮审核指出那个理由**不成立**:
+     * `all_cooling` 选的是"最早恢复的那个",而那是个确定性函数 ——
+     * 同一组冷却状态下每次都选中同一个,不存在"来回换"。
+     *
+     * 而无条件 bind 的代价很实在:一次短暂的全员冷却窗口就能把会话绑定
+     * **永久**迁走。见下一条。
+     */
     const cfg = config([{ id: "w1" }, { id: "w2" }]);
     const pool = new WorkerPool(cfg);
     const map = new AffinityMap();
     for (const id of ["w1", "w2"]) {
       pool.markFailure({ workerId: id, kind: "rate_limit", retryAfter: "900", config: cfg, now: NOW, jitter: 0 });
     }
-    select({ pool, config: cfg, now: NOW, affinity: { map, sessionHash, blobHashes: [] } });
-    expect(map.sizes().sessions).toBe(1);
+    const result = select({ pool, config: cfg, now: NOW, affinity: { map, sessionHash, blobHashes: [] } });
+    expect(result.reason).toBe("all_cooling");
+    // 本来没有绑定 → 不凭空造一条。
+    expect(map.sizes().sessions).toBe(0);
+  });
+
+  it("全员冷却窗口**不得**把已有绑定迁走", () => {
+    /*
+     * 第五轮审核查出的缺陷,与我用集成测试查出的那个(绑定停在候选链首位)
+     * 是镜像形态。实测旧行为:
+     *
+     * ```
+     * 轮1 链: [w1, w2]                      绑定 w1(w1 签发了推理块)
+     * 轮2 链: [w2]  reason = all_cooling    → 改绑 w2
+     * 轮3 链: [w2, w1] reason = sticky      ← 指纹真相是 w1
+     * ```
+     *
+     * 指纹映射保留了正确答案 w1,但指纹提示只在 `sticky === null` 时才查 ——
+     * 会话绑定已命中,那份正确信息永远读不到。症状:客户端回放 w1 签发的
+     * 推理块,我们把请求钉到 w2,上游必拒。「对话隔一会儿报一次错,
+     * 且只在限流之后出现」。
+     *
+     * 正确行为:全员冷却这一轮不动绑定。若这一轮**成功**了,
+     * `relay.ts` 的 `rebind()` 会把绑定落到实际承接者身上 —— 那才是
+     * 知道"推理块是谁签发的"的时机。
+     */
+    const cfg = config([{ id: "w1" }, { id: "w2" }]);
+    const pool = new WorkerPool(cfg);
+    const map = new AffinityMap();
+    const ctx = { map, sessionHash, blobHashes: [] as string[] };
+
+    // 轮 1:绑到 w1。
+    expect(select({ pool, config: cfg, now: NOW, affinity: ctx }).targets[0]?.workerId).toBe("w1");
+
+    // 两个都冷却,w2 恢复更早。
+    pool.markFailure({ workerId: "w1", kind: "rate_limit", retryAfter: "900", config: cfg, now: NOW, jitter: 0 });
+    pool.markFailure({ workerId: "w2", kind: "rate_limit", retryAfter: "60", config: cfg, now: NOW, jitter: 0 });
+
+    // 轮 2:只能打 w2(最早恢复),但绑定不得改。
+    const r2 = select({ pool, config: cfg, now: NOW + 1_000, affinity: ctx });
+    expect(r2.targets.map((t) => t.workerId)).toEqual(["w2"]);
+    expect(r2.reason).toBe("all_cooling");
+
+    // 轮 3:冷却都过去了,必须回到 w1 —— 它才是签发推理块的那个。
+    const r3 = select({ pool, config: cfg, now: NOW + 999_999, affinity: ctx });
+    expect(r3.targets[0]?.workerId).toBe("w1");
+    expect(r3.reason).toBe("sticky");
+  });
+
+  it("绑定的 Worker 在冷却但**有其他就绪的**时,仍然换人", () => {
+    /*
+     * 与上一条的边界区分:这里不是全员冷却,所以放弃粘滞、用就绪的那个。
+     * 等它恢复是错的 —— 冷却可能长达 15 分钟,客户端只会看到网关卡住。
+     */
+    const cfg = config([{ id: "w1" }, { id: "w2" }]);
+    const pool = new WorkerPool(cfg);
+    const map = new AffinityMap();
+    map.bindSession(sessionHash, "w1", NOW, TTL);
+    pool.markFailure({ workerId: "w1", kind: "rate_limit", retryAfter: "900", config: cfg, now: NOW, jitter: 0 });
+
+    const result = select({ pool, config: cfg, now: NOW, affinity: { map, sessionHash, blobHashes: [] } });
+    expect(result.targets[0]?.workerId).toBe("w2");
+    expect(result.reason).toBe("strategy");
   });
 });
 
@@ -383,7 +474,7 @@ describe("推理指纹提示", () => {
     const cfg = config([{ id: "w1" }, { id: "w2" }, { id: "w3" }]);
     const pool = new WorkerPool(cfg);
     const map = new AffinityMap();
-    map.learnBlobs(["b1", "b2"], "w3", NOW);
+    map.learnBlobs(["b1", "b2"], "w3", NOW, TTL);
 
     const result = select({
       pool,
@@ -404,8 +495,8 @@ describe("推理指纹提示", () => {
     const pool = new WorkerPool(cfg);
     const map = new AffinityMap();
     const sessionHash = digestOf("ses-both");
-    map.bindSession(sessionHash, "w1", NOW);
-    map.learnBlobs(["b1"], "w2", NOW);
+    map.bindSession(sessionHash, "w1", NOW, TTL);
+    map.learnBlobs(["b1"], "w2", NOW, TTL);
 
     const result = select({
       pool,
@@ -421,7 +512,7 @@ describe("推理指纹提示", () => {
     const cfg = config([{ id: "w1" }, { id: "w2" }]);
     const pool = new WorkerPool(cfg);
     const map = new AffinityMap();
-    map.learnBlobs(["b1"], "w2", NOW);
+    map.learnBlobs(["b1"], "w2", NOW, TTL);
     pool.markFailure({ workerId: "w2", kind: "rate_limit", retryAfter: "900", config: cfg, now: NOW, jitter: 0 });
 
     const result = select({

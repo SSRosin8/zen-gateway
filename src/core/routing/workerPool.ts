@@ -31,6 +31,36 @@ export type WorkerRuntime = {
   readonly lastFailure: FailureKind | null;
 };
 
+/** 被移出候选池(停用/清空 key)的 Worker 留下的状态。 */
+type RetiredState = {
+  readonly apiKey: string;
+  readonly cooldownUntil: number;
+  readonly consecutiveFails: number;
+  readonly lastFailure: FailureKind | null;
+};
+
+/** `#retired` 的容量上限。见它的声明处说明。 */
+const RETIRED_CAP = 512;
+
+/**
+ * 就绪判定的**唯一**定义。
+ *
+ * 先前这个比较在四处各写一遍(`isReady`、`readyCount`、`snapshot`,以及
+ * `select.ts` 的候选过滤)。按纪律 #4,并行的判断必然分叉,而分叉方向是漏 ——
+ * 将来任何对"就绪"语义的改动(加一个 `disabledUntil`、或把 `<=` 改成 `<`)
+ * 只会落在一处。更糟的是 `select.ts` 里**同一个函数**内两份判定并存:
+ * 候选过滤用手写的,粘滞校验用 `pool.isReady`。
+ *
+ * NaN 防护在这里,而不是在每个调用点:`NaN <= now` 与 `x <= NaN` 都是 false,
+ * 于是一个 NaN 会让 Worker **永久**不就绪 —— 这正是 `normalizeFails` 注释
+ * 描述的那个后果,而它当时只防住了失败计数这一个入口。
+ */
+export function isWorkerReady(cooldownUntil: number, now: number): boolean {
+  if (!Number.isFinite(now)) return false;
+  if (!Number.isFinite(cooldownUntil)) return false;
+  return cooldownUntil <= now;
+}
+
 /**
  * Worker 是否可用于转发。
  *
@@ -51,6 +81,23 @@ export class WorkerPool {
   /** 按配置顺序。顺序本身有意义 —— 见 `select.ts` 的策略排序。 */
   #workers: WorkerRuntime[] = [];
 
+  /**
+   * 被过滤掉(停用/清空 key)的 Worker 的状态。
+   *
+   * 不留这一份的后果是实测出来的:`sync()` 的 `previous` Map 从 `#workers` 建,
+   * 而它已被 `filter(isUsable)` 过滤 —— 停用的 Worker 不在里面。于是
+   * 「停用 → 再启用」会让 `prior === undefined`,冷却与失败计数全清。
+   * 实测:429 `Retry-After: 900` 之后停用再启用,剩余冷却从 900000ms 变成 0。
+   *
+   * Phase 9 的管理后台点一下停用再启用就能抹掉上游明确要求的 15 分钟等待,
+   * 而那正是冷却存在的理由。所以停用要**保留**状态,与「换 key 才重置」一致。
+   *
+   * 有上限:配置里 Worker 最多 512 个,但这张表跨多次 sync 累积,
+   * 而热更新可以反复改配置。超出就丢最老的 —— 丢掉只意味着那个 Worker
+   * 重新启用时从零开始,不是数据损坏。
+   */
+  #retired = new Map<string, RetiredState>();
+
   constructor(config?: Config) {
     if (config !== undefined) this.sync(config);
   }
@@ -69,12 +116,38 @@ export class WorkerPool {
    *
    * 出口(proxyId)变化**不**重置:那不改变 Worker 的额度与鉴权状态,
    * 而限流与鉴权失败正是冷却的主要来源。
+   *
+   * ## 停用再启用同样保留 —— 状态从 `#retired` 找回
+   *
+   * 只看 `#workers` 是不够的:它已被 `filter(isUsable)` 过滤,停用的 Worker
+   * 不在里面。第五轮审核实测:429 `Retry-After: 900` 之后停用再启用,
+   * 剩余冷却从 900000ms 变成 0 —— Phase 9 的后台点两下就能抹掉上游明确
+   * 要求的等待。停用不是「用户修好了这个账号」,不该获得与换 key 同等的重置。
    */
   sync(config: Config): void {
     const previous = new Map(this.#workers.map((w) => [w.id, w] as const));
 
+    // 这一轮不再可用的,把状态存进 #retired 等它回来。
+    const nextIds = new Set(config.workers.filter(isUsable).map((w) => w.id));
+    for (const w of this.#workers) {
+      if (nextIds.has(w.id)) continue;
+      this.#retired.delete(w.id); // 先删再插:维持 Map 的插入顺序即 LRU 顺序
+      this.#retired.set(w.id, {
+        apiKey: w.apiKey,
+        cooldownUntil: w.cooldownUntil,
+        consecutiveFails: w.consecutiveFails,
+        lastFailure: w.lastFailure,
+      });
+    }
+    while (this.#retired.size > RETIRED_CAP) {
+      const oldest = this.#retired.keys().next();
+      if (oldest.done === true) break;
+      this.#retired.delete(oldest.value);
+    }
+
     this.#workers = config.workers.filter(isUsable).map((w) => {
-      const prior = previous.get(w.id);
+      // 在池里的优先;不在池里的去 #retired 找(停用过一段时间又回来)。
+      const prior = previous.get(w.id) ?? this.#retired.get(w.id);
       const keySame = prior !== undefined && prior.apiKey === w.apiKey;
       return {
         id: w.id,
@@ -86,6 +159,9 @@ export class WorkerPool {
         lastFailure: keySame ? prior.lastFailure : null,
       };
     });
+
+    // 回到池里的不必再留一份。
+    for (const w of this.#workers) this.#retired.delete(w.id);
   }
 
   all(): readonly WorkerRuntime[] {
@@ -102,11 +178,11 @@ export class WorkerPool {
 
   isReady(workerId: string, now: number): boolean {
     const worker = this.get(workerId);
-    return worker !== null && worker.cooldownUntil <= now;
+    return worker !== null && isWorkerReady(worker.cooldownUntil, now);
   }
 
   readyCount(now: number): number {
-    return this.#workers.filter((w) => w.cooldownUntil <= now).length;
+    return this.#workers.filter((w) => isWorkerReady(w.cooldownUntil, now)).length;
   }
 
   /** 供 `/health` 与管理后台:`poolHealth()` 的入参。 */
@@ -115,16 +191,44 @@ export class WorkerPool {
   }
 
   /**
-   * 记一次成功。
+   * 记一次成功 —— 清零计数**并解除冷却**。
    *
-   * 也用于**不可重试的 4xx**(不变量 #4):400/422 是请求本身的问题,
-   * 不是 Worker 的问题。此时必须清掉失败计数,否则一个客户端的坏请求
-   * 反复发几次,就能把连续失败数推高,下一次真实故障的退避从错误的指数级
-   * 起跳 —— 一次拼错的请求体让整个池的恢复速度变慢。
+   * 只用于**真正的成功**。一次成功的请求证明这个 Worker 现在能用,
+   * 所以解除冷却是对的(上游已经用行为否定了先前那次失败的判断)。
+   *
+   * 不可重试的 4xx **不要**用这个,用 `markNotBlamed()` —— 见那里的说明。
    */
   markSuccess(workerId: string): void {
     this.#update(workerId, () => ({
       cooldownUntil: 0,
+      consecutiveFails: 0,
+      lastFailure: null,
+    }));
+  }
+
+  /**
+   * 记一次**不归咎于该 Worker**的失败:清零失败计数,但**不动冷却**。
+   *
+   * 不变量 #4 要求 400/422 与出口配置错误不打掉健康 Worker。先前这里直接复用
+   * `markSuccess`,第五轮审核实测出后果:
+   *
+   * ```
+   * 429 Retry-After:900 之后  剩余 = 895000 ms
+   * 一次出口配置错误之后      剩余 = 0 ms  ready = true
+   * ```
+   *
+   * 上游明确说了等 900 秒,我们 5 秒后就认为它可用 —— `markFailure` 里
+   * 「冷却只延长不缩短」的 `Math.max` 被从旁路整个绕过。触发不需要巧合:
+   * 全员冷却时 `select` 仍会返回最早恢复的那个,所以坏请求真的会打到它。
+   *
+   * 根因是「记成功」这个动作**过强**:**「不归咎于 Worker」不等于「证明它现在
+   * 能用」**。出口配置错误尤其 —— 那次请求根本没到上游,它对 Worker 的
+   * 可用性零信息。
+   *
+   * 清零计数仍然要做:那是不变量 #4 原本的目的(坏请求不该把退避推到指数级)。
+   */
+  markNotBlamed(workerId: string): void {
+    this.#update(workerId, () => ({
       consecutiveFails: 0,
       lastFailure: null,
     }));
@@ -195,7 +299,7 @@ export class WorkerPool {
       id: w.id,
       kind: w.kind,
       proxyId: w.proxyId,
-      ready: w.cooldownUntil <= now,
+      ready: isWorkerReady(w.cooldownUntil, now),
       cooldownRemainingMs: Math.max(0, w.cooldownUntil - now),
       consecutiveFails: w.consecutiveFails,
       lastFailure: w.lastFailure,

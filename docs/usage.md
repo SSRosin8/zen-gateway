@@ -99,12 +99,16 @@ opencode run --model opencode/big-pickle "hello"
   而出口隔离是这个项目存在的理由。
 - **缺 `version` 即视为配置损坏**，不做旧项目配置迁移。
 - **损坏的配置绝不自动覆盖**（会连凭证一起丢）。报错只给字节位置，不回显内容。
-- `routing.strategy` 现已生效，但两个非 `mixed` 的取值**当前无实际效果**：
-  匿名 Worker 需要空 apiKey，而调度要求有 key（上游已关闭免 key 通道），
-  所以可排序的类别只剩一种。改这个字段不会有可见变化。
+- `routing.strategy` 按 Worker 的 `kind` 排序，三个取值产出三种不同顺序。
+  但**实践中你大概看不出区别**：可排序的只有 `anonymous` 与 `authenticated`
+  两类，而上游已关闭免 key 通道，所以正常配置里全是 `authenticated` ——
+  同一类别内部保持配置顺序，于是三个取值结果相同。想手工排优先级就直接改
+  `workers` 数组的顺序。
 - **`affinityTtlMs` 是闲置时长，不是绑定寿命**：每次请求都会刷新，所以一条持续
   活跃的会话永不换 Worker。固定寿命会在长对话中途强制换人，而那恰好是粘滞
   要避免的事（客户端回放的加密推理块会被上游拒）。
+- **会话键超过 4096 字符时不参与亲和**（退化成策略排序），而不是被截断。
+  截断发生在哈希之前等于摘要被截断 —— 前缀相同的两个会话会共用一个绑定。
 
 ### 各类失败冷却多久
 
@@ -122,7 +126,7 @@ opencode run --model opencode/big-pickle "hello"
 > 运行时长／URL），不含 Worker 就绪数。调度器的 `snapshot()`（每个 Worker 的
 > 就绪态、剩余冷却、连续失败数、最近失败类别）已经实现且不含凭证，
 > 但要等 Phase 9 的管理 API 才有地方读它。眼下只能从响应头
-> `x-zen-gateway-route` 推断（见下文「排查」）。
+> `x-zen-gateway-route` 与 `x-zen-gateway-worker` 推断（见下文「排查」）。
 
 一个实际现象：**任何非 OpenCode 客户端**（curl、别的网关）打进来都会拿 403
 `FreeTierError`，而 403 归 `auth` —— 于是全部 Worker 被打进 60 秒冷却。
@@ -148,6 +152,11 @@ opencode run --model opencode/big-pickle "hello"
       "host": "127.0.0.1", "port": 17891,
       "enabled": true, "source": "controller",
       "bridgeId": "clash-1", "clashNodeName": "🇺🇲 US-1",
+      "direct": false, "bridgeable": true, "egressIp": null },
+    { "id": "node-jp", "name": "JP", "type": "anytls",
+      "host": "127.0.0.1", "port": 17891,
+      "enabled": true, "source": "controller",
+      "bridgeId": "clash-1", "clashNodeName": "🇯🇵 JP-1",
       "direct": false, "bridgeable": true, "egressIp": null }
   ],
   "clash": {
@@ -190,7 +199,10 @@ curl -s http://127.0.0.1:9090/configs | grep -o '"mixed-port":[0-9]*'
 ## 排查
 
 ```bash
-curl -s http://127.0.0.1:9876/health            # ok / version / uptime / pid
+# 端口按你的 gateway.port —— 用 `npm run status` 打印的那个,别照抄 9876。
+# 本机曾同时跑着旧项目(9876)与本网关(9877),照抄会拿到**另一个进程**的
+# `{"ok":true}`,看起来一切正常而其实问错了人。
+curl -s "http://127.0.0.1:$(node -e 'import("./src/store/port.ts").then(m=>console.log(m.resolvePort()))')/health"
 curl -s http://127.0.0.1:9090/version           # Clash Controller 是否活着
 curl -s http://127.0.0.1:9090/connections \
   | grep -o '"chains":\[[^]]*\]'                # 流量实际走了哪个出站节点
@@ -207,7 +219,7 @@ curl -s http://127.0.0.1:9090/connections \
 | 401 | Relay Token 不对，或客户端没带 `Authorization` |
 | 403 `model_not_allowed` | 网关的免费闸门拦的，模型不在免费集 |
 | 403 `FreeTierError` | **上游**拦的，与 key 无关（闸门查请求形态） |
-| 400 `Model is unavailable.` | 模型已下架或该账号看不到它（目录是 per-Worker 的） |
+| 400 `Model is unavailable.` | 模型已下架，或你这种身份看不到它（目录按「带 key／免 key」区分） |
 | 503 `egress_unavailable` | 本机出口配置问题：代理停用、Clash 没开、缺 selector 分组 |
 | 502 | 上游不可达（传输层失败） |
 | 启动即退出 | 配置校验失败或端口被占，看 `data/zen-gateway.log` |
@@ -219,12 +231,24 @@ curl -s http://127.0.0.1:9090/connections \
 
 | 头 | 含义 |
 |---|---|
-| `x-zen-gateway-worker` | 这次由哪个 Worker 承接（仅成功时） |
+| `x-zen-gateway-worker` | 这次由哪个 Worker 承接。失败时是最后一次尝试的那个 |
 | `x-zen-gateway-route` | 为什么是它：`sticky`（会话粘滞）／`blob_hint`（推理指纹提示）／`strategy`（按策略排序）／`all_cooling`（全员冷却，给了最早恢复的那个） |
 | `x-zen-gateway-attempts` | 失败时尝试了几个 Worker |
 
-`x-zen-gateway-route` 是排查「为什么这次换了 Worker」的入口。看到
-`all_cooling` 就说明所有 Worker 都在冷却中 —— 此时响应里带的是上游的真实错误，
+三个头在**成功与失败时都有**。`route` 先前只在成功路径设置，而这恰好让它在
+最需要的时候缺席 —— 第五轮审核查出并修了。
+
+实测一串 curl 探针（每次都拿 403，而 403 归 `auth`）：
+
+```
+第 1 次: 403 | route: strategy    | worker: worker-11
+第 2 次: 403 | route: strategy    | worker: worker-12
+第 3 次: 403 | route: strategy    | worker: worker-13
+第 4 次: 403 | route: all_cooling | worker: worker-12
+```
+
+前三次把三个 Worker 逐个打进 60 秒冷却，第四次全员冷却 → 给最早恢复的那个。
+看到 `all_cooling` 就说明所有 Worker 都在冷却中，而响应里带的是上游的真实错误，
 不是网关自造的 503。
 
 ---
