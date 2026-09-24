@@ -97,6 +97,87 @@ describe("桥接转发：select 与建连必须原子，且锁在响应头后释
     };
   }
 
+  it("**`select()` 失败包成 `EgressSetupError`** —— 本机 Clash 配置错不该冷却 Worker", async () => {
+    /*
+     * ## 这条是**生产验证**查出来的，五个审核 agent 都没查到
+     *
+     * 触发条件很窄：本机 Clash 开了鉴权而 `data/config.json` 里 `apiSecret`
+     * 为空。我在第六轮的生产验证里撞上了它 —— 本机的 Clash 内核换了个
+     * 要求鉴权的版本。
+     *
+     * 切 selector 是**本机控制面**操作，它失败意味着本机配置不对（Clash 开了
+     * 鉴权、secret 变了、分组改名）。`fetch.ts` 里另外四处配置错误都包成了
+     * `EgressSetupError`，唯独 `lock.run()` 里这一句没有。
+     *
+     * ## 不包的后果：破坏不变量 #4
+     *
+     * 实测链条：`ControllerError` 逃出去 → `classifyError` 归 `transport`
+     * → `isRetryable` 为真且 `blameWorker` 为真 → 重试链把每个 Worker 依次
+     * 试一遍并**各记一次失败进冷却**。
+     *
+     * 于是一个本机 Clash 的 secret 配错，会把三个健康的付费账号全部打进退避，
+     * 而客户端看到的是 502「上游不可达」—— 用户会去查上游和网络，
+     * 真实原因（本机配置）被完全掩盖。修复后是 503 `egress_unavailable`，
+     * 消息直接说「检查 apiSecret 配置」。
+     *
+     * 生产对照（同一条命令，修复前后）：
+     * ```
+     * 修复前: HTTP 502 | upstream_unreachable | 上游请求失败:Controller 拒绝鉴权(401)
+     * 修复后: HTTP 503 | egress_unavailable   | 上游请求失败:Controller 拒绝鉴权(401);检查 apiSecret 配置
+     * ```
+     */
+    const { EgressSetupError } = await import("../../src/core/upstream/fetch.ts");
+    const { ControllerError } = await import("../../src/core/proxy/clash/controller.ts");
+    const events: string[] = [];
+    const config = bridgeConfig();
+
+    const failing = {
+      ...deps(config, events, async () => new UndiciResponse("{}", { status: 200 })),
+      controllerFor: () =>
+        ({
+          async select() {
+            throw new ControllerError("Controller 拒绝鉴权(401);检查 apiSecret 配置", "auth", 401);
+          },
+        }) as unknown as ClashController,
+    };
+
+    await expect(
+      fetchUpstream(
+        { url: "http://upstream.invalid/v1/x", method: "POST", headers: {}, body: null, proxyId: "p-bridge" },
+        failing,
+      ),
+    ).rejects.toThrow(EgressSetupError);
+
+    // 而且**根本没发出上游请求** —— 切不动节点就不该带着 key 从错误的出口出去。
+    expect(events).not.toContain("fetch");
+  });
+
+  it("`fetch()` 本身的失败**不**包成 `EgressSetupError` —— 那是真实网络失败", async () => {
+    /*
+     * 上一条的反向钉子，而且是承重的：若图省事把整个 `lock.run()` 回调包进
+     * try，真实的网络失败就会被当成配置错误 —— 于是**不重试、不归咎 Worker**，
+     * 一个真的挂掉的上游永远不会让任何 Worker 进冷却，重试链形同虚设。
+     *
+     * 两个方向的代价不对称但都实在：漏包（上一条）会冷却健康 Worker，
+     * 过度包（这一条）会让冷却整体失效。所以只包 `select()` 那一句。
+     */
+    const { EgressSetupError } = await import("../../src/core/upstream/fetch.ts");
+    const events: string[] = [];
+    const config = bridgeConfig();
+
+    await expect(
+      fetchUpstream(
+        { url: "http://upstream.invalid/v1/x", method: "POST", headers: {}, body: null, proxyId: "p-bridge" },
+        deps(config, events, async () => {
+          throw new Error("ECONNRESET");
+        }),
+      ),
+    ).rejects.not.toBeInstanceOf(EgressSetupError);
+
+    // select 成功了才轮到 fetch 失败 —— 确认走的确实是这条路径。
+    expect(events).toContain("fetch");
+  });
+
   it("转发前会切换 selector，且顺序是 select → fetch", async () => {
     /*
      * 先前这条完全没有断言:把 `lock.run()` 连同 `controller.select()`

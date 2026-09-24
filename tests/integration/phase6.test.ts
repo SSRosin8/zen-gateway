@@ -384,6 +384,232 @@ describe("目录交集(免费判定的 ∩ 在架目录)", () => {
     // 关键:一次目录请求都没有(转发路径只读缓存)。
     expect(calls.filter((c) => c.method === "GET")).toHaveLength(0);
   });
+
+  it("判出「已下架」时刷一次目录 —— 上游**新上架**的模型能自愈", async () => {
+    /*
+     * 第六轮审核查出这行刷新**没有任何断言覆盖**:删掉它后 1274 条测试全绿。
+     *
+     * 它收口的是 `catalog.ts` 文件头点名为"更糟的那一侧"的那个:
+     * **缓存里没有而上游有** → 网关误拒一个可用模型。与另一侧(缓存里多一个 →
+     * 上游 400 → `bad_request` → 不重试不归咎,自限)不同,这一侧**不自愈**,
+     * 用户会看到一个在架的免费模型被永久拒绝,直到有人主动访问 `/v1/models`。
+     *
+     * ## 断言的是**自愈**这个可观察行为,不是"某个方法被调用了"
+     *
+     * 后者会在重构时假红,而且它不能区分"调用了但没生效"。这里的判据是
+     * 第二次请求真的 200。
+     */
+    const cfg = config({ models: { catalogTtlMs: 60_000 } });
+    let now = 1_000;
+    const catalog = new ModelCatalog({ clock: () => now });
+
+    // 上游此刻还没有这个模型,预热出一份不含它的目录。
+    await catalog.ensure(catalogIdentityOf(cfg), cfg, (c) => egress.upstreamDeps(c));
+    const a = app(cfg, catalog);
+
+    // 上游**新上架**了它(带 -free 后缀,所以免费依据成立)。
+    liveIds = [...liveIds, "space-bunny-free"];
+    // 让缓存过期 —— 刷新只在过期时才发生（新鲜时刻意不刷，见 relay.ts）。
+    now += 60_001;
+    calls = [];
+
+    const first = await a.request(
+      "/v1/chat/completions",
+      relay({ model: "space-bunny-free", messages: [] }),
+    );
+    // 第一次仍按旧目录拒绝 —— 那是对的,此刻我们手里只有旧目录。
+    expect(first.status).toBe(403);
+    expect(((await first.json()) as { error: { message: string } }).error.message).toContain(
+      "已不在上游在架目录",
+    );
+
+    /*
+     * 排空后台刷新。必须过**宏任务** —— 只 await 微任务排不到
+     * `#fetchOnce` 的 `.finally` 那一层（`#inFlight.delete` 在那里），
+     * 于是"第二次没发请求"的真实原因会变成合流去重还没清理。
+     * 这个坑我在 Phase 6 的 `settle()` 上栽过一次。
+     */
+    for (let i = 0; i < 20; i += 1) {
+      await new Promise((r) => {
+        setTimeout(r, 0);
+      });
+      if (catalog.cached("keyed")?.ids.has("space-bunny-free") === true) break;
+    }
+
+    // 刷新真的发生了,且新目录已进缓存。
+    expect(calls.filter((c) => c.method === "GET")).toHaveLength(1);
+    expect(catalog.cached("keyed")?.ids.has("space-bunny-free")).toBe(true);
+
+    // 自愈:同一个模型的下一次请求放行。
+    const second = await a.request(
+      "/v1/chat/completions",
+      relay({ model: "space-bunny-free", messages: [] }),
+    );
+    expect(second.status).toBe(200);
+  });
+
+  it("目录**新鲜**时判出已下架**不**刷新 —— 否则反复请求坏模型名会放大", async () => {
+    /*
+     * 上一条的反向钉子。刷新只在过期时才该发生:一个客户端反复请求一个
+     * 真的已下架的模型(比如配置里残留的旧 id),不该每次都触发一次上游查询。
+     *
+     * 没有这条,把 `refreshIfStale` 改成无条件 `ensure` 也不会有测试变红,
+     * 而那正是 Phase 6 第一版那个"每请求刷目录"缺陷的变体。
+     */
+    const cfg = config();
+    const catalog = await warmCatalog(cfg);
+    const a = app(cfg, catalog);
+    calls = [];
+
+    for (let i = 0; i < 10; i += 1) {
+      const res = await a.request("/v1/chat/completions", relay({ model: "glm-5-free", messages: [] }));
+      expect(res.status).toBe(403);
+    }
+    // 目录新鲜 → 一次刷新都没有。
+    expect(calls.filter((c) => c.method === "GET")).toHaveLength(0);
+  });
+
+  it("**槽位由推导决定,不是硬写** —— 没有可用 Worker 时读的是 keyless 槽", async () => {
+    /*
+     * 第六轮审核查出的纪律 #4 分叉:读侧先前硬写 `cached("keyed")`,
+     * 而写侧(retired 那支的刷新)用 `catalogIdentityOf` **推导**槽位。
+     *
+     * 支撑硬写的注释推错了时序:免费判定是**第 3 步**,选 Worker 是**第 5 步** ——
+     * 第 3 步执行时候选链还不存在,所以"候选链里每个 Worker 都有 key"
+     * 在那一刻不是可用前提。所有 Worker 都停用时推导出的是 `keyless`。
+     *
+     * ## 可观察差异
+     *
+     * 没有可用 Worker + keyless 槽里有一份目录时,请求一个**不在**该目录里的
+     * 免费后缀模型:
+     *
+     * - 硬写 keyed(缺陷):读到 null → 走 `*_unverified` → **放行** → 第 5 步才
+     *   503。交集在这个状态下**完全失效**。
+     * - 推导 keyless(正确):读到目录 → 交集生效 → 403 retired。
+     *
+     * 这条同时证明交集在 keyless 身份下也真的工作 —— 而那是首次配置前
+     * (还没有任何 Worker)唯一可用的身份。
+     */
+    const cfg = config({
+      workers: [
+        {
+          id: "w1",
+          name: "",
+          kind: "authenticated",
+          apiKey: "fake-key-w1-not-real",
+          enabled: false, // 全部停用 → usableTargets 为空 → 身份是 keyless
+          proxyId: null,
+        },
+      ],
+    });
+    // 预热:身份为 keyless,所以目录进 keyless 槽。
+    const catalog = await warmCatalog(cfg);
+    expect(catalog.cached("keyless")).not.toBeNull();
+    expect(catalog.cached("keyed")).toBeNull();
+
+    const res = await app(cfg, catalog).request(
+      "/v1/chat/completions",
+      relay({ model: "glm-5-free", messages: [] }),
+    );
+
+    // 交集生效 → 403 retired,而不是放行后到第 5 步才 503。
+    expect(res.status).toBe(403);
+    const body = (await res.json()) as { error: { type: string; message: string } };
+    expect(body.error.type).toBe("model_not_allowed");
+    expect(body.error.message).toContain("已不在上游在架目录");
+  });
+
+  it("**经 /v1/models 填上的目录立刻对转发面生效** —— 不注入 catalog,验真实装配", async () => {
+    /*
+     * ## 这条补的是一个"注入替换掉了被测的那段"的缺口
+     *
+     * 第六轮审核查出:本文件每个用例都把 `catalog` 直接注入 `createApp`,而
+     * `app.ts` 里「转发面与 `/v1/models` **共用同一个**缓存」这条接线,恰好就被
+     * 那个注入替换掉了。实测把 models 路由换成 `new ModelCatalog()` 之后
+     * **1279 条测试全绿**。
+     *
+     * 这正是第四轮那个最严重空壳的同一形态:那条名为"本文件最重要的断言"的
+     * 回环测试注入了 `addressOf`,而被替换掉的正是会去读 `X-Forwarded-For` 的
+     * 代码路径。**凡是注入了依赖的测试,都要问"我注入的这个,是不是正好是
+     * 我要测的那段"。**
+     *
+     * ## 不共用时的后果:交集整体静默失效
+     *
+     * 转发面手里永远是空目录 → `judgeFree` 走 `*_unverified` → 已下架的
+     * `xx-free` 重新被放行 → 上游 400 `Model is unavailable`。而同时
+     * `/v1/models` 显示的目录是新鲜的 —— 于是症状是"模型列表里有它、点了报
+     * 上游错误",恰好是交集要消灭的那个陷阱。没有任何日志、没有任何报错。
+     *
+     * 所以这条**刻意不注入** catalog,走 `app.ts` 自己建的那一个。
+     */
+    const cfg = config();
+    const a = createApp({ configOf: () => cfg, egress, log: () => {} });
+
+    // 先经 /v1/models 把目录填上（这是它唯一的填充路径,因为没有预热）。
+    const list = await a.request("/v1/models", { headers: { authorization: `Bearer ${TOKEN}` } });
+    expect(list.status).toBe(200);
+    expect(calls.filter((c) => c.method === "GET")).toHaveLength(1);
+
+    // 若两条路径共用同一个缓存,转发面此刻已经能做交集。
+    const res = await a.request(
+      "/v1/chat/completions",
+      relay({ model: "glm-5-free", messages: [] }),
+    );
+    expect(res.status, "共用缓存时交集必须已经生效").toBe(403);
+    const body = (await res.json()) as { error: { message: string } };
+    expect(body.error.message).toContain("已不在上游在架目录");
+    // 交集在本机拦住,没有多打一次上游。
+    expect(relayCalls()).toHaveLength(0);
+  });
+
+  it("放行但**未经在架核验**时带 `x-zen-gateway-free` 头", async () => {
+    /*
+     * `judgeFree` 为此造了 `suffix_unverified`/`extra_unverified` 两个 reason,
+     * 而第六轮审核 grep 出**全仓没有任何读者** —— 那是第四轮 `streaming` 字段
+     * 的形态(声明了、被文档说明、却没有一处读它),只是藏在一个看起来被用到的
+     * 联合类型分支里。
+     *
+     * 没有它时,用户遇到上游 400 `Model is unavailable` 无法区分
+     * 「目录说它在架但上游拒了」与「我们压根没拿到目录」—— 后者要查出口/网络,
+     * 前者要查上游。
+     */
+    // 空目录（没预热过）→ 放行但未核验。
+    const unverified = await app(config(), new ModelCatalog()).request(
+      "/v1/chat/completions",
+      relay({ model: "big-pickle", messages: [] }),
+    );
+    expect(unverified.status).toBe(200);
+    expect(unverified.headers.get("x-zen-gateway-free")).toBe("extra_unverified");
+
+    // 有目录 → 经过核验 → 不带这个头。
+    const cfg = config();
+    const catalog = await warmCatalog(cfg);
+    const verified = await app(cfg, catalog).request(
+      "/v1/chat/completions",
+      relay({ model: "big-pickle", messages: [] }),
+    );
+    expect(verified.status).toBe(200);
+    expect(verified.headers.get("x-zen-gateway-free")).toBeNull();
+  });
+
+  it("`x-zen-gateway-free` 在**失败路径**上也要有 —— 那才是最需要它的时候", async () => {
+    /*
+     * 这个头要回答的问题恰好是一次失败:上游返回 400 时,是"目录说它在架但
+     * 上游拒了"还是"我们压根没拿到目录"?只在成功路径设置它,等于在唯一需要
+     * 它的时候缺席 —— 而那正是第五轮查出的 `x-zen-gateway-route` 那个缺陷
+     * (我写文档教用户失败时看它,而它只在成功时存在)。
+     */
+    handler = (_req, res) => {
+      res.writeHead(400, { "content-type": "application/json" });
+      res.end(JSON.stringify({ error: { type: "server_error", message: "Model is unavailable." } }));
+    };
+    const res = await app(config(), new ModelCatalog()).request(
+      "/v1/chat/completions",
+      relay({ model: "big-pickle", messages: [] }),
+    );
+    expect(res.status).toBe(400);
+    expect(res.headers.get("x-zen-gateway-free")).toBe("extra_unverified");
+  });
 });
 
 describe("/v1/models 的缓存", () => {
@@ -496,7 +722,11 @@ describe("用量解析接到了流上(parseUsage 的生产调用点)", () => {
      * `message_delta` 在**末尾**带 output_tokens。
      *
      * 所以"只留尾部窗口"会丢输入,"只扫开头预算"会丢输出。
-     * 中间刻意塞很多 delta,让两端相距足够远。
+     *
+     * 注意这条用 200 个 delta,流只有约 12 KB —— 它**测不到预算边界**
+     * (默认 1 MiB)。跨预算那件事由下面两条专门测,而我原先在这里写的
+     * "中间刻意塞很多 delta,让两端相距足够远"是**假的**:12 KB 距 1 MiB
+     * 还差两个数量级,于是预算那条分支从未被执行(第六轮审核查出)。
      */
     const logs: string[] = [];
     handler = (_req, res) => {
@@ -519,6 +749,148 @@ describe("用量解析接到了流上(parseUsage 的生产调用点)", () => {
     // total 是重算的 849,不是两个半数取大的 812。
     expect(logs.some((l) => l.includes("in=812 out=37 total=849"))).toBe(true);
     expect(logs.some((l) => l.includes("messages/big-pickle"))).toBe(true);
+  });
+
+  it("**超过 1 MiB 的流**:Messages 面的用量仍然正确 —— 不是 out=1", async () => {
+    /*
+     * 第六轮审核查出的最严重缺陷的回归守卫。
+     *
+     * 先前 `SCAN_BUDGET_BYTES`(1 MiB)加在 `tapReadable` 的 `onText` 上,而
+     * `onText` 有**两个**消费者:失效推理扫描(只需开头)与 token 用量
+     * (需要整条流)。两个相反的需求共用一个闸门,牺牲的是后者。
+     *
+     * Anthropic 面的后果是**算错**而不是漏掉:`message_start` 真的带
+     * `output_tokens: 1`(协议形态),超出预算后它成了唯一收到的用量事件,
+     * 于是报出 `in=812 out=1 total=813` —— 一个看起来有据可依的错数字。
+     * Phase 7 会把它记成一行完整记录,usage 覆盖率显示 100%,
+     * 而输出 token 系统性等于 1。
+     *
+     * 按真实 chunk 尺寸估算约 1 万个输出 token 就跨过 1 MiB,
+     * 而长回答恰好是**最值得统计**的那一类请求。
+     */
+    const logs: string[] = [];
+    let streamBytes = 0;
+    handler = (_req, res) => {
+      res.writeHead(200, { "content-type": "text/event-stream" });
+      const head =
+        'data: {"type":"message_start","message":{"usage":{"input_tokens":812,"output_tokens":1}}}\n\n';
+      res.write(head);
+      streamBytes += Buffer.byteLength(head);
+      // 纯 ASCII 填充:预算计的是字符数,用 ASCII 才能确定地越过它。
+      const filler = `data: {"type":"content_block_delta","delta":{"text":"${"a".repeat(400)}"}}\n\n`;
+      for (let i = 0; i < 4000; i += 1) {
+        res.write(filler);
+        streamBytes += Buffer.byteLength(filler);
+      }
+      const tail = 'data: {"type":"message_delta","usage":{"output_tokens":37}}\n\n';
+      res.end(tail);
+      streamBytes += Buffer.byteLength(tail);
+    };
+
+    const res = await app(config(), undefined, (m) => logs.push(m)).request(
+      "/v1/messages",
+      relay({ model: "big-pickle", max_tokens: 64, stream: true, messages: [] }),
+    );
+    await res.text();
+
+    /*
+     * **先钉住输入规模真的越过了预算。**
+     *
+     * 没有这条断言,这个用例会随 fixture 缩小或预算调大而静默退化成
+     * 一条"小流也能出数"的重复测试 —— 而那正是它要替代的那个空壳的成因。
+     */
+    expect(streamBytes).toBeGreaterThan(1024 * 1024);
+    expect(logs.some((l) => l.includes("in=812 out=37 total=849"))).toBe(true);
+    // 明确排除那个错数字,而不只是断言正确值存在。
+    expect(logs.some((l) => l.includes("out=1 total=813"))).toBe(false);
+  });
+
+  it("**超过 1 MiB 的流**:chat 面的末帧用量不会整条丢失", async () => {
+    /*
+     * 同一个缺陷在 chat/responses 面上的形态是**漏掉**(用量只在末帧,
+     * 超预算后 `onText` 完全停掉 → `usage()` 返回 null → 不打日志)。
+     * 比 Messages 那条轻(统计偏小而非错误),但同样静默。
+     */
+    const logs: string[] = [];
+    let streamBytes = 0;
+    handler = (_req, res) => {
+      res.writeHead(200, { "content-type": "text/event-stream" });
+      const filler = `data: {"choices":[{"delta":{"content":"${"a".repeat(400)}"}}]}\n\n`;
+      for (let i = 0; i < 4000; i += 1) {
+        res.write(filler);
+        streamBytes += Buffer.byteLength(filler);
+      }
+      const tail = 'data: {"usage":{"prompt_tokens":900,"completion_tokens":5000}}\n\n';
+      res.end(tail);
+      streamBytes += Buffer.byteLength(tail);
+    };
+
+    const res = await app(config(), undefined, (m) => logs.push(m)).request(
+      "/v1/chat/completions",
+      relay({ model: "big-pickle", stream: true, messages: [] }),
+    );
+    await res.text();
+
+    expect(streamBytes).toBeGreaterThan(1024 * 1024);
+    expect(logs.some((l) => l.includes("in=900 out=5000 total=5900"))).toBe(true);
+  });
+
+  it("用量日志里的 model id 过脱敏 —— 换行不能伪造一条日志行", async () => {
+    /*
+     * 第六轮审核查出:`model` 是客户端可控的任意字符串,而它先前被原样拼进
+     * 日志格式串。`readModelField` 只保证"非空且无首尾空白",既不限长也不管
+     * 控制字符 —— 它的职责是取字段,不是净化日志。
+     *
+     * 实测后果:model 里一个 `\n` 就能让 `data/zen-gateway.log`
+     * (append-only 且无轮转)多出一条形态与真实记录**无法区分**的用量行。
+     */
+    const logs: string[] = [];
+    handler = (_req, res) => {
+      res.writeHead(200, { "content-type": "application/json" });
+      res.end(JSON.stringify({ usage: { prompt_tokens: 3, completion_tokens: 1 } }));
+    };
+
+    const evil =
+      "x\n用量 chat/victim-model-free: in=999999 out=999999 total=1999998\n#-free";
+    const res = await app(config(), undefined, (m) => logs.push(m)).request(
+      "/v1/chat/completions",
+      relay({ model: evil, messages: [] }),
+    );
+    await res.text();
+
+    const line = logs.find((l) => l.startsWith("用量"));
+    expect(line).toBeDefined();
+    // 整条日志必须仍是**一行**。
+    expect(line?.split("\n")).toHaveLength(1);
+    // 且不存在一行完全冒充成合法用量记录。
+    const forged = (line ?? "")
+      .split("\n")
+      .some((l) => /^用量 chat\/victim-model-free: in=\d+ out=\d+ total=\d+$/.test(l));
+    expect(forged).toBe(false);
+  });
+
+  it("用量日志里的 model id 有长度上限 —— 2 MB 的 id 不产出 2 MB 的日志行", async () => {
+    /*
+     * 同一处的第二个后果:放大比 1.000,而日志文件无轮转。
+     * 用行为断言(日志行长度)而不是内存/耗时阈值 —— 阈值天生要靠猜。
+     */
+    const logs: string[] = [];
+    handler = (_req, res) => {
+      res.writeHead(200, { "content-type": "application/json" });
+      res.end(JSON.stringify({ usage: { prompt_tokens: 3, completion_tokens: 1 } }));
+    };
+
+    const huge = `${"y".repeat(2 * 1024 * 1024)}-free`;
+    const res = await app(config(), undefined, (m) => logs.push(m)).request(
+      "/v1/chat/completions",
+      relay({ model: huge, messages: [] }),
+    );
+    await res.text();
+
+    const line = logs.find((l) => l.startsWith("用量"));
+    expect(line).toBeDefined();
+    // 远小于输入;留出格式串与用量数字的余量,但必须是常数级。
+    expect(line?.length).toBeLessThan(1024);
   });
 
   it("Responses 面的流式用量在 `response.usage` 里", async () => {

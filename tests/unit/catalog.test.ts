@@ -56,16 +56,34 @@ function fakeDeps(script: Array<UndiciResponse | Error>): {
   upstreamOf: (config: Config) => UpstreamDeps;
   calls: () => number;
   keys: () => string[];
+  /**
+   * 每次请求实际用的**出口** —— `mode:none` 表示本机直连,`direct:<id>` 表示
+   * 经那个代理。目录请求的出口隔离只能在这里观察:`proxyId` 唯一能产生
+   * 可观察后果的地方就是 `DispatcherPool.get` 收到的 target。
+   */
+  targets: () => string[];
 } {
   let i = 0;
   const keys: string[] = [];
+  const targets: string[] = [];
   const pool = new DispatcherPool({ headersTimeoutMs: 1000, bodyTimeoutMs: 1000 });
+  /*
+   * 包一层记录 target。刻意**不替换** `DispatcherPool` —— 它自己的缓存键逻辑
+   * (按 Clash 节点名缓存)是不变量 #7,换成假实现就测不到真实的 target 构造了。
+   */
+  const spyPool = {
+    get(target: Parameters<DispatcherPool["get"]>[0]) {
+      targets.push(target.mode === "none" ? "none" : `${target.mode}:${target.proxy.id}`);
+      return pool.get(target);
+    },
+  } as unknown as DispatcherPool;
   return {
     calls: () => i,
     keys: () => keys,
+    targets: () => targets,
     upstreamOf: (cfg: Config): UpstreamDeps => ({
       config: cfg,
-      dispatchers: pool,
+      dispatchers: spyPool,
       locks: new SelectorLockRegistry(),
       controllerFor: () => null,
       fetchImpl: (async (_url: string, init: { headers?: Record<string, string> }) => {
@@ -166,18 +184,172 @@ describe("身份与槽位", () => {
     expect(slotOf(id)).toBe("keyless");
   });
 
-  it("**只有一处定义** —— 三个调用点都用它", () => {
+  /*
+   * ## 下面三条替换了一条恒真的空壳（第六轮审核查出）
+   *
+   * 原先这里写的是 `expect(catalogIdentityOf(cfg)).toEqual(catalogIdentityOf(cfg))`,
+   * 名义上验"只有一处定义",实际**恒真** —— 同一个函数调两次当然相等。
+   *
+   * 而上面那条「取第一个**可用** Worker」只有一个 Worker,所以"可用"这个
+   * 限定词无从失败。变异验证:把 `usableTargets(config)[0]` 换成
+   * `config.workers[0]`（即去掉 `isUsable` 过滤）后**1274 条测试全绿**。
+   *
+   * 归类是第五轮的第三类「调用点存在但输入集为空」:全部 fixture 的
+   * `workers[0]` 恒为 `enabled: true` 且有 key。而"先配一个免 key 的试试,
+   * 再加带 key 的"恰好是很自然的配置顺序。
+   */
+  it("跳过**已停用**的 Worker —— 不能拿停用者的 key 与出口拉目录", () => {
     /*
-     * 这条守的是纪律 #4。我第一版在三处各写了一遍这个逻辑(启动预热、
-     * /v1/models、转发路径的下架复核),而脱节方向**必然是各自算出不同的
-     * 槽位** —— 一处把目录填进 keyed 槽,另一处去 keyless 槽里找,
-     * 交集静默失效且没有任何报错。
-     *
-     * 断言方式:全仓对 `apiKey ?? ""` 这种身份推导只该有一处。
-     * 这里用行为替代(三处都拿到同一个身份),结构性检查见下面的注释。
+     * 后果之一是出口错:目录查询会经一个**用户已明确停用**的代理发出。
+     * proxyId 一并断言,因为那是"经哪个出口"的唯一依据。
      */
-    const cfg = workerConfig(["w1"]);
-    expect(catalogIdentityOf(cfg)).toEqual(catalogIdentityOf(cfg));
+    const cfg = config({
+      workers: [
+        {
+          id: "w1",
+          name: "",
+          kind: "authenticated",
+          apiKey: "fake-key-DISABLED-not-real",
+          enabled: false,
+          proxyId: null,
+        },
+        {
+          id: "w2",
+          name: "",
+          kind: "authenticated",
+          apiKey: "fake-key-w2-not-real",
+          enabled: true,
+          proxyId: null,
+        },
+      ],
+    });
+    const id = catalogIdentityOf(cfg);
+    expect(id.apiKey).toBe("fake-key-w2-not-real");
+  });
+
+  it("跳过**没有 key** 的 Worker —— 否则槽位算成 keyless,交集静默失效", () => {
+    /*
+     * 这条是三条里最要紧的:它钉住的不是"取哪个 key",而是**槽位**。
+     *
+     * 若免 key 的 w1 排在前面而这里不过滤,`slotOf` 会返回 `keyless` →
+     * 目录被填进 keyless 槽,而 `relay.ts` 读的是 `cached("keyed")` →
+     * 拿到 null → **交集静默失效**,退回 Phase 5 那个偏宽的放行。
+     * 也就是说 Phase 6 的核心交付会在一种很自然的配置下无声消失。
+     *
+     * 用 `kind: "anonymous"` 构造免 key 的合法 Worker —— `WorkerSchema` 的
+     * `refine` 是**单向**的（只要求 authenticated 必须有 key），所以这个形态合法。
+     */
+    const cfg = config({
+      workers: [
+        { id: "w1", name: "", kind: "anonymous", apiKey: "", enabled: true, proxyId: null },
+        {
+          id: "w2",
+          name: "",
+          kind: "authenticated",
+          apiKey: "fake-key-w2-not-real",
+          enabled: true,
+          proxyId: null,
+        },
+      ],
+    });
+    const id = catalogIdentityOf(cfg);
+    expect(id.apiKey).toBe("fake-key-w2-not-real");
+    expect(slotOf(id)).toBe("keyed");
+  });
+
+  it("首位不可用时**出口也不能取它的** —— proxyId 一起跳过", () => {
+    /*
+     * 单独一条,因为 `apiKey` 与 `proxyId` 是从**同一个** target 上取的两个字段,
+     * 而只断言 key 的话,一个"取 key 从过滤后的、取 proxyId 从原数组"的
+     * 错误实现照样能过。
+     */
+    const cfg = config({
+      proxies: [
+        {
+          id: "p1",
+          name: "停用者的代理",
+          type: "socks5",
+          host: "203.0.113.9",
+          port: 1080,
+          source: "manual",
+          direct: true,
+        },
+      ],
+      workers: [
+        {
+          id: "w1",
+          name: "",
+          kind: "authenticated",
+          apiKey: "fake-key-DISABLED-not-real",
+          enabled: false,
+          proxyId: "p1",
+        },
+        {
+          id: "w2",
+          name: "",
+          kind: "authenticated",
+          apiKey: "fake-key-w2-not-real",
+          enabled: true,
+          proxyId: null,
+        },
+      ],
+    });
+    const id = catalogIdentityOf(cfg);
+    expect(id.proxyId).toBeNull();
+  });
+
+  it("**目录请求经该 Worker 绑定的出口发出** —— 不是本机直连", async () => {
+    /*
+     * 第六轮审核查出这条完全没有守卫:把 `catalogIdentityOf` 或 `#doFetch` 里的
+     * `proxyId` 改成硬编码 `null` 之后 **1279 条测试全绿**。归类是第三类
+     * 「输入集为空」—— 全部 fixture 的 Worker 都是 `proxyId: null`。
+     *
+     * ## 为什么这条比它看起来重要
+     *
+     * 目录请求**带着某个 Worker 的 key**。若它从本机默认出口发出,这个账号就在
+     * 一个与转发**不同的公网 IP** 上被上游看到 —— 而「每个 Worker 经各自独立的
+     * 公网出口」是这个项目**存在的理由**。上游按 IP+key 做关联时,所有账号的
+     * 目录查询都从同一个 IP 出去,等于把隔离在这条路径上整体放弃。
+     *
+     * 而它**完全静默**:目录照常拉回来了,本地无论怎么看都正常。
+     *
+     * 断言点选在 `DispatcherPool.get` 收到的 target 上 —— 那是 `proxyId`
+     * 唯一能产生可观察后果的地方(见 `fakeDeps` 的 `targets()`)。
+     */
+    const cfg = config({
+      proxies: [
+        {
+          id: "px1",
+          name: "w1 的专属出口",
+          type: "socks5",
+          host: "203.0.113.9",
+          port: 1080,
+          source: "manual",
+          direct: true,
+        },
+      ],
+      workers: [
+        {
+          id: "w1",
+          name: "",
+          kind: "authenticated",
+          apiKey: "fake-key-w1-not-real",
+          enabled: true,
+          proxyId: "px1",
+        },
+      ],
+    });
+
+    const id = catalogIdentityOf(cfg);
+    // 身份必须带出 Worker 的出口 —— 这一半钉住 `catalogIdentityOf`。
+    expect(id.proxyId).toBe("px1");
+
+    const f = fakeDeps([catalogResponse(["a"])]);
+    const cat = new ModelCatalog({ clock: () => 1000 });
+    await cat.ensure(id, cfg, f.upstreamOf);
+
+    // 而这一半钉住 `#doFetch` 真的把它用上了,而不是只放在类型里。
+    expect(f.targets()).toEqual(["direct:px1"]);
   });
 });
 
@@ -561,6 +733,38 @@ describe("refreshIfStale —— 后台刷新与失败退避", () => {
     cat.refreshIfStale(id, cfg, f.upstreamOf);
     await settle();
     expect(f.calls()).toBe(1); // 被退避压住 —— 200 也算失败
+  });
+
+  it("**时钟回拨后退避不生效** —— 一次 NTP 校正不该把目录冻住", async () => {
+    /*
+     * 第六轮审核查出这条守卫没有断言:退避那组测试只**推进**时钟,从来没回拨过。
+     * 实测把 `age >= 0 &&` 删掉后全绿。
+     *
+     * 后果很具体:NTP 校正或休眠唤醒让 `now < failedAt` → `age` 为负 →
+     * `age < FAILURE_BACKOFF_MS` 恒为真 → **刷新被永久冻住**,直到时钟追回来
+     * (可以是几小时)。而 `refreshIfStale` 是 `/v1/models` 与启动预热的路径,
+     * 所以症状是"目录停更":新上架的模型一直不生效。完全静默。
+     *
+     * 注意这与 `isFresh` 里那条**方向相反**:那里 `catalogTtlMs` 的下界恒为正,
+     * 所以负 age 自然落在"新鲜"一侧,守卫是数学死代码(已删)。同样的写法
+     * 一处是死的、一处是承重的 —— 两边的注释都写明了这个区别。
+     */
+    const f = fakeDeps([new Error("失败"), catalogResponse(["a"])]);
+    let now = 10_000_000;
+    const cat = new ModelCatalog({ clock: () => now });
+    const cfg = workerConfig(["w1"]);
+    const id = catalogIdentityOf(cfg);
+
+    cat.refreshIfStale(id, cfg, f.upstreamOf);
+    await settle();
+    expect(f.calls()).toBe(1);
+
+    // 回拨一小时 —— 绝对值远大于退避窗口,但方向是负的。
+    now -= 60 * 60 * 1000;
+    cat.refreshIfStale(id, cfg, f.upstreamOf);
+    await settle();
+    expect(f.calls(), "回拨后必须仍然允许重试").toBe(2);
+    expect(cat.cached("keyed")?.ids).toEqual(new Set(["a"]));
   });
 
   it("后台失败不产生 unhandledRejection", async () => {

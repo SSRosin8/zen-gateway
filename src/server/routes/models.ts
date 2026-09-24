@@ -100,7 +100,15 @@ async function handleModels(c: Context, deps: ModelsDeps): Promise<Response> {
       total: snapshot.entries.length,
       free: free.length,
       fetched_at: snapshot.fetchedAt,
-      fresh: deps.catalog.isFresh(snapshot, config, Date.now()),
+      /*
+       * `isFresh` 不传 `now` —— 让它用 `ModelCatalog` **自己的**时钟。
+       *
+       * 先前这里传 `Date.now()`,而 `fetched_at` 来自注入的时钟,于是同一个
+       * 响应体里两个字段来自两个不同的时间源:注入时钟的环境下 `fresh` 恒为
+       * false(刚拉到的目录报告为"不新鲜"),生产环境下恒为 true。两种情况下
+       * 都无法用断言区分,所以它曾是全仓唯一一个**无法被验证**的诊断字段。
+       */
+      fresh: deps.catalog.isFresh(snapshot, config),
     },
   });
 }

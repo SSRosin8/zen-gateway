@@ -126,22 +126,86 @@ describe("文本回调", () => {
     expect(out).toEqual(payload);
   });
 
-  it("超出扫描预算后停止回调,但字节照常转发", async () => {
+  it("**整条流**都会回调 —— 预算不在 onText 上", async () => {
     /*
-     * 我们找的是一条**拒绝消息**,它若存在必然出现在开头附近。对一条几百 MB
-     * 的响应逐字节跑四条正则是纯浪费。
+     * ## 这条断言的契约在第六轮审核后**刻意反过来了**
      *
-     * 漏判是自纠正的:失效指纹会让下一轮同样失败,而那一轮的拒绝消息就在开头。
+     * 先前这里断言的是「超出 1 MiB 后停止回调」,因为预算加在 `tapReadable` 的
+     * `onText` 上。审核查出那是个真实缺陷:`onText` 有**两个**消费者
+     * (失效推理扫描、token 用量),而它们对"看流的哪一段"的要求**正好相反** ——
+     * 扫描器只要开头,用量要整条流(chat/responses 的用量只在末帧,
+     * Anthropic 更糟:拆在两端)。
+     *
+     * 实测后果(复刻 relay 接线,唯一变量是流长度):
+     *
+     * ```
+     * Anthropic  36 KB → in=812 out=37 total=849   ✓
+     * Anthropic 1.8 MB → in=812 out=1  total=813   ← 只剩 message_start
+     * chat        33 KB → in=900 out=5000          ✓
+     * chat      1.6 MB → null(整条丢失)
+     * ```
+     *
+     * Anthropic 那一行是**算错**而不是漏掉 —— `message_start` 真的带
+     * `output_tokens: 1`,于是它成了预算内唯一的用量事件并被当成最终值。
+     *
+     * 所以预算移到了 `createOverlapScanner`(它的理由所在的那一层),
+     * 而这里断言 `onText` **覆盖整条流**。按纪律 #3 归类:断言错,
+     * 但属于"外部驱动的刻意契约变更",不是我写错了断言。
      */
     const chunk = bytes("x".repeat(64 * 1024));
     const chunks = Array.from({ length: 24 }, () => chunk);
+    const total = 24 * 64 * 1024;
     const c = collector();
     const out = await drain(tapReadable(streamOf(chunks), c.tap));
 
-    expect(out.byteLength).toBe(24 * 64 * 1024);
-    // 1 MiB 预算 → 约 16 块,不会是全部 24 块。
-    expect(c.text().length).toBeLessThan(out.byteLength);
-    expect(c.text().length).toBeGreaterThan(0);
+    // 先钉住输入规模真的超过默认预算 —— 否则这条测试会随预算调整静默退化。
+    expect(total).toBeGreaterThan(1024 * 1024);
+    expect(out.byteLength).toBe(total);
+    // 关键:回调看到的文本长度 == 整条流,一个字节都没被预算吃掉。
+    expect(c.text().length).toBe(total);
+  });
+});
+
+describe("createOverlapScanner 的扫描预算", () => {
+  /*
+   * 预算属于扫描器,不属于 `onText` —— 见上面那条测试的说明。
+   *
+   * 这一组在第六轮新增:预算搬过来之后,它的取值先前**完全没有断言**
+   * (把它改成任意值都不会有测试变红)。
+   */
+  const test = (t: string) => t.includes("not issued to this caller");
+
+  it("预算耗尽后停止跑正则", () => {
+    const s = createOverlapScanner(80, test, 1000);
+    s.feed("x".repeat(2000)); // 已超预算
+    s.feed("not issued to this caller");
+    expect(s.hit()).toBe(false);
+  });
+
+  it("预算内照常命中 —— 证明上一条的 false 来自预算而非别的原因", () => {
+    const s = createOverlapScanner(80, test, 1000);
+    s.feed("not issued to this caller");
+    expect(s.hit()).toBe(true);
+  });
+
+  it("默认预算也真的能被耗尽", () => {
+    /*
+     * 不传 budget 时用 `DEFAULT_SCAN_BUDGET_BYTES`(1 MiB)。
+     * 用纯 ASCII 喂满 —— 预算计的是**字符数**,对 CJK 会比字节数宽三倍,
+     * 那是刻意的(粗阈值,不是正确性边界),这里用 ASCII 才测得准。
+     */
+    const s = createOverlapScanner(80, test);
+    for (let i = 0; i < 12_000; i += 1) s.feed("a".repeat(100)); // 120 万字符
+    s.feed("not issued to this caller");
+    expect(s.hit()).toBe(false);
+  });
+
+  it("命中之后即便预算未耗尽也不再扫 —— 两条早退互不干扰", () => {
+    const s = createOverlapScanner(80, test, 1_000_000);
+    s.feed("not issued to this caller");
+    expect(s.hit()).toBe(true);
+    s.feed("后面全是正常内容".repeat(100));
+    expect(s.hit()).toBe(true);
   });
 });
 

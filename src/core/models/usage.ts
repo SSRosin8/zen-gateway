@@ -24,8 +24,27 @@
  * chat 不认 `{response:{usage}}` 也不认 `{message:{usage}}`，responses 不认
  * `{message:{usage}}`，messages 不认 `{response:{usage}}`。
  *
- * 但要说清它**不**能查出什么：三个面都认顶层 `usage`（那是各自非流式响应的
- * 形状），所以拿 chat 的非流式载荷喂 responses 的 `parseUsage` 会照常出数。
+ * ## 但要说清它**不**能查出什么（这里的范围先前写窄了）
+ *
+ * 三个面都认**顶层** `usage`。实测七个真实形态里**只有两个可区分**：
+ *
+ * | 形态 | chat | responses | messages |
+ * |---|---|---|---|
+ * | chat 非流式 / 流式末帧 `{usage}` | 出数 | 出数 | 出数 |
+ * | responses 非流式 `{usage}` | 出数 | 出数 | 出数 |
+ * | responses 流式 `{response:{usage}}` | null | 出数 | null |
+ * | messages 非流式 `{usage}` | 出数 | 出数 | 出数 |
+ * | messages `message_start` `{message:{usage}}` | null | null | 出数 |
+ * | messages `message_delta` `{usage}` | 出数 | 出数 | 出数 |
+ *
+ * 先前这里写的是"（那是各自**非流式**响应的形状）" —— **那句不准确**：
+ * 顶层 `usage` 也是 chat **流式末帧**与 messages **`message_delta`** 的形状。
+ * 这个差别改变局限的范围：不是"只有非流式载荷不可区分"，而是 **5/7 不可区分**。
+ *
+ * 后果更具体：「messages 面被误接成 chat 面」这个错误会让
+ * `message_start`（输入 token）丢掉而 `message_delta`（输出 token）照常出数，
+ * 产出 `in=0 out=37` —— 那是**算错**而不是漏掉，比"非流式不可区分"暗示的更坏。
+ *
  * 写下这条是因为"每个面只认自己的信封"听起来更漂亮，而它是假的 ——
  * 一个假的强保证比一个真的弱保证更危险，下一轮会有人依赖它。
  *
@@ -61,24 +80,49 @@ export type TokenUsage = {
 };
 
 /**
- * 非负整数。
+ * 非负整数 token 数,或 0 表示"读不出来"。
  *
- * 只认数字与**数字字符串**，不认布尔 —— 旧项目那版用
- * `typeof v === "number" ? v : Number(v)`，于是 `true` 被算成 1 个 token。
- * 数字字符串要认：JSON 里 token 数本该是数字，但上游若哪天改成字符串，
- * 强行丢弃会让统计静默归零，而 `Number("123")` 是无歧义的。
+ * ## 只认十进制,且有上界
+ *
+ * - 不认布尔 —— 旧项目那版用 `typeof v === "number" ? v : Number(v)`,
+ *   于是 `true` 被算成 1 个 token。
+ * - 认十进制字符串 —— JSON 里 token 数本该是数字,但上游若哪天改成字符串,
+ *   强行丢弃会让统计静默归零。
+ * - **不认 `0x`/`0b`/`0o`/`1e5`** —— 先前用的是裸 `Number()`,于是 `"0x10"` 被
+ *   静默读成 **16**、`"0b111"` 读成 **7**、`"1e5"` 读成 **100000**。那些都不是
+ *   "JSON 里 token 数改成字符串"会出现的形态,而注释却声称 `Number("123")`
+ *   无歧义 —— 那句只对十进制成立(第六轮审核实测)。
+ * - **有上界** —— 见 `clampTokens`。
  */
 function tokenCount(value: unknown): number {
   let n: number;
   if (typeof value === "number") {
     n = value;
-  } else if (typeof value === "string" && value.trim() !== "") {
+  } else if (typeof value === "string" && /^\s*\d+(?:\.\d+)?\s*$/.test(value)) {
+    // 正则已排除 0x/0b/0o/1e5/空串/负号,所以这里的 Number 是无歧义的。
     n = Number(value);
   } else {
     return 0;
   }
   if (!Number.isFinite(n) || n <= 0) return 0;
-  return Math.floor(n);
+  return clampTokens(Math.floor(n));
+}
+
+/**
+ * token 数的上界判定 —— **入口与出口共用这一处**。
+ *
+ * 先前只有入口守有限性,出口(两处求和)不守,于是实测
+ * `readUsage({prompt_tokens: 1e308, completion_tokens: 1e308})` 的
+ * `totalTokens` 是 **Infinity** —— 而 `describeUsage` 会打出 `total=Infinity`,
+ * `JSON.stringify` 把它变成 `null`(类型声明却是 `number`),Phase 7 还要把
+ * 这些数写进 SQLite 的 INTEGER 列。
+ *
+ * 分散成"入口守、出口不守"是纪律 #4 的分叉形态。Phase 7 的聚合是第三处求和,
+ * 收成一个函数让那种漏写写不出来。
+ */
+function clampTokens(n: number): number {
+  if (!Number.isFinite(n) || n <= 0) return 0;
+  return n > Number.MAX_SAFE_INTEGER ? Number.MAX_SAFE_INTEGER : n;
 }
 
 function asRecord(value: unknown): Record<string, unknown> | null {
@@ -126,7 +170,8 @@ export function readUsage(usage: unknown): TokenUsage | null {
 
   // 上游没报 total 时自己算 —— Anthropic 面就不报。
   const reportedTotal = tokenCount(u["total_tokens"]);
-  const totalTokens = Math.max(reportedTotal, promptTokens + completionTokens);
+  // 求和也要过上界 —— 见 `clampTokens`（两个入口各自合法而和可以溢出）。
+  const totalTokens = clampTokens(Math.max(reportedTotal, promptTokens + completionTokens));
 
   if (
     promptTokens === 0 &&
@@ -156,6 +201,19 @@ export function readUsage(usage: unknown): TokenUsage | null {
  * 它可能是我们自己由 prompt+completion 推出来的，两个事件各自推出的半个总数
  * 取大会小于真实总数（`message_start` 推出 812、`message_delta` 推出 37，
  * 取大得 812，而真实是 849）。
+ *
+ * ## 取大成立的前提：上游**累计上报**
+ *
+ * 三个已知上游都是累计的（OpenAI 末帧给完整值；Anthropic 的
+ * `message_delta.output_tokens` 是**累计值**而不是增量）。若某个上游改成按
+ * **增量**上报，取大就等于只取最后一块 —— 实测三块各报 10 个增量时结果是
+ * `out=10`，而真实是 30。
+ *
+ * 这条前提先前没写下来，只解释了"为什么取大而不是写第二个解析器"。
+ * 写在这里是为了让下一轮加面时有地方去核对，而不是重新推一遍：
+ * **新面接进来时要先确认它的用量是累计还是增量。**
+ * 增量上报的面不能用本函数，得改成逐字段求和（而那又要求"同一个事件不被
+ * feed 两次"，所以不是换个 `Math.max` 那么简单）。
  */
 export function mergeUsage(a: TokenUsage | null, b: TokenUsage | null): TokenUsage | null {
   if (a === null) return b;
@@ -165,7 +223,7 @@ export function mergeUsage(a: TokenUsage | null, b: TokenUsage | null): TokenUsa
   return {
     promptTokens,
     completionTokens,
-    totalTokens: Math.max(a.totalTokens, b.totalTokens, promptTokens + completionTokens),
+    totalTokens: clampTokens(Math.max(a.totalTokens, b.totalTokens, promptTokens + completionTokens)),
     cacheReadTokens: Math.max(a.cacheReadTokens, b.cacheReadTokens),
     cacheWriteTokens: Math.max(a.cacheWriteTokens, b.cacheWriteTokens),
     cacheMissTokens: Math.max(a.cacheMissTokens, b.cacheMissTokens),
@@ -187,11 +245,30 @@ export function mergeUsage(a: TokenUsage | null, b: TokenUsage | null): TokenUsa
 const MAX_BUFFERED_BYTES = 1024 * 1024;
 
 /**
- * 一行 SSE `data:` 最长认这么多。超长的单行不尝试解析。
+ * 单个待解析行的上限。
  *
- * 防的是"上游发一个没有换行的巨大流"这种形态 —— 那会让待解析行无界增长。
+ * ## 这个常量约束的**不是**"一行",而是"一个内嵌整个响应的事件"
+ *
+ * 先前写的是 512 KB,理由是"防上游发一个没有换行的巨大流"。那个理由成立,
+ * 但取值定错了量级 —— 因为 Responses 面的 `response.completed` 事件
+ * **内嵌整个 response 对象**(全部输出文本 + `usage`),所以那一行的大小
+ * ∝ 生成长度,而它是该面**唯一**带用量的事件。
+ *
+ * 实测(第六轮审核):一条 600 KB 的合法 `response.completed` 被整条丢弃,
+ * 而更糟的是结果**取决于上游的分块位置** ——
+ *
+ * ```
+ * 同一条 600 KB 事件,16 KB 逐块喂  → null(丢失)
+ * 同一条 600 KB 事件,一次性整条喂  → in=1200 out=9000
+ * ```
+ *
+ * (整条喂能出数,是因为切行循环在检查长度**之前**就把那一行切走解析了。)
+ * 这正是 AGENTS.md 点名最难查的那类症状:"偶尔不生效,取决于分块位置"。
+ *
+ * 所以上限与 `MAX_BUFFERED_BYTES` 同量级 —— 两者约束的其实是同一个东西
+ * (一个完整响应的体积),只是一个走 SSE 信封、一个不走。
  */
-const MAX_LINE_LENGTH = 512 * 1024;
+const MAX_LINE_LENGTH = MAX_BUFFERED_BYTES;
 
 /**
  * 增量收集用量。
@@ -223,12 +300,26 @@ const MAX_LINE_LENGTH = 512 * 1024;
 export function createUsageCollector(parse: (payload: unknown) => TokenUsage | null): {
   feed: (text: string) => void;
   usage: () => TokenUsage | null;
+  /**
+   * 我们**自己**丢过内容吗(超长行被弃、非流式累积超限)。
+   *
+   * 这与 `usage() === null` 必须分得开:前者是"我们丢了",后者是"上游没报"。
+   * 两者的处置完全不同 —— 一个要改代码(界定错了),一个不用。
+   *
+   * 任何常量都可能被越过,所以**越过时可观测**比"把常量调大"更耐久:
+   * 调大只是把边界推远,而可观测让边界被越过这件事不再是静默的。
+   * 这与 `readUsage` 全零时返回 `null`(而不是全零对象)是同一条理由的延伸:
+   * 否则 Phase 7 的 usage 覆盖率会把"我们自己丢的"计成"上游没报的"。
+   */
+  dropped: () => boolean;
 } {
   let pending = "";
   let buffered = "";
   let merged: TokenUsage | null = null;
   /** 见过 `data:` 行 —— 据此判定这是 SSE 而非单个 JSON 响应。 */
   let sawEvent = false;
+  /** 见 `dropped()`。 */
+  let droppedContent = false;
 
   const consumeLine = (line: string): void => {
     const trimmed = line.trim();
@@ -257,6 +348,9 @@ export function createUsageCollector(parse: (payload: unknown) => TokenUsage | n
        */
       if (!sawEvent && buffered.length < MAX_BUFFERED_BYTES) {
         buffered += text;
+      } else if (!sawEvent) {
+        // 累积超限:这一段非流式内容我们没留下,记一笔(见 `dropped()`)。
+        droppedContent = true;
       }
 
       pending += text;
@@ -271,8 +365,14 @@ export function createUsageCollector(parse: (payload: unknown) => TokenUsage | n
        *
        * 不能无条件留着等换行:那让 `pending` 随流无界增长,
        * 而这正是"不缓冲整条流"要避免的事。
+       *
+       * 丢弃要**留痕**:见 `dropped()`。先前这里是静默 `pending = ""`,
+       * 于是"上游没报用量"与"我们把那一行扔了"在外部完全无法区分。
        */
-      if (pending.length > MAX_LINE_LENGTH) pending = "";
+      if (pending.length > MAX_LINE_LENGTH) {
+        pending = "";
+        droppedContent = true;
+      }
     },
 
     usage(): TokenUsage | null {
@@ -295,6 +395,10 @@ export function createUsageCollector(parse: (payload: unknown) => TokenUsage | n
       } catch {
         return null;
       }
+    },
+
+    dropped(): boolean {
+      return droppedContent;
     },
   };
 }

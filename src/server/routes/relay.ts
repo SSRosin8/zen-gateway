@@ -3,8 +3,9 @@ import type { Config } from "../../shared/schema.ts";
 import type { ProtocolRegistry } from "../../core/protocols/registry.ts";
 import type { ProtocolSurface } from "../../core/protocols/types.ts";
 import { judgeFree } from "../../core/models/free.ts";
-import { ModelCatalog, catalogIdentityOf } from "../../core/models/catalog.ts";
+import { ModelCatalog, catalogIdentityOf, slotOf } from "../../core/models/catalog.ts";
 import { createUsageCollector, describeUsage } from "../../core/models/usage.ts";
+import { redactText } from "../../shared/redact.ts";
 import { buildUpstreamHeaders } from "../../core/upstream/headers.ts";
 import { upstreamUrl } from "../../core/upstream/url.ts";
 import type { UpstreamDeps } from "../../core/upstream/fetch.ts";
@@ -144,20 +145,32 @@ async function handleRelay(
   /* ---- 3. 免费判定(在请求出去之前) ---- */
 
   /*
-   * 目录交集用 `"keyed"` 槽位,而且**只读缓存,绝不发请求**。
+   * 目录交集 —— **只读缓存,绝不发请求**。
    *
-   * 槽位是确定的:转发候选链里每个 Worker 都有 key(`isUsable` 只看 key),
-   * 所以这条路径的身份恒为「带 key」。
+   * ## 槽位必须与写入方同源推导,不能硬写字面量
+   *
+   * 先前这里写的是 `cached("keyed")`,理由是"转发候选链里每个 Worker 都有 key,
+   * 所以身份恒为带 key"。**那个推理是错的**,而且错在时序上:免费判定是
+   * **第 3 步**,选 Worker 是**第 5 步** —— 第 3 步执行时候选链还不存在,
+   * 所以"候选链里都有 key"在这一刻不是可用前提。
+   *
+   * 后果是纪律 #4 的原形态:读侧硬写 `keyed`,而写侧(下面 `retired` 那支)
+   * 用 `catalogIdentityOf(config)` **推导**。所有 Worker 都停用或都缺 key 时
+   * 推导出的是 `keyless` —— 于是刷新把新目录填进 keyless 槽,而读侧永远看
+   * keyed 槽,「判出下架就刷一次」这个自纠正机制**结构上失效**。
+   * 用户按 403 的指引去刷 `/v1/models`,看到模型确实在架,却仍然被拒。
+   *
+   * 现在两侧同源:身份与槽位都由 `catalogIdentityOf` 单点决定,分叉写不出来。
    *
    * ## 一个槽位的目录用于**所有** Worker,依据是免费子集一致
    *
    * 本阶段实测(三个付费账号,三轮稳定):整份目录**按账号不同**
    * (两个账号 41 个模型、一个 79 个),但**免费子集三个账号完全一致**
    * (各 9 个,逐 id 相同)。交集要的恰好是那个一致的子集,所以这里不需要
-   * 知道最终路由到哪个 Worker(那在第 5 步才定)。
+   * 知道最终路由到哪个 Worker。
    *
    * 我先前在这里写的是"目录按带 key／免 key 区分,不按账号个体" ——
-   * **那句是错的**,第三个账号就推翻了它。详见 `catalog.ts` 文件头记的
+   * **那句也是错的**,第三个账号就推翻了它。详见 `catalog.ts` 文件头记的
    * 三次修正。现在这条注释只声称被测量支持的那个更弱的性质。
    *
    * 若免费子集哪天也按账号分化,两侧后果不对称:缓存里**多**一个 →
@@ -178,7 +191,8 @@ async function handleRelay(
    * 拿不到目录时退回"只看后缀与名单"(见 `judgeFree` 里"目录缺失时放行"
    * 那节 —— 拒绝的代价是全面不可用,而放行的代价只是由上游拒绝,不产生费用)。
    */
-  const verdict = judgeFree(model, config.models, deps.catalog.cached("keyed"));
+  const catalogIdentity = catalogIdentityOf(config);
+  const verdict = judgeFree(model, config.models, deps.catalog.cached(slotOf(catalogIdentity)));
   if (!verdict.free) {
     /*
      * 消息里带上模型 id。
@@ -203,8 +217,13 @@ async function handleRelay(
        *
        * 不怕被刷:刷成功后目录就是新鲜的,同一个模型的后续请求不会再触发
        * (`isFresh` 为真);刷失败则有失败退避压着。两条都在 catalog.ts 里。
+       *
+       * **复用上面那个 `catalogIdentity`**,而不是再调一次 `catalogIdentityOf`。
+       * 再调一次在今天是等价的(配置在一次请求内不变),但那等于让"读哪个槽"
+       * 与"写哪个槽"各自独立求值一次 —— 而这两者必须是同一个值,
+       * 否则就回到了刚修掉的那个分叉。用同一个变量让它们**不可能**不同。
        */
-      deps.catalog.refreshIfStale(catalogIdentityOf(config), config, deps.upstreamOf);
+      deps.catalog.refreshIfStale(catalogIdentity, config, deps.upstreamOf);
     }
     const message =
       verdict.reason === "retired"
@@ -212,6 +231,27 @@ async function handleRelay(
         : `模型 ${model} 不在免费集内。本网关只放行免费模型;可在配置的 models.extraFreeIds 中调整`;
     return c.json(gatewayError("model_not_allowed", message), 403);
   }
+
+  /*
+   * 放行了,但**有没有经过在架核验**要如实报出来。
+   *
+   * `judgeFree` 刻意为此造了 `suffix_unverified`/`extra_unverified` 两个 reason,
+   * 文件头也写明理由是"让诊断能看出这次没做交集" —— 但第六轮审核 grep 出
+   * **全仓没有任何读者**。那正是第四轮那个 `streaming` 字段的形态:声明了、
+   * 被文档说明、却没有一处读它,只是这次藏在一个看起来被用到的联合类型分支里。
+   *
+   * 用诊断头而不是日志:一个离线环境里**每个请求**都会是 unverified,
+   * 打日志等于每条请求刷一行。而头是按需查看的,与 `x-zen-gateway-route`
+   * 同一个风格,`docs/usage.md` 的诊断头表格里也有位置放它。
+   *
+   * 没有它时,用户遇到上游 400 `Model is unavailable` 无法区分两件事:
+   * 「目录说它在架,但上游拒了」与「我们压根没拿到目录」—— 而后者要去查
+   * 出口/网络,前者要去查上游。
+   */
+  const freeHeaders =
+    verdict.reason === "suffix_unverified" || verdict.reason === "extra_unverified"
+      ? { "x-zen-gateway-free": `${verdict.reason}` }
+      : {};
 
   /* ---- 4. 流式能力校验(在选 Worker 之前:这是请求本身的问题) ---- */
   const streaming = surface.wantsStream(parsed);
@@ -400,18 +440,20 @@ async function handleRelay(
         },
         onDone: (error) => {
           /*
-           * 用量日志。
+           * ## 结算**先于**日志,而这个顺序是承重的
            *
-           * 只在拿到用量时打 —— 免费模型的响应**未必**带 usage,
-           * 而每个请求打一行"用量: 无"只会淹没日志。
+           * 整个 `onDone` 被 `tap.ts` 的 `try { tap.onDone(error) } catch {}`
+           * 包着(那个 catch 是对的:结算失败不该让一个已成功的响应炸掉)。
+           * 但它的副作用是:回调里**任何**一句抛出,后面的全部不执行,而且静默。
            *
-           * `describeUsage` 只输出数字,不含任何响应内容。
+           * 先前日志排在结算前面,于是 `deps.log` 一旦抛(磁盘满、自定义
+           * logger 出错、Phase 7 换成写 DB 的实现),不变量 #3 的结算
+           * **一次都不会执行** —— 客户端完全正常拿到全部字节,只是亲和学习
+           * 与解绑静默消失。症状就是 Phase 5 那条"对话隔一会儿报一次错"。
+           *
+           * 规则写成一句耐久的话:**`onDone` 里不变量相关的动作排在诊断动作
+           * 之前**。这比"别让 log 抛"耐久 —— 后者是对调用方的期望,前者是结构。
            */
-          const totals = usage.usage();
-          if (totals !== null) {
-            deps.log?.(`用量 ${surface.id}/${model}: ${describeUsage(totals)}`);
-          }
-
           deps.scheduler.settleStream({
             workerId,
             sessionHash,
@@ -423,6 +465,44 @@ async function handleRelay(
             // 流结束的时刻 —— 指纹的 TTL 从签发完成起算。见 nowOf 的说明。
             now: nowOf(),
           });
+
+          /*
+           * 用量日志 —— 诊断动作,所以排在结算**之后**(见上面的顺序说明)。
+           *
+           * 只在拿到用量时打 —— 免费模型的响应**未必**带 usage,
+           * 而每个请求打一行"用量: 无"只会淹没日志。
+           *
+           * `model` 是**客户端可控的任意字符串**,所以必须过 `redactText`。
+           * 第六轮审核实测出两个后果,都静默:
+           *
+           * 1. **日志行注入**。model 里放一个 `\n` 就能伪造一条形态与真实记录
+           *    无法区分的用量行(实测:落盘变成 3 行,其中一行完全冒充合法记录)。
+           * 2. **无界放大**。2 MB 的 model → 2 MB 的单行日志,而
+           *    `data/zen-gateway.log` 是 append-only 且无轮转。
+           *
+           * `readModelField` 只保证"非空且无首尾空白",既不限长也不管控制字符 ——
+           * 它的职责是取字段,不是净化日志。走 `redactText` 而不是手写
+           * `slice` + 换行剥离:那两件事它已经同时解掉了,而按纪律 #4,
+           * "进日志前要怎么处理"这条知识必须只有一处定义。
+           *
+           * 128 字符对模型 id 足够宽(最长的在架 id 是 31 字符)。
+           */
+          const totals = usage.usage();
+          const label = `${surface.id}/${redactText(model, 128)}`;
+          if (totals !== null) {
+            deps.log?.(`用量 ${label}: ${describeUsage(totals)}`);
+          }
+          /*
+           * **我们自己丢过内容**要如实报出来,而不是让它看起来像"上游没报用量"。
+           *
+           * 两者的处置完全不同:上游没报不用改代码,而我们丢了说明界定错了
+           * (先前 `MAX_LINE_LENGTH` 就把 Responses 面一条合法的 600 KB
+           * `response.completed` 整条弃掉,且结果取决于上游的分块位置)。
+           * 任何常量都可能被越过,所以**越过时可观测**比把常量调大更耐久。
+           */
+          if (usage.dropped()) {
+            deps.log?.(`用量 ${label}: 响应过大,本次未能完整解析用量(不影响转发)`);
+          }
         },
       });
     } catch (err) {
@@ -465,6 +545,7 @@ async function handleRelay(
         "x-zen-gateway-worker": result.workerId,
         // 为什么是它 —— 粘滞/指纹提示/策略/全员冷却。排查"为什么换了 Worker"用。
         "x-zen-gateway-route": plan.reason,
+        ...freeHeaders,
       },
       result.workerId,
     );
@@ -499,6 +580,16 @@ async function handleRelay(
         "x-zen-gateway-attempts": String(result.attempts.length),
         "x-zen-gateway-route": plan.reason,
         ...(lastWorkerId !== undefined ? { "x-zen-gateway-worker": lastWorkerId } : {}),
+        /*
+         * `x-zen-gateway-free` 在失败路径上**比成功路径更需要**。
+         *
+         * 它要回答的问题恰好是一个失败:上游返回 400 `Model is unavailable` 时,
+         * 是"目录说它在架但上游拒了"还是"我们压根没拿到目录"?只在成功路径设置
+         * 它,等于在唯一需要它的时候缺席 —— 而那正是第五轮查出的
+         * `x-zen-gateway-route` 那个缺陷的形态(我写文档教用户失败时看它,
+         * 而它只在成功时存在)。
+         */
+        ...freeHeaders,
       },
       null,
     );

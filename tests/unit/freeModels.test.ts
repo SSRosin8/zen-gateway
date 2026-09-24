@@ -163,6 +163,27 @@ describe("免费模型判定", () => {
     });
   });
 
+  it("**两条依据同时命中时名单优先** —— reason 的语义不能取决于代码里谁先判", () => {
+    /*
+     * 第六轮审核查出这条没有守卫:把 extra 与 suffix 的判定顺序对调后全绿。
+     * 归类是第三类「输入集为空」—— 默认配置下 `extraFreeIds: ["big-pickle"]`
+     * 与 `freeSuffix: "-free"` **永不重叠**(`big-pickle` 不以 `-free` 结尾),
+     * 所有测试用的都是只命中一条依据的 id。
+     *
+     * `.free` 不受影响(两条都放行),所以这只影响**诊断的可信度**:
+     * 一个用户手工加进 `extraFreeIds` 的 `xx-free` 被报成 `suffix`,
+     * 于是用户以为"删掉名单项也照样放行"(因为后缀命中)—— 而那取决于
+     * 代码里哪条先判,不是他能推断的。`reason` 要么可依赖,要么别报。
+     */
+    const r = rules({ extraFreeIds: ["both-free"] });
+    expect(judgeFree("both-free", r, catalog("both-free"))).toEqual({
+      free: true,
+      reason: "extra",
+    });
+    // 未核验那一支的 reason 同样要跟着名单,不是跟着后缀。
+    expect(judgeFree("both-free", r)).toEqual({ free: true, reason: "extra_unverified" });
+  });
+
   it("空目录**不**被当成「什么都下架了」", () => {
     /*
      * 这条守的是调用方的错:一份空目录若被当作合法的在架集合,交集会拒掉

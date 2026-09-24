@@ -187,15 +187,47 @@ describe("各面的 usage 信封", () => {
     /*
      * 这组是"面接错了"这类接线错误的唯一探测手段。
      *
-     * 要说清它测不到什么:三个面都认**顶层** usage(那是各自非流式响应的
-     * 形状),所以拿 chat 的非流式载荷喂 responses 会照常出数。能查出的只有
-     * 嵌套形态 —— 也就是流式事件。这个局限写在 usage.ts 的文件头里,
-     * 因为"每个面只认自己的信封"听起来更漂亮而它是假的。
+     * 要说清它测不到什么:三个面都认**顶层** usage,而那**不只是非流式响应的
+     * 形状** —— chat 的流式末帧与 messages 的 `message_delta` 也是顶层 usage。
+     * 所以"能查出的只有流式事件"这个说法是错的(我先前这么写过):
+     * 真正的判据是**嵌套与否**,而七个真实形态里只有两个是嵌套的。
+     *
+     * 完整矩阵与后果分析在 `usage.ts` 的文件头。下一条用断言把它钉住。
      */
     expect(chatSurface.parseUsage({ response: { usage: USAGE } })).toBeNull();
     expect(chatSurface.parseUsage({ message: { usage: USAGE } })).toBeNull();
     expect(responsesSurface.parseUsage({ message: { usage: USAGE } })).toBeNull();
     expect(messagesSurface.parseUsage({ response: { usage: USAGE } })).toBeNull();
+  });
+
+  it("信封矩阵:七个真实形态里**恰好两个**可区分 —— 这个局限本身要被钉住", () => {
+    /*
+     * `usage.ts` 文件头声称"5/7 不可区分,只有 2 个嵌套形态可区分"。
+     * 那是一句关于**本模块能力边界**的声称,而声称就该有断言 ——
+     * 否则它与被它取代的那句错话一样不可依赖(纪律 #7 的注释版)。
+     *
+     * 这条同时是一道回归守卫:若哪天有人"顺手"让 chat 也认 `response.usage`
+     * (让接错面更难被发现),可区分数会从 2 掉到 1,这条会红。
+     */
+    const forms: Array<[string, unknown]> = [
+      ["chat 非流式/流式末帧", { usage: USAGE }],
+      ["responses 非流式", { usage: USAGE }],
+      ["responses 流式 response.usage", { response: { usage: USAGE } }],
+      ["messages 非流式", { usage: USAGE }],
+      ["messages message_start", { message: { usage: USAGE } }],
+      ["messages message_delta", { usage: USAGE }],
+    ];
+    const faces = [chatSurface, responsesSurface, messagesSurface];
+
+    const distinguishable = forms.filter(
+      ([, payload]) => faces.filter((s) => s.parseUsage(payload) !== null).length < 3,
+    );
+
+    // 只有两个**嵌套**形态可区分（responses 的 response.usage、messages 的 message.usage）。
+    expect(distinguishable.map(([label]) => label)).toEqual([
+      "responses 流式 response.usage",
+      "messages message_start",
+    ]);
   });
 
   it.each([
@@ -319,20 +351,86 @@ describe("createUsageCollector —— 流式增量收集", () => {
     expect(c.usage()?.promptTokens).toBe(4);
   });
 
-  it("一条巨长的无换行流不会让内存无界增长", () => {
+  it("一条巨长的无换行流被丢掉,**且后续无换行的事件仍能读到**", () => {
     /*
-     * 行为断言而不是内存断言 —— 内存阈值天生要靠猜,而第五轮审核就栽在
-     * 一个猜出来的阈值上(输入缩小后恰好落在阈值内,变异后全绿)。
+     * ## 这条测试第一版是空壳,第六轮变异验证查出来的
      *
-     * 这里测的是**可观察后果**:超长无换行输入被丢弃,所以之后正常的
-     * usage 事件仍然能被读到(若 pending 无界增长,它会把后面的内容
-     * 拖在一个永远解析不了的巨串里)。
+     * 我原先的第二次 feed **以 `\n` 开头**:
+     *
+     * ```
+     * c.feed(`data: {"usage":${"x".repeat(600 * 1024)}`);
+     * c.feed('\ndata: {"usage":{...}}\n\n');   ← 这个前导换行
+     * ```
+     *
+     * 那个换行让超长行被 `indexOf("\n")` 正常切分掉、`pending` 照常清空 ——
+     * **有没有丢弃逻辑结果完全一样**。实测:删掉 `if (pending.length >
+     * MAX_LINE_LENGTH) pending = ""` 之后这条依然全绿。归类是纪律 #1 的
+     * 第二类「条件被另一层顺带满足」。
+     *
+     * 修法是去掉那个前导换行:此时唯一能让 `pending` 清空的就只有丢弃逻辑,
+     * 而若不清空,后面那个事件会被拖在一个永远解析不出来的巨串里。
+     *
+     * 仍然是纯行为断言,没有内存阈值要猜。
      */
     const c = chat();
-    // 600 KB 无换行 —— 超过 MAX_LINE_LENGTH(512 KB)。
-    c.feed(`data: {"usage":${"x".repeat(600 * 1024)}`);
-    c.feed('\ndata: {"usage":{"prompt_tokens":6,"completion_tokens":2}}\n\n');
+    // 1.5 MiB 无换行 —— 超过 MAX_LINE_LENGTH(现为 1 MiB,与 MAX_BUFFERED_BYTES 同)。
+    c.feed(`data: {"usage":${"x".repeat(1536 * 1024)}`);
+    // **没有**前导换行 —— 只有真的丢弃了,这一条才读得到。
+    c.feed('data: {"usage":{"prompt_tokens":6,"completion_tokens":2}}');
     expect(c.usage()?.promptTokens).toBe(6);
+  });
+
+  it("我们**自己丢了内容**时 `dropped()` 为真 —— 与「上游没报」分得开", () => {
+    /*
+     * 「上游没报用量」与「我们把那一行扔了」在外部先前完全无法区分,
+     * 两者都表现为 `usage() === null`。而处置完全不同:前者不用改代码,
+     * 后者说明界定错了(`MAX_LINE_LENGTH` 就把 Responses 面一条合法的
+     * 600 KB `response.completed` 整条弃掉过,且结果取决于上游的分块位置)。
+     *
+     * 任何常量都可能被越过,所以**越过时可观测**比把常量调大更耐久。
+     * 这与 `readUsage` 全零时返回 `null`(而不是全零对象)是同一条理由的延伸。
+     */
+    const clean = chat();
+    clean.feed('data: {"usage":{"prompt_tokens":3,"completion_tokens":1}}\n\n');
+    expect(clean.usage()).not.toBeNull();
+    expect(clean.dropped()).toBe(false);
+
+    const overLine = chat();
+    overLine.feed(`data: {"usage":${"x".repeat(1536 * 1024)}`);
+    expect(overLine.dropped()).toBe(true);
+
+    const overBuffered = chat();
+    overBuffered.feed(`{"padding":"${"y".repeat(2 * 1024 * 1024)}`);
+    overBuffered.feed('","usage":{"prompt_tokens":5}}');
+    expect(overBuffered.usage()).toBeNull();
+    expect(overBuffered.dropped()).toBe(true);
+  });
+
+  it("**合法的巨大 `response.completed`** 不再被丢掉 —— 上限与响应体同量级", () => {
+    /*
+     * 第六轮审核查出的真实缺陷:`MAX_LINE_LENGTH` 先前是 512 KB,而 Responses 面的
+     * `response.completed` 事件**内嵌整个 response 对象**(全部输出文本 + usage),
+     * 所以那一行的大小 ∝ 生成长度 —— 而它是该面**唯一**带用量的事件。
+     *
+     * 更糟的是结果**取决于上游的分块位置**:同一条 600 KB 事件,16 KB 逐块喂
+     * 时丢失,一次性整条喂时出数(切行循环在检查长度之前就把它切走了)。
+     * 那是最难查的一类症状 —— "偶尔不生效,取决于分块位置"。
+     */
+    const body = (padKB: number): string =>
+      `data: {"type":"response.completed","response":{"output":"${"a".repeat(
+        padKB * 1024,
+      )}","usage":{"input_tokens":1200,"output_tokens":9000}}}\n\n`;
+
+    for (const padKB of [400, 600, 900]) {
+      const c = createUsageCollector((p) => responsesSurface.parseUsage(p));
+      const ev = body(padKB);
+      // 16 KB 逐块 —— 模拟真实分块,这正是先前会丢失的那种喂法。
+      for (let i = 0; i < ev.length; i += 16 * 1024) c.feed(ev.slice(i, i + 16 * 1024));
+      const u = c.usage();
+      expect(u?.promptTokens, `${padKB}KB 的 response.completed 必须出数`).toBe(1200);
+      expect(u?.completionTokens).toBe(9000);
+      expect(c.dropped()).toBe(false);
+    }
   });
 
   it("非流式累积有上限,超限后不再累积", () => {

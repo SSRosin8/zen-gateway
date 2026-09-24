@@ -30,16 +30,39 @@ export type StreamTap = {
 };
 
 /**
- * 扫描预算。
+ * 失效推理扫描的预算 —— **只属于扫描器，不属于 `onText`**。
  *
- * 超出之后停止解码与回调(字节照常转发)。没有预算时,一条几百 MB 的
- * 多模态响应会让我们对每个字节做一次解码 + 四条正则 —— 那是纯粹的浪费,
- * 因为我们找的是一条**拒绝消息**,它若存在必然出现在开头附近。
+ * 超出之后停止跑正则(解码与回调照常)。理由只对扫描器成立:我们找的是一条
+ * **拒绝消息**,它若存在必然出现在开头附近;漏判还是自纠正的 ——
+ * 失效指纹会让下一轮同样失败,而那一轮的拒绝消息就在开头,预算内必被扫到。
  *
- * 漏判的后果是自纠正的:失效指纹会让下一轮同样失败,而那一轮的拒绝消息
- * 就在开头,预算内必被扫到。
+ * ## 这个预算先前加在 `tapReadable` 的 `onText` 上，那是个真实缺陷
+ *
+ * `onText` 有**两个**消费者(失效推理扫描、token 用量),而它们对"看流的哪一段"
+ * 的要求**正好相反**:扫描器只需要开头,用量需要**整条流**
+ * (chat/responses 的用量只在末帧;Anthropic 更糟 —— 拆在两端)。
+ *
+ * 两个相反的需求共用一个闸门,必然牺牲一个,而先前牺牲的恰好是没写在闸门旁边
+ * 的那个。实测(复刻 relay 接线,唯一变量是流长度):
+ *
+ * ```
+ * Anthropic  36 KB 流 → in=812 out=37 total=849   ✓
+ * Anthropic 1.8 MB 流 → in=812 out=1  total=813   ← 只剩 message_start
+ * chat        33 KB 流 → in=900 out=5000          ✓
+ * chat      1.6 MB 流 → null（整条丢失）
+ * ```
+ *
+ * Anthropic 那一行是**算错**而不是漏掉:`message_start` 真的带
+ * `output_tokens: 1`(协议形态),于是它成了预算内唯一的用量事件,
+ * 被当成最终值报出去 —— 一个看起来有据可依的错数字,比没有数字糟得多。
+ * 按真实 chunk 尺寸估算,约 1 万个输出 token 就跨过 1 MiB,
+ * 而长回答恰好是**最值得统计**的那一类。
+ *
+ * 所以预算移到它的理由所在的那一层:`createOverlapScanner` 自己数字节,
+ * `tapReadable` 不再对 `onText` 设限。代价是整条流都要解码 ——
+ * 但那本来就是用量所必需的,而省下的是四条正则。
  */
-const SCAN_BUDGET_BYTES = 1024 * 1024;
+const DEFAULT_SCAN_BUDGET_BYTES = 1024 * 1024;
 
 /**
  * 包一层旁路观察。返回的流与入参**逐字节相同**。
@@ -57,7 +80,8 @@ export function tapReadable(
 ): ReadableStream<Uint8Array> {
   const reader = body.getReader();
   const decoder = new TextDecoder("utf-8", { fatal: false });
-  let scanned = 0;
+  /** 已解码字节数。**不是**预算 —— 只用于判断收尾要不要 flush。 */
+  let decoded = 0;
   let finished = false;
 
   const finish = (error: unknown): void => {
@@ -78,8 +102,13 @@ export function tapReadable(
      *
      * flush 要在 `finished = true` **之前**:`scan` 有一条
      * `if (finished) return` 的守卫(保证 onText 不越过 onDone)。
+     *
+     * `decoded > 0` 只是"这条流确实解码过内容"的廉价判断 —— 没解码过时
+     * `decoder.decode()` 本来也返回空串。这里**不再有预算条件**:
+     * 先前写的是 `decoded < SCAN_BUDGET_BYTES`,于是超过 1 MiB 的流连收尾
+     * flush 都被跳过,而末尾那一截恰好是 chat/responses 面用量的所在。
      */
-    if (scanned > 0 && scanned < SCAN_BUDGET_BYTES) {
+    if (decoded > 0) {
       try {
         const tail = decoder.decode();
         if (tail !== "") tap.onText(tail);
@@ -112,8 +141,14 @@ export function tapReadable(
      * 代价是一个布尔判断,而收益是这条时序关系不再依赖 reader 实现的善意。
      */
     if (finished) return;
-    if (scanned >= SCAN_BUDGET_BYTES) return;
-    scanned += chunk.byteLength;
+    /*
+     * **这里刻意没有字节预算。**
+     *
+     * `onText` 有两个消费者且要求相反(见 `DEFAULT_SCAN_BUDGET_BYTES` 的说明):
+     * 失效推理扫描只要开头,token 用量要整条流。预算属于前者,现在由
+     * `createOverlapScanner` 自己数 —— 放在这里会连带掐断后者。
+     */
+    decoded += chunk.byteLength;
     try {
       /*
        * `stream: true` 是必须的:UTF-8 的多字节序列会跨块切断,
@@ -161,18 +196,36 @@ export function tapReadable(
  * 要找的消息可能正好被切在两块之间,所以每次扫描要带上**上一块的尾巴**。
  * `window` 取所有模式里最长的可能匹配长度 —— 短于它就会漏,
  * 而漏掉的症状是"偶尔不生效",取决于上游的分块位置,极难复现。
+ *
+ * ## 预算在这里,而不在 `tapReadable` 上
+ *
+ * 超出 `budget` 之后停止跑正则。这个限制**只对本扫描器成立**:我们找的是一条
+ * 拒绝消息,它若存在必然出现在开头附近,而漏判是自纠正的(失效指纹会让下一轮
+ * 同样失败,那一轮的拒绝消息就在开头)。
+ *
+ * 先前它加在 `tapReadable` 的 `onText` 上,于是**连带掐断了 token 用量收集** ——
+ * 而用量的要求正好相反(要整条流)。详见 `DEFAULT_SCAN_BUDGET_BYTES` 的说明。
+ * 把预算放在它的理由所在的这一层,那种连带就写不出来了。
+ *
+ * 计的是**字符数**而不是字节数(这一层拿到的已是解码后的文本)。两者对 ASCII
+ * 相同,对 CJK 差三倍 —— 无所谓:这是个防浪费的粗阈值,不是正确性边界。
  */
 export function createOverlapScanner(
   window: number,
   test: (text: string) => boolean,
+  budget: number = DEFAULT_SCAN_BUDGET_BYTES,
 ): { feed: (text: string) => void; hit: () => boolean } {
   let tail = "";
   let hit = false;
+  let scanned = 0;
 
   return {
     feed(text: string): void {
       // 命中之后不必继续扫 —— 结论不会因为再命中一次而改变。
       if (hit) return;
+      // 预算耗尽后不再跑正则。字节照常转发,用量照常收集。
+      if (scanned >= budget) return;
+      scanned += text.length;
       const combined = tail + text;
       if (test(combined)) {
         hit = true;

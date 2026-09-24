@@ -145,12 +145,26 @@ export type CatalogSnapshot = {
 };
 
 /**
- * 一次目录响应最多认这么多条目。
+ * 一次目录响应最多认这么多**条目**。
  *
- * 在架目录实测 76-79 条。突然变成几千条意味着我们在跟别的东西说话
- * （劫持、错配的 baseUrl、某个返回聚合列表的代理），此时**保留旧缓存**比
- * 采纳它安全。刻意不做截断：截断会静默丢掉免费模型，而丢掉哪些取决于上游的
- * 排序，症状是"某个模型时有时无"。
+ * 在架目录实测 41-80 条(按身份不同)。突然变成几千条意味着我们在跟别的东西
+ * 说话(错配的 baseUrl、某个返回聚合列表的代理),此时**保留旧缓存**比采纳它安全。
+ * 刻意不做截断:截断会静默丢掉免费模型,而丢掉哪些取决于上游的排序,
+ * 症状是"某个模型时有时无"。
+ *
+ * ## 它守的是**条目数**,不是体积 —— 先前的注释把范围说宽了
+ *
+ * 这道闸门在 `parseCatalog` 里,也就是 `upstream.json()` **已经把整个体读进内存
+ * 并解析完**之后。所以条目数少而体积巨大的响应不受任何约束 ——
+ * 实测一个单条目、40 MiB 的目录响应被照常采纳。
+ *
+ * 先前注释说它防的是"劫持、错配的 baseUrl、返回聚合列表的代理",而**劫持**
+ * 恰好能以小条目数、大体积的形态出现。现在把范围说准:它防的是
+ * **条目数爆炸导致的判定集污染**,不是 DoS。
+ *
+ * 眼下不加体积闸门:本机自用、目录端点、且调用频率受 TTL 与失败退避约束
+ * (转发路径只读缓存)。真要加的话该在 `json()` **之前**读 `content-length`
+ * 或改用有界读取 —— 那是 Phase 7 若把目录做成用户可配 baseUrl 时的事。
  */
 const MAX_CATALOG_ENTRIES = 4096;
 
@@ -181,11 +195,22 @@ export function parseCatalog(payload: unknown, slot: CatalogSlot, now: number): 
 /**
  * 拉取失败后至少隔这么久才再试。
  *
- * ## 没有它的时候是一个真实的放大器
+ * ## 为什么需要它:拉取失败**不填缓存**,所以"过期"这个条件不会自行消失
  *
- * `refreshIfStale` 在每个转发请求上调用,而拉取失败**不会**填上缓存 ——
- * 于是下一个请求发现仍然过期,又发一次。稳态下一次客户端请求对应
- * **两次**上游请求,而且这个放大恰好发生在上游已经不稳的时候。
+ * 每个触发点都会看到"仍然过期"并再发一次。当前有两个触发点:
+ *
+ * - `/v1/models` 被访问时(`ensure`)—— OpenCode 会拉模型列表,有真实流量
+ * - 转发路径判出 `retired` 时(`refreshIfStale`)—— 客户端反复请求一个
+ *   已下架模型就会反复触发
+ *
+ * 两者都可能高频,而退避把"每次触发一发"压成"每 30 秒最多一发"。
+ *
+ * > **这段先前描述的是一个已经不存在的形态。** 原文写的是
+ * > "`refreshIfStale` 在每个转发请求上调用",那是 Phase 6 第一版的错误耦合
+ * > (一次客户端请求 → 两次上游请求,稳态永久 ×2),**已在同一轮改掉**:
+ * > 现在转发路径只在 `retired` 那一支刷新。留着那句会让下一轮读到的人
+ * > 以为"退避只是为了压住每请求刷新",于是若哪天删掉 `retired` 支的调用,
+ * > 会误以为退避可以一起删 —— 而 `ensure` 那条路径仍然需要它。
  *
  * 30 秒是这样定的:目录以天为单位变化,所以"晚 30 秒恢复"没有代价;
  * 而它足够短,不会让一次网络抖动把目录冻住很久。
@@ -227,11 +252,43 @@ export class ModelCatalog {
   }
 
   /** 这份快照是否还在 TTL 内。 */
-  isFresh(snapshot: CatalogSnapshot, config: Config, now: number): boolean {
-    const age = now - snapshot.fetchedAt;
-    // 时钟回拨（NTP 校正、休眠唤醒）会让 age 为负 —— 当作新鲜，不要当成过期。
-    if (age < 0) return true;
-    return age < config.models.catalogTtlMs;
+  /**
+   * 这份快照是否还在 TTL 内。
+   *
+   * `now` 可省 —— 省略时用**本类自己的**时钟。这一点要紧:先前
+   * `models.ts` 传的是 `Date.now()`,而 `fetchedAt` 来自注入的 `#clock`,
+   * 于是同一个响应体里两个字段来自**两个不同的时间源**。注入时钟的环境下
+   * `fresh` 恒为 false(刚拉到的目录报告为"不新鲜"),生产环境下恒为 true ——
+   * 两种情况下都无法用断言区分新鲜与过期,所以它是全仓唯一一个**无法被验证**
+   * 的诊断字段。而 `architecture.md` 正把它当作目录状态的观察手段,
+   * Phase 8 的 `doctor.mjs` 还要读它:一个会说假话的诊断字段比没有更糟。
+   *
+   * 修法不是给 `models.ts` 补一个 `clock` 依赖(那只是把同样的口子挪个位置,
+   * 而 `status(now)` 是同一个形状,下一个调用点会照抄),而是让**时钟来源在这个
+   * 类里唯一**。调用方仍可显式传 `now` 来断言边界。
+   *
+   * ## 这里刻意**没有**时钟回拨守卫,而 `refreshIfStale` 里有
+   *
+   * 两处的比较看起来该对称,其实不是 —— 第六轮审核穷举验证过:
+   *
+   * - 本方法:`catalogTtlMs` 的 schema 下界是 `60_000`(恒为正),所以
+   *   `age < 0` **蕴含** `age < ttl`。加一条 `if (age < 0) return true`
+   *   在任何合法配置下都改变不了返回值 —— 那是**数学死代码**
+   *   (实测:所有负 age × 三个代表性 TTL,带与不带守卫零分歧)。
+   * - `refreshIfStale`:那里比的是**退避窗口**,方向相反 —— 负 age 会让
+   *   `age < FAILURE_BACKOFF_MS` 恒真,于是刷新被**永久冻住**。那条守卫是承重的。
+   *
+   * 先前两处都写着守卫、注释也一样,于是一条是死的、一条是活的而读者分不出来。
+   * **保留一行永远不改变结果的代码比删掉它更危险**:下一个人会以为它在守什么,
+   * 并据此推断本方法对时钟回拨有特殊处理。
+   */
+  isFresh(snapshot: CatalogSnapshot, config: Config, now: number = this.#clock()): boolean {
+    /*
+     * 时钟回拨(NTP 校正、休眠唤醒)让 age 为负时,结果自然落在"新鲜"一侧 ——
+     * 依据是 `ModelRulesSchema` 给 `catalogTtlMs` 的 `.min(60_000)`,
+     * 不是这里的某个判断。那个下界变成 0 或负数的话本方法才需要改。
+     */
+    return now - snapshot.fetchedAt < config.models.catalogTtlMs;
   }
 
   /**
@@ -291,11 +348,29 @@ export class ModelCatalog {
     void this.#fetchOnce(identity, config, upstreamOf).catch(() => null);
   }
 
-  /** 诊断用。不含凭证 —— 只有槽位、条目数与年龄。 */
-  status(now: number): Array<{ slot: CatalogSlot; total: number; ageMs: number }> {
+  /**
+   * 诊断用。不含凭证 —— 只有槽位、条目数与年龄。
+   *
+   * `now` 可省,与 `isFresh` 同理:时钟来源在本类里唯一,调用方不各自决定。
+   *
+   * ## ⚠️ 本方法**当前没有生产调用点**
+   *
+   * 全仓只有 `catalog.test.ts` 在调它。按纪律 #1 的四分类这属于"代码里有死信息",
+   * 而本项目对这类东西的既定处置是 `surfacesFor()` 那个先例:**保留 + 明确标注**,
+   * 而不是补一条断言假装它被用着(那会给一个没人用的方法加测试)。
+   *
+   * 保留的理由具体:Phase 9 的 Models 页需要正是这块数据(每个槽位的条目数与
+   * 年龄),而 Phase 8 的 `doctor.mjs` 要做分层诊断。已记进
+   * `docs/architecture.md` 的缺口清单。
+   *
+   * `CatalogSnapshot.slot` 字段同理 —— 它**只被本方法读**(`#slots` 这个 Map 的
+   * 键来自 `slotOf()`,不是来自 `snapshot.slot`)。两者一起留,一起标注。
+   */
+  status(now: number = this.#clock()): Array<{ slot: CatalogSlot; total: number; ageMs: number }> {
     return [...this.#slots.values()].map((s) => ({
       slot: s.slot,
       total: s.entries.length,
+      // 时钟回拨时年龄夹到 0 —— 诊断输出里一个负年龄只会让人以为读错了字段。
       ageMs: Math.max(0, now - s.fetchedAt),
     }));
   }

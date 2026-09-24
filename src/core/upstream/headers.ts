@@ -220,17 +220,27 @@ export function buildUpstreamHeaders(input: BuildUpstreamHeadersInput): Record<s
   if (out["x-opencode-session"] === undefined) out["x-opencode-session"] = newId();
   if (out["x-opencode-request"] === undefined) out["x-opencode-request"] = newId();
 
-  // 3. 协议面特有头。
-  for (const [name, value] of Object.entries(input.extra ?? {})) {
-    const lower = name.toLowerCase();
-    if (!isSafeHeaderName(lower)) throw new HeaderValidationError(lower, "协议面头名非法");
-    if (!isSafeHeaderValue(value)) throw new HeaderValidationError(lower, "协议面头值非法");
-    out[lower] = value;
-  }
-
-  // 4. 网关掌握的头 —— 放最后,不可被上面任何一步覆盖。
   /*
-   * `apiKey` 也要过校验,尽管它来自我们自己的配置。
+   * `apiKey` 的**校验**提到这里,而**赋值**仍在第 4 步 —— 两件事分开。
+   *
+   * ## 为什么校验不能留在赋值那里
+   *
+   * 第六轮审核实测:含换行的 apiKey 在两个面上报**不同**的消息 ——
+   *
+   * ```
+   * chat:     headerName=authorization  "Worker 的 apiKey 含控制字符或换行,请检查配置中该 Worker 的 apiKey"
+   * messages: headerName=x-api-key      "协议面头值非法"
+   * ```
+   *
+   * 因为 Messages 面把 key 镜像进 `extra`(那是它能工作的前提),于是第 3 步的
+   * 通用校验**先命中**,下面那条刻意写的自查消息在这个面上永远走不到。
+   * 用户看到"协议面头值非法"会去查协议实现,而真实原因是配置里那个 key
+   * 粘贴时带进了换行 —— 正是下面那段注释特意要避免的误导。
+   *
+   * 赋值仍留在第 4 步:那个顺序保证**网关的决定不可被客户端或面覆盖**,
+   * 与本次改动无关。移动的只是校验。
+   *
+   * ## 这条校验本身的理由(原注释,仍然成立)
    *
    * 归因问题:含 CR/LF 的 key 会让 undici 在 fetch 时抛错,而那个失败被
    * `classifyError` 归为 `transport` → 客户端收到「502 上游不可达」,
@@ -247,6 +257,16 @@ export function buildUpstreamHeaders(input: BuildUpstreamHeadersInput): Record<s
       "Worker 的 apiKey 含控制字符或换行,请检查配置中该 Worker 的 apiKey",
     );
   }
+
+  // 3. 协议面特有头。
+  for (const [name, value] of Object.entries(input.extra ?? {})) {
+    const lower = name.toLowerCase();
+    if (!isSafeHeaderName(lower)) throw new HeaderValidationError(lower, "协议面头名非法");
+    if (!isSafeHeaderValue(value)) throw new HeaderValidationError(lower, "协议面头值非法");
+    out[lower] = value;
+  }
+
+  // 4. 网关掌握的头 —— 放最后,不可被上面任何一步覆盖。
   out["authorization"] = `Bearer ${input.apiKey}`;
   out["content-type"] = "application/json";
   out["accept"] = input.streaming ? "text/event-stream" : "application/json";

@@ -128,9 +128,32 @@ export async function fetchUpstream(
    * 回调返回 `doFetch(...)` 本身(一个 Promise<Response>),
    * 锁因此持到响应头到达即释放。**不要**在这里 await 后读 body ——
    * 见文件头对 Promise 同化的说明。
+   *
+   * ## `select()` 的失败必须包成 `EgressSetupError`,而 `doFetch()` 的不能
+   *
+   * 这一条是生产验证查出来的(第六轮),而五个审核 agent 都没查到 —— 因为它
+   * 只在**本机 Clash 要求鉴权而配置里没有 secret** 时才出现。
+   *
+   * 切 selector 是**本机控制面**操作,它失败意味着本机配置不对
+   * (Clash 开了鉴权、secret 变了、分组改名),与上面那四处
+   * `EgressSetupError` 同类:**换任何 Worker 都不会好**。
+   *
+   * 不包的后果实测:`ControllerError` 逃出去 → `classifyError` 归 `transport`
+   * → `isRetryable` 为真且 `blameWorker` 为真 → 重试链把每个 Worker 依次试
+   * 一遍并**各记一次失败进冷却**。于是一个本机 Clash 的 secret 配错,
+   * 会把三个健康账号全部打进退避 —— 正是不变量 #4 要保的那件事。
+   *
+   * 而 `doFetch()` 的失败必须**保持原样**:那是真实的网络失败,换 Worker
+   * 可能就成功,该重试也该归咎。所以只包 `select()` 那一句,不包整个回调。
    */
   return lock.run(async () => {
-    await controller.select(group, target.nodeName);
+    try {
+      await controller.select(group, target.nodeName);
+    } catch (err) {
+      throw new EgressSetupError(
+        err instanceof Error ? err.message : "切换 Clash 出站节点失败",
+      );
+    }
     return doFetch(req.url, init);
   });
 }

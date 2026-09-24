@@ -16,7 +16,7 @@
     "typecheck": "tsc -p tsconfig.server.json --noEmit && tsc -p tsconfig.admin.json --noEmit && tsc -p tsconfig.test.json",
     "test": "vitest run",
     "test:watch": "vitest",
-    "validate": "npm run typecheck && npm run test && npm run build",
+    "validate": "npm run typecheck && npm run build && npm run test",
     "start": "npm run build && node scripts/service.mjs start",
     "stop": "node scripts/service.mjs stop",
     "restart": "npm run build && node scripts/service.mjs restart",

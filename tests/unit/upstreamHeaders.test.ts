@@ -21,6 +21,84 @@ function build(clientHeaders: Record<string, string>, over: Partial<{ streaming:
   });
 }
 
+describe("apiKey 的校验与自查消息", () => {
+  const BAD_KEY = "zen-test-key-not-real\n000";
+
+  it("坏 apiKey 报的是**指向配置**的消息,而不是笼统的头错误", () => {
+    /*
+     * 归因问题:含 CR/LF 的 key 会让 undici 在 fetch 时抛错,而那个失败被
+     * `classifyError` 归为 `transport` → 客户端收到「502 上游不可达」,
+     * 尽管请求根本没发出去。用户会去查网络和上游,而真实原因在配置里。
+     */
+    expect(() =>
+      buildUpstreamHeaders({ clientHeaders: {}, apiKey: BAD_KEY, streaming: false, newId: fixedId }),
+    ).toThrow(HeaderValidationError);
+
+    try {
+      buildUpstreamHeaders({ clientHeaders: {}, apiKey: BAD_KEY, streaming: false, newId: fixedId });
+    } catch (err) {
+      const e = err as InstanceType<typeof HeaderValidationError>;
+      expect(e.headerName).toBe("authorization");
+      expect(e.message).toContain("apiKey");
+      // 绝不回显 key 本身 —— 这条消息会进日志与用户粘贴的报错。
+      expect(e.message).not.toContain("zen-test-key");
+    }
+  });
+
+  it("**镜像了 key 的面上也报同一条消息** —— 校验先于 extra 循环", () => {
+    /*
+     * 第六轮审核实测出的归因错位:Messages 面把 key 镜像进 `extra`
+     * (那是它能工作的前提,见 `protocols/messages.ts`),于是通用的
+     * "协议面头值非法"**先命中**,上面那条刻意写的自查消息在那个面上
+     * 永远走不到:
+     *
+     * ```
+     * chat:     headerName=authorization  "...请检查配置中该 Worker 的 apiKey"
+     * messages: headerName=x-api-key      "协议面头值非法"   ← 指错了方向
+     * ```
+     *
+     * 用户看到"协议面头值非法"会去查协议实现,而真实原因是配置里那个 key
+     * 粘贴时带进了换行。修法是把**校验**提到 `extra` 循环之前,
+     * 而**赋值**仍留在最后(那个顺序保证网关的决定不可被覆盖,见下一条)。
+     */
+    try {
+      buildUpstreamHeaders({
+        clientHeaders: {},
+        apiKey: BAD_KEY,
+        streaming: false,
+        // 复刻 Messages 面的形态:把 key 镜像进 extra。
+        extra: { "anthropic-version": "2023-06-01", "x-api-key": BAD_KEY },
+        newId: fixedId,
+      });
+      throw new Error("应当抛 HeaderValidationError");
+    } catch (err) {
+      const e = err as InstanceType<typeof HeaderValidationError>;
+      expect(e.headerName, "必须指向 apiKey,不是 x-api-key").toBe("authorization");
+      expect(e.message).toContain("apiKey");
+      expect(e.message).not.toContain("zen-test-key");
+    }
+  });
+
+  it("移动校验**没有**改变覆盖顺序 —— 网关的头仍不可被面或客户端覆盖", () => {
+    /*
+     * 反向钉子。校验提前了,但赋值必须仍在最后:若顺序被一起挪上去,
+     * 一个面(或客户端)发的 `authorization` 就能覆盖掉 Worker key ——
+     * 那是一个由面控制的凭证替换原语。
+     */
+    const h = buildUpstreamHeaders({
+      clientHeaders: { authorization: "Bearer CLIENT-MUST-NOT-WIN" },
+      apiKey: FAKE_KEY,
+      streaming: false,
+      extra: { authorization: "Bearer SURFACE-MUST-NOT-WIN", "x-api-key": FAKE_KEY },
+      newId: fixedId,
+    });
+    expect(h["authorization"]).toBe(`Bearer ${FAKE_KEY}`);
+    expect(JSON.stringify(h)).not.toContain("MUST-NOT-WIN");
+    // 面自己的头照常生效（它不与网关掌握的头同名）。
+    expect(h["x-api-key"]).toBe(FAKE_KEY);
+  });
+});
+
 describe("剥离不可转发的头", () => {
   it("客户端的 Authorization 绝不转发给上游", () => {
     /*

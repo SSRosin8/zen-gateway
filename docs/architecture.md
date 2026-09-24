@@ -338,8 +338,8 @@ schema：实测 +57ms，而 `service.mjs status` 全程只有 51ms。
 | 10 | 订阅拉取与多格式解析、多 Clash 内核择优 | 待做 |
 | 11 | 精简 `AGENTS.md`、4 个 skill、`docs/` 补全 | 部分 |
 
-**1266 测试全绿**（39 个文件：unit 28 / integration 8 / design 1 / admin 2）。
-源码 8189 行 / 测试 13445 行。经五轮独立子 agent 审核。
+**1293 测试全绿**（39 个文件：unit 28 / integration 8 / design 1 / admin 2）。
+源码 8590 行 / 测试 14504 行。经**六轮**独立子 agent 审核。
 
 ### 当前已知缺口
 
@@ -351,21 +351,28 @@ schema：实测 +57ms，而 `service.mjs status` 全程只有 51ms。
    但消费方式只有一行日志。写进 `runtime.db` 并按 model／Worker 聚合是 Phase 7（→ Phase 7）
 4. **探测目标与转发目标不同域**（见上文出口隔离节）
 5. **调度与目录状态没有查看入口**：`Scheduler.snapshot()` 与 `ModelCatalog.status()`
-   都已实现且不含凭证，但 `npm run status` 只报进程信息，也还没有管理 API 读它们。
-   眼下只能从响应头 `x-zen-gateway-route`／`x-zen-gateway-worker` 与 `/v1/models`
-   响应体里的 `zen_gateway_catalog` 字段推断（→ Phase 8 的 `doctor.mjs` / Phase 9 的管理 API）
+   都已实现且不含凭证，但**两者都没有生产调用点** —— `npm run status` 只报进程信息，
+   也还没有管理 API 读它们。两处都已在源码里明确标注（照 `surfacesFor()` 的先例），
+   免得下一轮把它们当成在用的接口。眼下只能从响应头 `x-zen-gateway-route`／
+   `x-zen-gateway-worker`／`x-zen-gateway-free` 与 `/v1/models` 响应体里的
+   `zen_gateway_catalog` 字段推断（→ Phase 8 的 `doctor.mjs` / Phase 9 的管理 API）
 6. **目录的免费子集一致性没有本地守卫，也守不住**：两个槽位的设计依赖"免费子集
    三账号一致"（`upstream-quirks.md` §7），而那是**上游的**性质，单测无论怎么写都只是
    在断言自造的 fixture。复核办法是拿多个账号各拉一次目录比对免费子集。
    本地能守的是它不成立时的处置（多一个 → 上游 400 自限；少一个 → 触发刷新），那已有用例
-7. **`assertEveryRouteGuarded` 只检查"有没有守卫"，不检查"是哪个"**：一条只挂
+7. **目录响应只限条目数，不限体积**：`MAX_CATALOG_ENTRIES` 的闸门在 `parseCatalog` 里，
+   也就是 `upstream.json()` 已经把整个体读进内存之后 —— 实测一个单条目、40 MiB 的
+   响应被照常采纳。不构成当前风险（本机自用、baseUrl 由 schema 限 http/https、
+   调用频率受 TTL 与失败退避约束），注释已把范围收窄到它真正守住的那件事。
+   若 Phase 7+ 把 baseUrl 做成更开放的配置项，要在 `json()` **之前**加体积闸门
+8. **`assertEveryRouteGuarded` 只检查"有没有守卫"，不检查"是哪个"**：一条只挂
    `relayAuth` 而没挂 `loopbackOnly` 的管理路由能通过断言。当前无活缺陷
    （管理面只有 `/api/ping`），但 Phase 9 加管理 API 时这正是第四轮那个缺陷的变体
    （→ Phase 9）
-8. **管理面的 body 上限尚无处可设**：约束「管理 JSON body 有上限而转发透传无界」
+9. **管理面的 body 上限尚无处可设**：约束「管理 JSON body 有上限而转发透传无界」
    目前是**空洞成立**的 —— 管理侧没有任何读 body 的代码。Phase 9 加管理 POST 时
    必须同时加，否则这条约束会静默变成"不成立"（→ Phase 9）
-9. **`models.defaultSurfaces` / `surfaceOverrides` 声明了但不设防**：`surfacesFor()`
+10. **`models.defaultSurfaces` / `surfaceOverrides` 声明了但不设防**：`surfacesFor()`
    已实现且有单测，但**全仓没有生产调用点** —— 这与第四轮那个 `streaming` 字段
    是同一个形态（声明了却不读）。
 
