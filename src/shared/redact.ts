@@ -223,9 +223,83 @@ export function redactValue(value: unknown, depth = 0): unknown {
   return REDACTED;
 }
 
-/** 供错误处理直接使用：任何异常 → 一行安全文本。 */
+/**
+ * 跟随 `cause` 链的层数上限。
+ *
+ * 有上限而不是跟到底:`cause` 由第三方库设置,深度不受我们控制,
+ * 而这个结果要进单行日志。3 层足够覆盖实际形态
+ * (`TypeError: fetch failed` → undici 的 `Error` → Node 的 `ErrnoException`)。
+ */
+const MAX_CAUSE_DEPTH = 3;
+
+/**
+ * 整条 cause 链拼接后的字符上限。
+ *
+ * 单层已被 `redactText` 限到 500,但四层拼起来会把单行日志的上界抬到 2000。
+ */
+const MAX_CAUSE_CHAIN_LENGTH = 800;
+
+/**
+ * 供错误处理直接使用：任何异常 → 一行安全文本。
+ *
+ * ## 为什么要跟 `cause`
+ *
+ * undici 的 fetch 把一切底层故障包成 `TypeError: fetch failed`,**真正的原因
+ * 只在 `err.cause` 里**。先前这里只取 `err.message`,于是一个证书链故障
+ * (`UNABLE_TO_GET_ISSUER_CERT_LOCALLY`,本机 `opencode.ai` 被企业 CA 中间人)
+ * 在日志里只留下 `目录拉取失败(keyed): fetch failed` —— 三个词,不可诊断,
+ * 而症状是 `/v1/models` 返回 HTTP 200 加一个空列表(空集合不报错)。
+ * 脱敏函数无意中成了信息销毁函数。
+ *
+ * 每一层都各自过 `redactText`,所以跟随 cause **不会**放宽脱敏 ——
+ * 底层错误同样可能带 URL 内嵌凭证。
+ */
 export function safeErrorMessage(err: unknown): string {
-  if (err instanceof Error) return redactText(err.message);
-  if (typeof err === "string") return redactText(err);
-  return "未知错误";
+  const parts: string[] = [];
+  // 环保护:`cause` 由外部设置,自引用与互引用都可能出现,跟到底会挂住。
+  const seen = new Set<unknown>();
+  let current: unknown = err;
+
+  for (let depth = 0; depth <= MAX_CAUSE_DEPTH; depth += 1) {
+    if (current === null || current === undefined) break;
+    if (typeof current === "object") {
+      if (seen.has(current)) break;
+      seen.add(current);
+    }
+
+    let text: string;
+    if (current instanceof Error) {
+      text = redactText(current.message);
+    } else if (typeof current === "string") {
+      text = redactText(current);
+    } else {
+      // 非 Error 的 cause(库偶尔塞对象/数字)。只在它是**首个**元素时
+      // 才值得报「未知错误」—— 作为下层原因时,一个无消息的对象不提供信息。
+      if (depth === 0) return "未知错误";
+      break;
+    }
+
+    // 空消息不占位:`new Error()` 的 message 是 ""。
+    // 但首层为空且没有下层时仍要回一句话,见循环结束后的兜底。
+    if (text !== "") parts.push(text);
+
+    if (!(current instanceof Error)) break;
+    const next: unknown = (current as Error & { cause?: unknown }).cause;
+    if (next === undefined) break;
+    current = next;
+  }
+
+  if (parts.length === 0) return "未知错误";
+  /*
+   * 用 ← 表达因果方向:左边是表象,右边是原因。
+   *
+   * 总长再收一次:每层各自已被 `redactText` 限到 500,但四层拼起来会把
+   * 单行日志的上界从 500 抬到 2000。诊断需要的是最外层加最内层那几个词,
+   * 不是四段完整文本。(CR/LF 已由各层的 `stripControlChars` 去掉,
+   * 所以拼接不会引入换行 —— 日志注入那条纪律在这里仍然成立。)
+   */
+  const joined = parts.join(" ← ");
+  return joined.length > MAX_CAUSE_CHAIN_LENGTH
+    ? `${joined.slice(0, MAX_CAUSE_CHAIN_LENGTH)}…`
+    : joined;
 }

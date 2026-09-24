@@ -1,7 +1,7 @@
-import { createHash } from "node:crypto";
 import { Agent, ProxyAgent, type Dispatcher } from "undici";
 import { socksDispatcher } from "fetch-socks";
 import type { Proxy } from "../../shared/schema.ts";
+import { credentialFingerprint } from "./credentialFingerprint.ts";
 
 /**
  * 出口 dispatcher 工厂。
@@ -28,19 +28,6 @@ import type { Proxy } from "../../shared/schema.ts";
 /** 能直接做 undici 出口的协议。 */
 const SOCKS_TYPES = new Set(["socks4", "socks5"]);
 const HTTP_TYPES = new Set(["http", "https"]);
-
-/**
- * 口令的稳定指纹,供缓存键使用。
- *
- * 不能用明文(键会进诊断输出),也不能用长度 —— 等长口令会撞键,
- * 于是用户改掉一个「长度恰好相同的错口令」后仍会复用旧 dispatcher,
- * 鉴权永久失败且无从察觉。取 sha256 前 12 位:碰撞概率可忽略,
- * 且不可逆推原值。
- */
-function credentialFingerprint(secret: string): string {
-  if (secret === "") return "empty";
-  return createHash("sha256").update(secret).digest("hex").slice(0, 12);
-}
 
 export type TimeoutConfig = {
   /** 等响应头的上限。 */
@@ -149,9 +136,10 @@ export class DispatcherPool {
       // nodeName 必须在键里 —— 见类注释:否则连接复用会让出口停留在旧节点。
       return `bridge|${b.bridgeId}|${b.host}:${b.port}|${target.nodeName}|${timeouts}`;
     }
-    // 口令参与键。用 sha256 前 12 位而非长度:长度相同的口令会撞键,
-    // 于是「改掉一个等长的错口令」后仍复用旧 dispatcher,鉴权永久失败。
-    // 用摘要而非明文是因为这个键会进诊断输出。
+    // 口令参与键。用摘要而非长度:长度相同的口令会撞键,于是
+    // 「改掉一个等长的错口令」后仍复用旧 dispatcher,鉴权永久失败。
+    // 规则的唯一真相在 credentialFingerprint.ts(egress.ts 的 Controller
+    // secret 用同一个)。
     const auth = `${p.username ?? ""}:${credentialFingerprint(p.password ?? "")}`;
     return `direct|${p.type.toLowerCase()}|${p.host}:${p.port}|${auth}|${timeouts}`;
   }

@@ -380,3 +380,11 @@ schema：实测 +57ms，而 `service.mjs status` 全程只有 51ms。
    默认配置下**所有**模型的 `/v1/messages` 请求都会被拒 —— 而那个面刚刚验证可用。
    所以这里要先定清楚它的语义（是"放行闸门"还是"后台展示用的提示"），
    再决定默认值。眼下当作后备展示数据，不参与判定（→ Phase 9 的 Models 页）
+11. **目录拉空与上游不可达在外部看起来一样**：两者都让 `/v1/models` 返回
+   `data: []` 加 HTTP 200。已实测的一个成因是 TLS 中间人 —— 本机
+   `opencode.ai` 被内网 DNS 指向内网地址、证书由企业 CA 签发，而 Node 不读
+   系统 CA 库（需 `NODE_EXTRA_CA_CERTS`，见 `docs/usage.md`）。日志现在能
+   区分（`safeErrorMessage` 跟随 `err.cause`，会打出
+   `fetch failed ← unable to get local issuer certificate`），但**健康检查
+   区分不了**：`/health` 只看进程活着。`doctor.mjs` 要把"上游可达但目录为空"
+   做成独立一层，它的下一步建议与"上游不可达"完全不同（→ Phase 8）

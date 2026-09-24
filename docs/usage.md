@@ -19,6 +19,33 @@ npm run dev          # 管理后台 dev server（Vite，5173）
 
 **`ZG_DATA_DIR`** 可以把 `data/` 挪到别处（测试与多实例用）。
 
+### 企业网络下必须设 `NODE_EXTRA_CA_CERTS`
+
+如果所在网络对 `opencode.ai` 做 TLS 中间人（内网 DNS 把它解析到内网地址、
+证书由企业 CA 签发），**Node 不读系统 CA 库**（它用编译进二进制的那一套），
+于是所有上游请求都失败：
+
+```bash
+NODE_EXTRA_CA_CERTS=/etc/ssl/certs/ca-certificates.crt npm start
+```
+
+怎么判断是否需要它 —— **不能用 `curl` 判断**：`curl` 读系统 CA 库，所以
+它会正常返回 200，而网关同时是失败的。要么直接看日志（见下），要么用 Node 问：
+
+```bash
+node -e 'fetch("https://opencode.ai/zen/v1/models").then(r=>console.log(r.status)).catch(e=>console.log("需要设置:",e.cause?.message))'
+```
+
+**症状很隐蔽**：网关照常启动、`/health` 返回 `ok: true`、`/v1/models` 返回
+**HTTP 200 加一个空列表** —— 空集合不是错误，所以整条健康链路全绿而功能为零，
+客户端只会说"没有可用模型"。日志里是这一行：
+
+```
+目录拉取失败(keyed): fetch failed ← unable to get local issuer certificate
+```
+
+`←` 右边是 `err.cause`。`fetch failed` 是 undici 的顶层包装，真正的原因一律在右边。
+
 ---
 
 ## 客户端配置
@@ -32,7 +59,8 @@ npm run dev          # 管理后台 dev server（Vite，5173）
   "provider": {
     "opencode": {
       "options": {
-        "baseURL": "http://127.0.0.1:9876/v1",
+        // 端口用 `npm run status` 打印的那个，别照抄
+        "baseURL": "http://127.0.0.1:9877/v1",
         "apiKey": "<gateway.relayToken>"
       }
     }
@@ -47,8 +75,14 @@ npm run dev          # 管理后台 dev server（Vite，5173）
 验证：
 
 ```bash
-opencode run --model opencode/big-pickle "hello"
+opencode run --model opencode/mimo-v2.6-flash-free "Reply with exactly: OK"
 ```
+
+> **只能用真实 OpenCode CLI 验，`curl` 不算。** 免费额度闸门查请求**形态**不查 key，
+> 手搓 `curl` 必然得到 `403 FreeTierError` —— 那是预期行为，不是故障证据。
+>
+> 判据也不止看 CLI 输出：还要在 `data/zen-gateway.log` 里看到对应的
+> `用量 chat/...` 行，否则无法排除 CLI 其实绕过了网关直连上游。
 
 ---
 
@@ -60,7 +94,7 @@ opencode run --model opencode/big-pickle "hello"
 {
   "version": 1,
   "gateway": {
-    "port": 9876,
+    "port": 9876,                 // 默认值；本机实际用 9877（9876 被旧项目占着）
     "baseUrl": "https://opencode.ai/zen/v1",
     "relayToken": "<首启自动生成的 43 字符>",
     "headersTimeoutMs": 60000,    // 等首字节，可以严格
@@ -141,7 +175,9 @@ opencode run --model opencode/big-pickle "hello"
 ```bash
 curl -s -H "authorization: Bearer <relayToken>" http://127.0.0.1:9877/v1/models \
   | node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>console.log(JSON.parse(s).zen_gateway_catalog))'
-# { slot: 'keyed', total: 41, free: 9, fetched_at: 1790166659242, fresh: true }
+# { slot: 'keyed', total: 42, free: 10, fetched_at: 1790256502000, fresh: true }
+#   ↑ total/free 都会变（上游目录以天为单位变动，且 total 按账号不同），
+#     这里只是形状示例 —— 别把这两个数字当预期值。
 ```
 
 `total` 是上游在架总数，`free` 是过滤后你能用的数量，`fresh` 是这份目录是否还在
@@ -198,12 +234,12 @@ curl -s -H "authorization: Bearer <relayToken>" http://127.0.0.1:9877/v1/models 
   ],
   "proxies": [
     { "id": "node-us", "name": "US", "type": "anytls",
-      "host": "127.0.0.1", "port": 17891,
+      "host": "127.0.0.1", "port": 7897,
       "enabled": true, "source": "controller",
       "bridgeId": "clash-1", "clashNodeName": "🇺🇲 US-1",
       "direct": false, "bridgeable": true, "egressIp": null },
     { "id": "node-jp", "name": "JP", "type": "anytls",
-      "host": "127.0.0.1", "port": 17891,
+      "host": "127.0.0.1", "port": 7897,
       "enabled": true, "source": "controller",
       "bridgeId": "clash-1", "clashNodeName": "🇯🇵 JP-1",
       "direct": false, "bridgeable": true, "egressIp": null }
@@ -213,10 +249,10 @@ curl -s -H "authorization: Bearer <relayToken>" http://127.0.0.1:9877/v1/models 
     "selectionMode": "manual",      // 严格用 activeBridgeId，不在它挂掉时悄悄换
     "activeBridgeId": "clash-1",
     "bridges": [
-      { "id": "clash-1", "name": "mihomo", "enabled": true, "priority": 100,
-        "apiBase": "http://127.0.0.1:9090", "apiSecret": "",
+      { "id": "clash-1", "name": "clash-verge", "enabled": true, "priority": 100,
+        "apiBase": "http://127.0.0.1:9097", "apiSecret": "<Controller secret>",
         "localProxyHost": "127.0.0.1",
-        "localProxyPort": 17891,       // 从 Controller 的 /configs 读 mixed-port
+        "localProxyPort": 7897,        // 从 Controller 的 /configs 读 mixed-port
         "selectorGroup": "Proxy" }     // 专用分组，不要用 GLOBAL
     ]
   }
@@ -226,12 +262,19 @@ curl -s -H "authorization: Bearer <relayToken>" http://127.0.0.1:9877/v1/models 
 四个实测出来的注意点：
 
 **`localProxyPort` 要从 Controller 的 `/configs` 读 `mixed-port`**，不要用文档
-默认的 `7890`。实测某机器上是 `17891`，而 `port`/`socks-port` 都是 0 ——
-硬编码默认值会让桥接静默连到一个没人监听的端口。
+默认的 `7890`，也不要照抄下面的数字 —— 它**随内核而变**（实测 Clash Verge 是
+`7897`，0dcloud 是 `17891`），而且某些内核的 `port`/`socks-port` 都是 0。
+硬编码任何一个值都会让桥接静默连到一个没人监听的端口。
 
 ```bash
-curl -s http://127.0.0.1:9090/configs | grep -o '"mixed-port":[0-9]*'
+# 端口按你的 Controller，下面用 Clash Verge 的 9097 举例
+curl -s -H "Authorization: Bearer <apiSecret>" \
+  http://127.0.0.1:9097/configs | grep -o '"mixed-port":[0-9]*'
 ```
+
+> **较新的内核需要 `apiSecret`**，免鉴权访问只会得到 401。而有些 GUI 客户端
+> （实测 0dcloud v2.0.30）把 secret 放在加密 IPC 里、外部拿不到 ——
+> 那种内核无法被本网关驱动，即使它的数据面端口是通的：切换节点必须走控制面。
 
 **`selectorGroup` 不要用 `GLOBAL`。** 切 `GLOBAL` 会改掉那个 Clash 实例上
 **所有**流量的出站，包括浏览器和其他程序。建一个专用 selector 分组只放要隔离的节点。
@@ -252,8 +295,12 @@ curl -s http://127.0.0.1:9090/configs | grep -o '"mixed-port":[0-9]*'
 # 本机曾同时跑着旧项目(9876)与本网关(9877),照抄会拿到**另一个进程**的
 # `{"ok":true}`,看起来一切正常而其实问错了人。
 curl -s "http://127.0.0.1:$(node -e 'import("./src/store/port.ts").then(m=>console.log(m.resolvePort()))')/health"
-curl -s http://127.0.0.1:9090/version           # Clash Controller 是否活着
-curl -s http://127.0.0.1:9090/connections \
+
+# Clash Controller。端口与 secret 按你的 bridges 配置（下例是 Clash Verge）
+curl -s -H "Authorization: Bearer <apiSecret>" \
+  http://127.0.0.1:9097/version                 # Controller 是否活着
+curl -s -H "Authorization: Bearer <apiSecret>" \
+  http://127.0.0.1:9097/connections \
   | grep -o '"chains":\[[^]]*\]'                # 流量实际走了哪个出站节点
 ```
 

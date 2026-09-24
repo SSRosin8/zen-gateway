@@ -42,6 +42,13 @@ npm start          # 构建 → 后台启动 → 健康等待 → 打印 URL
 ```
 
 首次启动会生成 `data/config.json`（0600 权限）并自动生成 Relay Token。
+
+> **所在网络对 `opencode.ai` 做 TLS 中间人的话**（内网 DNS + 企业 CA），
+> Node 不读系统 CA 库，要改成
+> `NODE_EXTRA_CA_CERTS=/etc/ssl/certs/ca-certificates.crt npm start` ——
+> 否则症状是 `/v1/models` 返回 200 加一个**空列表**而不报错。
+> 判断方式与原理见 [`docs/usage.md`](docs/usage.md)（别用 `curl` 判断，它读的是系统 CA）。
+
 然后把 OpenCode 指向本网关 —— 在项目或 `~/.config/opencode/opencode.json` 里
 **覆盖内置 `opencode` provider**：
 
@@ -51,7 +58,8 @@ npm start          # 构建 → 后台启动 → 健康等待 → 打印 URL
   "provider": {
     "opencode": {
       "options": {
-        "baseURL": "http://127.0.0.1:9876/v1",
+        // 端口用 `npm run status` 打印的那个，别照抄
+        "baseURL": "http://127.0.0.1:9877/v1",
         "apiKey": "<data/config.json 里的 gateway.relayToken>"
       }
     }
@@ -62,8 +70,11 @@ npm start          # 构建 → 后台启动 → 健康等待 → 打印 URL
 不需要写 `models` 块：内置 provider 自带模型表，手写一份会随上游目录变化而过期。
 
 ```bash
-opencode run --model opencode/big-pickle "hello"
+opencode run --model opencode/mimo-v2.6-flash-free "Reply with exactly: OK"
 ```
+
+验证要用**真实 OpenCode CLI**：免费额度闸门查请求形态不查 key，手搓 `curl`
+必然得到 `403 FreeTierError`，那是预期行为而非故障。
 
 其余命令见 [`docs/usage.md`](docs/usage.md)。
 

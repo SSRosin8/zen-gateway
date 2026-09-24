@@ -219,6 +219,93 @@ describe("Controller 缓存", () => {
     const echo = await serve((_req, res) => res.writeHead(200).end("198.51.100.5"));
     expect(egress(echo).controllerFor(config(), "没有")).toBeNull();
   });
+
+  /*
+   * 下面三条盖的是一个真实缺陷:缓存键先前用 `apiSecret.length` 做指纹,
+   * 于是把一个打错的密码改成**同长度**的正确密码后,键不变 → 旧 Controller
+   * 被复用 → 它构造时已把旧 secret 抓进 `#secret` → 永久 401。
+   * 而「改成同长度的另一个值」正是修密码最常见的形态。
+   *
+   * 第一条只断言\"实例被重建\",这不够 —— 实例换了但仍可能带旧凭证。
+   * 第二条断言**真的发出去的那个 header** 变了,那才是用户能观察到的后果。
+   */
+  it("等长但不同的 secret 必须重建 —— 长度指纹会撞键", async () => {
+    const echo = await serve((_req, res) => res.writeHead(200).end("198.51.100.5"));
+    const svc = egress(echo);
+    const withSecret = (apiSecret: string) =>
+      config({
+        clash: {
+          enabled: true,
+          bridges: [
+            {
+              id: "b1",
+              name: "内核",
+              apiBase: "http://127.0.0.1:9090",
+              apiSecret,
+              localProxyPort: 7890,
+            },
+          ],
+          activeBridgeId: "b1",
+        },
+      });
+
+    // 两个 secret 长度刻意相同,只有内容不同。
+    const wrong = "secret-aaa";
+    const right = "secret-bbb";
+    expect(wrong).toHaveLength(right.length);
+
+    const first = svc.controllerFor(withSecret(wrong), "b1");
+    const second = svc.controllerFor(withSecret(right), "b1");
+    expect(second).not.toBe(first);
+  });
+
+  it("重建后的 Controller 真的带新 secret 发请求", async () => {
+    const seen: Array<string | undefined> = [];
+    const api = await serve((req, res) => {
+      seen.push(req.headers.authorization);
+      res.writeHead(200, { "content-type": "application/json" }).end('{"version":"v1"}');
+    });
+    const echo = await serve((_req, res) => res.writeHead(200).end("198.51.100.5"));
+    const svc = egress(echo);
+    const withSecret = (apiSecret: string) =>
+      config({
+        clash: {
+          enabled: true,
+          bridges: [
+            { id: "b1", name: "内核", apiBase: api, apiSecret, localProxyPort: 7890 },
+          ],
+          activeBridgeId: "b1",
+        },
+      });
+
+    await svc.controllerFor(withSecret("secret-aaa"), "b1")!.version();
+    await svc.controllerFor(withSecret("secret-bbb"), "b1")!.version();
+
+    expect(seen).toEqual(["Bearer secret-aaa", "Bearer secret-bbb"]);
+  });
+
+  it("secret 未变时仍复用,不做无谓重建", async () => {
+    const echo = await serve((_req, res) => res.writeHead(200).end("198.51.100.5"));
+    const svc = egress(echo);
+    const same = () =>
+      config({
+        clash: {
+          enabled: true,
+          bridges: [
+            {
+              id: "b1",
+              name: "内核",
+              apiBase: "http://127.0.0.1:9090",
+              apiSecret: "secret-aaa",
+              localProxyPort: 7890,
+            },
+          ],
+          activeBridgeId: "b1",
+        },
+      });
+
+    expect(svc.controllerFor(same(), "b1")).toBe(svc.controllerFor(same(), "b1"));
+  });
 });
 
 describe("probeAll", () => {

@@ -1,5 +1,6 @@
 import type { Config, Proxy } from "../../shared/schema.ts";
 import { ClashController } from "./clash/controller.ts";
+import { credentialFingerprint } from "./credentialFingerprint.ts";
 import { DispatcherPool, type TimeoutConfig } from "./dispatcher.ts";
 import { bridgeSelectorGroup, describeResolveFailure, resolveProxy } from "./pool.ts";
 import { probeEgress, type IpEchoService, type ProbeOutcome } from "./probe.ts";
@@ -48,9 +49,17 @@ export class EgressService {
     if (!bridge) return null;
 
     const cached = this.#controllers.get(bridgeId);
-    // apiBase/secret 变了要重建,否则会继续连旧地址或用旧凭证。
-    // 只用 secret 的长度参与指纹:这个键会进诊断输出。
-    const key = `${bridge.apiBase}|${bridge.apiSecret.length}`;
+    /*
+     * apiBase/secret 变了要重建,否则会继续连旧地址或用旧凭证 ——
+     * Controller 在构造时就把 secret 抓走存进 `#secret`,所以复用一个旧实例
+     * 意味着改配置**完全无效**,症状是「密码明明改对了还是 401」。
+     *
+     * secret 用 `credentialFingerprint` 而**不是** `.length`:等长的两个
+     * secret 长度指纹相同 → 键不变 → 旧实例被复用。这恰好命中最常见的
+     * 修配置动作(把一个打错的密码改成另一个同长度的正确密码),而它
+     * 一声不响。这条规则与 dispatcher 的代理口令共用同一个实现。
+     */
+    const key = `${bridge.apiBase}|${credentialFingerprint(bridge.apiSecret)}`;
     if (cached && this.#controllerKeys.get(bridgeId) === key) return cached;
 
     const controller = new ClashController(bridge, {

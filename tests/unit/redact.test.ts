@@ -328,4 +328,92 @@ describe("safeErrorMessage", () => {
     safeErrorMessage(new Error("a".repeat(200_000)));
     expect(Date.now() - started).toBeLessThan(100);
   });
+
+  /*
+   * cause 链。动机是一次真实的不可诊断故障:本机 `opencode.ai` 被企业 CA
+   * 中间人,undici 把它包成 `TypeError: fetch failed`,而真正的原因
+   * (`UNABLE_TO_GET_ISSUER_CERT_LOCALLY`)只在 `cause` 里。
+   * 先前只取 `err.message`,日志里就只有 `fetch failed` 三个词。
+   */
+  it("跟随 cause —— 上游 fetch failed 要带出真正的原因", () => {
+    const root = new Error("unable to get local issuer certificate");
+    (root as Error & { code?: string }).code = "UNABLE_TO_GET_ISSUER_CERT_LOCALLY";
+    const wrapped = new TypeError("fetch failed", { cause: root });
+
+    const msg = safeErrorMessage(wrapped);
+    expect(msg).toContain("fetch failed");
+    expect(msg).toContain("unable to get local issuer certificate");
+  });
+
+  it("每一层 cause 都各自脱敏 —— 跟随 cause 不得放宽脱敏", () => {
+    const root = new Error("connect to https://user:hunter2@proxy.invalid failed");
+    const wrapped = new TypeError("fetch failed", {
+      cause: new Error("Bearer zen-fake-abcdefgh12345", { cause: root }),
+    });
+
+    const msg = safeErrorMessage(wrapped);
+    expect(msg).not.toContain("hunter2");
+    expect(msg).not.toContain("abcdefgh12345");
+  });
+
+  /*
+   * 环保护的断言写法改过一次。
+   *
+   * 第一版断言的是「不挂住」,而它**结构上无法失败**:去掉环保护后
+   * `MAX_CAUSE_DEPTH` 照样会在第 4 层停下,所以永远不挂 —— 那是
+   * 纪律「变异存活的第二类:条件被另一层顺带满足」。环保护真正独有的
+   * 后果在**输出**上:没有它,一条互引用链会打印成
+   * `甲 ← 乙 ← 甲 ← 乙`(自引用则是同一句重复四遍),
+   * 即日志里一段纯噪音。断言改成钉这个。
+   */
+  it("自引用的 cause 只出现一次,不重复刷满日志", () => {
+    const loop = new Error("自引用") as Error & { cause?: unknown };
+    loop.cause = loop;
+
+    // 去掉环保护时这里是 "自引用 ← 自引用 ← 自引用 ← 自引用"。
+    expect(safeErrorMessage(loop)).toBe("自引用");
+  });
+
+  it("互引用的两个 cause 各只出现一次", () => {
+    const a = new Error("甲") as Error & { cause?: unknown };
+    const b = new Error("乙") as Error & { cause?: unknown };
+    a.cause = b;
+    b.cause = a;
+
+    // 去掉环保护时这里是 "甲 ← 乙 ← 甲 ← 乙"。
+    expect(safeErrorMessage(a)).toBe("甲 ← 乙");
+  });
+
+  it("cause 深度有上限,不把任意深的链全拼进单行日志", () => {
+    // 造一条比上限深得多的链,最深那层的标记不应出现。
+    let err = new Error("最深层-DEEPEST");
+    for (let i = 0; i < 12; i += 1) err = new Error(`第${i}层`, { cause: err });
+
+    const msg = safeErrorMessage(err);
+    expect(msg).not.toContain("DEEPEST");
+  });
+
+  it("整条链拼接后仍有长度上界", () => {
+    let err = new Error("z".repeat(2_000));
+    for (let i = 0; i < 3; i += 1) err = new Error("y".repeat(2_000), { cause: err });
+
+    // 单层上界 500 × 4 层会到 2000 以上;这里应被再收一次。
+    expect(safeErrorMessage(err).length).toBeLessThanOrEqual(1_000);
+  });
+
+  it("非 Error 的 cause 不产出「未知错误」噪音", () => {
+    // 首层是 Error,所以有可报的消息;下层是个裸对象,不提供信息。
+    const msg = safeErrorMessage(new Error("外层", { cause: { weird: true } }));
+    expect(msg).toBe("外层");
+  });
+
+  it("message 为空的 Error 仍给固定文案", () => {
+    expect(safeErrorMessage(new Error(""))).toBe("未知错误");
+  });
+
+  it("cause 链不引入换行 —— 日志注入纪律仍成立", () => {
+    const root = new Error("第二行\n伪造 用量 chat/x: in=1");
+    const msg = safeErrorMessage(new TypeError("fetch failed", { cause: root }));
+    expect(msg).not.toContain("\n");
+  });
 });
