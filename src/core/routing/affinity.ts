@@ -227,6 +227,34 @@ export function containsStaleReasoning(text: string): boolean {
 type Binding = { workerId: string; at: number };
 
 /**
+ * 持久化接收端。
+ *
+ * `AffinityMap` 不认识 SQLite —— 它只在**每一次内存变更**之后通知这个接口，
+ * 由 `store/db/affinityStore.ts` 去落盘。这样保证一件事：
+ * **DB 忠实跟随内存，包括容量淘汰删掉的那些**。
+ *
+ * 若让持久化层自己判断该删什么，`evict()` 那条承重规则（先清过期、
+ * 再 FIFO，防「灌满表挤掉别人活跃绑定」）就会存在两份实现并迟早脱节 ——
+ * 那正是纪律 #4。这里的方向是单向的：内存决定，DB 跟随。
+ *
+ * 全部方法都**不得抛异常**：持久化是可用性改善，不是正确性的一部分，
+ * 一次写盘失败不该让转发失败（实现侧已吞掉并计数）。
+ */
+export type AffinitySink = {
+  putSession(hash: string, workerId: string, at: number, ttlMs: number): void;
+  deleteSession(hash: string): void;
+  putBlobs(hashes: readonly string[], workerId: string, at: number, ttlMs: number): void;
+  deleteBlobs(hashes: readonly string[]): void;
+};
+
+/** `restore()` 的入参：一条带 key 的绑定。与持久化层的 `StoredBinding` 同形。 */
+export type RestoredBinding = {
+  readonly hash: string;
+  readonly workerId: string;
+  readonly at: number;
+};
+
+/**
  * 两张有界的 TTL 映射。
  *
  * TTL 与容量都在**读取时**判定,不起定时器:一个自用网关不值得为过期清理
@@ -245,10 +273,35 @@ type Binding = { workerId: string; at: number };
  *
  * 不接上 `prune` 是有意的:上面两条路径已经保证内存有界,而定期全表扫描
  * 在个位数 Worker、万级条目的规模上没有收益。
+ *
+ * ## 持久化（Phase 7）
+ *
+ * 传入 `sink` 即开启镜像落盘；不传则纯内存（全部既有测试走这条路）。
+ * **查询路径不碰 sink** —— 读永远只读内存，见 `AffinitySink` 的说明。
  */
 export class AffinityMap {
   #sessions = new Map<string, Binding>();
   #blobs = new Map<string, Binding>();
+  #sink: AffinitySink | null;
+
+  constructor(sink?: AffinitySink) {
+    this.#sink = sink ?? null;
+  }
+
+  /**
+   * 启动时把已持久化的绑定装回内存。
+   *
+   * 必须按 `at` 升序传入 —— `Map` 的迭代顺序就是 FIFO 淘汰顺序，
+   * 乱序装载会让重启后「最老的那个」不再是真的最老（见 `loadSessions`）。
+   *
+   * **不触发 sink**：这些条目本来就来自 DB，再写一遍只是白费 IO。
+   * 也**不做 TTL 过滤**：调用方已按 `expires_at` 筛过，而当前 TTL
+   * 由后续读取时的 `fresh()` 收口（TTL 可能在两次启动之间被改小）。
+   */
+  restore(sessions: readonly RestoredBinding[], blobs: readonly RestoredBinding[]): void {
+    for (const b of sessions) this.#sessions.set(b.hash, { workerId: b.workerId, at: b.at });
+    for (const b of blobs) this.#blobs.set(b.hash, { workerId: b.workerId, at: b.at });
+  }
 
   /**
    * 查会话绑定的 Worker。
@@ -267,6 +320,9 @@ export class AffinityMap {
     if (found === undefined) return null;
     if (!fresh(found, now, ttlMs) || !workerExists(found.workerId)) {
       this.#sessions.delete(sessionHash);
+      // 读到失效条目就地删掉 —— DB 也要跟着删，否则重启会把它装回来，
+      // 于是「指向已删除 Worker 的绑定」每次重启复活一次。
+      this.#sink?.deleteSession(sessionHash);
       return null;
     }
     return found.workerId;
@@ -282,11 +338,15 @@ export class AffinityMap {
     // 先删再插:Map 按插入顺序迭代,这样重新绑定的会话回到队尾,淘汰的是最老的。
     this.#sessions.delete(sessionHash);
     this.#sessions.set(sessionHash, { workerId, at: now });
-    evict(this.#sessions, SESSION_CAP, now, ttlMs);
+    this.#sink?.putSession(sessionHash, workerId, now, ttlMs);
+    // 淘汰掉的键要一并从 DB 删,否则它们会在重启时复活并挤占容量。
+    const dropped = evict(this.#sessions, SESSION_CAP, now, ttlMs);
+    for (const key of dropped) this.#sink?.deleteSession(key);
   }
 
   unbindSession(sessionHash: string): void {
     this.#sessions.delete(sessionHash);
+    this.#sink?.deleteSession(sessionHash);
   }
 
   /**
@@ -323,11 +383,14 @@ export class AffinityMap {
       this.#blobs.delete(hash);
       this.#blobs.set(hash, { workerId, at: now });
     }
-    evict(this.#blobs, BLOB_CAP, now, ttlMs);
+    this.#sink?.putBlobs(hashes, workerId, now, ttlMs);
+    const dropped = evict(this.#blobs, BLOB_CAP, now, ttlMs);
+    if (dropped.length > 0) this.#sink?.deleteBlobs(dropped);
   }
 
   forgetBlobs(hashes: readonly string[]): void {
     for (const hash of hashes) this.#blobs.delete(hash);
+    this.#sink?.deleteBlobs(hashes);
   }
 
   /** 供诊断与测试。刻意不暴露键本身 —— 它们是摘要,但数量才是有用的信息。 */
@@ -337,16 +400,22 @@ export class AffinityMap {
 
   /** 丢掉过期与指向已删除 Worker 的条目。 */
   prune(now: number, ttlMs: number, workerExists: (workerId: string) => boolean): void {
+    const droppedSessions: string[] = [];
+    const droppedBlobs: string[] = [];
     for (const [key, binding] of this.#sessions) {
       if (!fresh(binding, now, ttlMs) || !workerExists(binding.workerId)) {
         this.#sessions.delete(key);
+        droppedSessions.push(key);
       }
     }
     for (const [key, binding] of this.#blobs) {
       if (!fresh(binding, now, ttlMs) || !workerExists(binding.workerId)) {
         this.#blobs.delete(key);
+        droppedBlobs.push(key);
       }
     }
+    for (const key of droppedSessions) this.#sink?.deleteSession(key);
+    if (droppedBlobs.length > 0) this.#sink?.deleteBlobs(droppedBlobs);
   }
 }
 
@@ -377,14 +446,23 @@ function fresh(binding: Binding, now: number, ttlMs: number): boolean {
  *
  * 仍保留 FIFO 兜底:全是活跃条目时总得淘汰一个,而最老的那个是最可能
  * 已经结束的。
+ *
+ * **返回被淘汰的键**（Phase 7）：持久化层要把它们一并删掉，否则重启时
+ * 它们会从 DB 复活并再次挤占容量。返回而不是在这里直接写 DB ——
+ * 这是个纯函数，让它认识存储会把「淘汰规则」与「怎么落盘」耦在一起。
  */
-function evict(map: Map<string, Binding>, cap: number, now: number, ttlMs: number): void {
-  if (map.size <= cap) return;
+function evict(map: Map<string, Binding>, cap: number, now: number, ttlMs: number): string[] {
+  if (map.size <= cap) return [];
+
+  const dropped: string[] = [];
 
   // 第一轮:清过期(含"来自未来"的,见 fresh 的说明)。
   for (const [key, binding] of map) {
-    if (map.size <= cap) return;
-    if (!fresh(binding, now, ttlMs)) map.delete(key);
+    if (map.size <= cap) return dropped;
+    if (!fresh(binding, now, ttlMs)) {
+      map.delete(key);
+      dropped.push(key);
+    }
   }
 
   // 第二轮:仍超出说明全是活跃条目 —— 按插入顺序淘汰最老的。
@@ -392,5 +470,8 @@ function evict(map: Map<string, Binding>, cap: number, now: number, ttlMs: numbe
     const oldest = map.keys().next();
     if (oldest.done === true) break;
     map.delete(oldest.value);
+    dropped.push(oldest.value);
   }
+
+  return dropped;
 }

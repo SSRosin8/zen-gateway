@@ -1,5 +1,5 @@
 import { DatabaseSync } from "node:sqlite";
-import { mkdir } from "node:fs/promises";
+import { chmod, mkdir, stat } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { dataDir } from "../config.ts";
 import { MIGRATIONS, TARGET_VERSION } from "./migrations.ts";
@@ -84,9 +84,51 @@ export function migrate(db: DatabaseSync): number {
   return version;
 }
 
-/** 供服务端启动使用:确保目录存在后打开。 */
+/**
+ * 供服务端启动使用:确保目录存在后打开。
+ *
+ * ## 为什么要显式 chmod
+ *
+ * SQLite 按进程 umask 建文件,实测出来是 **0644** —— 而本项目对 `data/`
+ * 下的东西一律 0600(`config.json`、日志、state 文件都是)。库里存着会话
+ * 摘要、Worker id 与用量明细:不是凭证,但足以还原"谁在什么时候用了哪个
+ * 账号跑了多少 token",而且这张表会进备份与诊断导出。
+ *
+ * `data/` 目录本身是 0700,所以同机其他用户实际进不来 —— 但依赖目录权限
+ * 是**单点防护**:任何一次目录权限被改宽(手工 chmod、复制到别处、
+ * 打包进压缩文件)都会让文件权限直接暴露出来。与 `config.ts` 的做法一致:
+ * 目录与文件各自都要对。
+ *
+ * **WAL 与 SHM 也要一起改**:它们与主库同目录、同样含数据
+ * (`-wal` 里是尚未 checkpoint 的完整页面)。只改主库会留下两个 0644 的
+ * 旁路文件,那是"修了一半"。
+ */
 export async function openRuntimeDb(root?: string): Promise<DatabaseSync> {
   const file = dbPath(root);
   await mkdir(dirname(file), { recursive: true, mode: 0o700 });
-  return openDb(file);
+  const db = openDb(file);
+  await hardenDbFiles(file);
+  return db;
+}
+
+/** 库文件模式。与 `config.ts` 的 `FILE_MODE` 同值,理由见 `openRuntimeDb`。 */
+const DB_FILE_MODE = 0o600;
+
+/**
+ * 把库文件及其 WAL/SHM 旁路文件收到 0600。
+ *
+ * 失败不抛:权限收紧失败不该让网关起不来(例如库在一个不支持 chmod 的
+ * 文件系统上)。但也不静默 —— 打一行,让它可被发现。
+ */
+async function hardenDbFiles(file: string): Promise<void> {
+  for (const path of [file, `${file}-wal`, `${file}-shm`]) {
+    try {
+      const st = await stat(path);
+      if ((st.mode & 0o777) !== DB_FILE_MODE) await chmod(path, DB_FILE_MODE);
+    } catch (err) {
+      // WAL/SHM 在某些时刻不存在 —— 那不是错误。
+      if ((err as NodeJS.ErrnoException).code === "ENOENT") continue;
+      console.error(`无法收紧 ${path} 的权限(库仍可用):${(err as Error).message}`);
+    }
+  }
 }

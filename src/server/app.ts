@@ -10,7 +10,7 @@ import { Scheduler } from "../core/routing/scheduler.ts";
 import { ModelCatalog } from "../core/models/catalog.ts";
 import { relayAuth } from "./middleware/relayAuth.ts";
 import { loopbackOnly } from "./middleware/loopbackOnly.ts";
-import { createRelayRoutes } from "./routes/relay.ts";
+import { createRelayRoutes, type StatsSink } from "./routes/relay.ts";
 import { createModelsRoutes } from "./routes/models.ts";
 
 const STARTED_AT = Date.now();
@@ -78,6 +78,14 @@ export type AppDeps = {
   /** 注入以便测试推进时间。 */
   readonly clock?: () => number;
   readonly log?: (message: string) => void;
+  /**
+   * 统计写入（Phase 7）。不传则不记统计 —— 转发行为完全不变。
+   *
+   * 与 scheduler/catalog 不同,这个**不在这里兜底 new 一个**:
+   * 它需要一个打开的数据库,而"装配层顺手开个库"会让每个测试都落盘。
+   * 由 `index.ts` 显式注入。
+   */
+  readonly stats?: StatsSink;
 };
 
 export function createApp(deps?: AppDeps): Hono {
@@ -157,6 +165,7 @@ export function createApp(deps?: AppDeps): Hono {
     ...(deps.newId !== undefined ? { newId: deps.newId } : {}),
     ...(deps.clock !== undefined ? { clock: deps.clock } : {}),
     ...(deps.log !== undefined ? { log: deps.log } : {}),
+    ...(deps.stats !== undefined ? { stats: deps.stats } : {}),
   };
 
   app.route("/", createRelayRoutes(relayDeps));

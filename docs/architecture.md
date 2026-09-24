@@ -344,11 +344,14 @@ schema：实测 +57ms，而 `service.mjs status` 全程只有 51ms。
 ### 当前已知缺口
 
 1. **配置热更新只有形状没有入口**：`configOf()` 已做成函数，但没有改配置的 API（→ Phase 9）
-2. **亲和只在内存里**：`session_affinity` / `blob_affinity` 两张表结构已就绪，但服务端
-   还没打开 `runtime.db`。重启会丢绑定 —— 后果是每条进行中的会话下一轮重挑一次
-   Worker，不是数据损坏（→ Phase 7）
-3. **用量只进日志，没有聚合**：`parseUsage` 已接在流末尾结算钩子上（三个面都实现了），
-   但消费方式只有一行日志。写进 `runtime.db` 并按 model／Worker 聚合是 Phase 7（→ Phase 7）
+2. ~~**亲和只在内存里**~~ —— **Phase 7 已解决**。`AffinityMap` 接了一个
+   `AffinitySink`，每次内存变更（绑定/解绑/学习/遗忘/容量淘汰/prune）都镜像落盘，
+   启动时按 `bound_at` 升序装回。**查询路径仍然零 DB 读** —— `node:sqlite` 是
+   同步 API，把亲和查询换成查库等于在每请求的关键路径上阻塞事件循环。
+   代价是 `kill -9` 可能丢最后一刻的绑定（后果是那条会话重挑一次 Worker）
+3. ~~**用量只进日志，没有聚合**~~ —— **Phase 7 已解决**。`store/db/stats.ts`
+   接在同一个 `onDone` 钩子上，并提供 per-model／per-Worker 聚合与派生比值。
+   **尚无 HTTP 端点**：管理 API 的形状留给 Phase 9 定，现在定死没有收益（→ Phase 9 读它）
 4. **探测目标与转发目标不同域**（见上文出口隔离节）
 5. **调度与目录状态没有查看入口**：`Scheduler.snapshot()` 与 `ModelCatalog.status()`
    都已实现且不含凭证，但**两者都没有生产调用点** —— `npm run status` 只报进程信息，
@@ -380,7 +383,12 @@ schema：实测 +57ms，而 `service.mjs status` 全程只有 51ms。
    默认配置下**所有**模型的 `/v1/messages` 请求都会被拒 —— 而那个面刚刚验证可用。
    所以这里要先定清楚它的语义（是"放行闸门"还是"后台展示用的提示"），
    再决定默认值。眼下当作后备展示数据，不参与判定（→ Phase 9 的 Models 页）
-11. **目录拉空与上游不可达在外部看起来一样**：两者都让 `/v1/models` 返回
+11. **统计写失败只能从 `writeFailures()` 看，没有生产读者**：`StatsStore` 与
+   `AffinityStore` 都吞掉写异常并计数（统计是诊断设施，不该让转发失败），
+   但那个计数目前**没有调用方** —— 与 `Scheduler.snapshot()` 同一个形态。
+   一个一直写失败的库会安静地给出全 0 报表，而那看起来像「没人用」。
+   `doctor.mjs` 应当报它（→ Phase 8）
+12. **目录拉空与上游不可达在外部看起来一样**：两者都让 `/v1/models` 返回
    `data: []` 加 HTTP 200。已实测的一个成因是 TLS 中间人 —— 本机
    `opencode.ai` 被内网 DNS 指向内网地址、证书由企业 CA 签发，而 Node 不读
    系统 CA 库（需 `NODE_EXTRA_CA_CERTS`，见 `docs/usage.md`）。日志现在能

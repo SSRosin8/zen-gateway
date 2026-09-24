@@ -339,10 +339,44 @@ describe("尝试记录", () => {
     if (r.ok) expect(r.attempts).toHaveLength(3);
   });
 
-  it("成功的那次记录 failure 为 null", async () => {
+  it("成功的那次记录 failure 为 null,并带上状态码与耗时", async () => {
     const records: AttemptRecord[] = [];
     const d = deps([jsonResponse(200, {})]);
-    await runRetryChain({ ...baseInput, targets: targets(1), deps: d.deps, onAttempt: (x) => records.push(x) });
-    expect(records[0]).toEqual({ workerId: "w1", failure: null, blameWorker: false, retryAfter: null });
+    // 注入时钟:耗时要能被确切断言,而不是"大于等于 0"那种恒真的写法。
+    let t = 1_000;
+    await runRetryChain({
+      ...baseInput,
+      targets: targets(1),
+      deps: d.deps,
+      onAttempt: (x) => records.push(x),
+      clock: () => (t += 25),
+    });
+    expect(records[0]).toEqual({
+      workerId: "w1",
+      failure: null,
+      blameWorker: false,
+      retryAfter: null,
+      // Phase 7 新增:统计要按尝试记状态码与耗时。
+      status: 200,
+      latencyMs: 25,
+    });
+  });
+
+  /*
+   * 建连之前就失败时 `status` 必须是 **null** 而不是 0。
+   *
+   * 0 会让「网关自己没连上」和「上游返回了某个码」在统计里混成一类,
+   * 而这两者的排查方向完全相反(查本机出口 vs 查上游)。
+   */
+  it("传输失败的那次 status 为 null,不是 0", async () => {
+    const records: AttemptRecord[] = [];
+    const d = deps([new Error("连不上")]);
+    await runRetryChain({
+      ...baseInput,
+      targets: targets(1),
+      deps: d.deps,
+      onAttempt: (x) => records.push(x),
+    });
+    expect(records[0]?.status).toBeNull();
   });
 });

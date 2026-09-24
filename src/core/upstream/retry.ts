@@ -39,7 +39,7 @@ export type AttemptTarget = {
   readonly proxyId: string | null;
 };
 
-/** 单次尝试的结局,供调用方记账(Phase 5 接冷却与亲和)。 */
+/** 单次尝试的结局,供调用方记账(Phase 5 接冷却与亲和,Phase 7 接统计)。 */
 export type AttemptRecord = {
   readonly workerId: string;
   /** null 表示这次尝试成功。 */
@@ -51,6 +51,15 @@ export type AttemptRecord = {
    */
   readonly blameWorker: boolean;
   readonly retryAfter: string | null;
+  /**
+   * 上游状态码。**建连之前就失败时为 null**（传输错误、出口配置错误）——
+   * 那种情况下根本没有状态码，而写 0 或 -1 会让「网关自己失败」和
+   * 「上游返回了某个码」在统计里混成一类（Phase 7 的 `upstream_attempts.status`
+   * 允许 NULL 正是为此）。
+   */
+  readonly status: number | null;
+  /** 这次尝试耗时。从发起到拿到响应头（或抛错）为止，不含读体。 */
+  readonly latencyMs: number;
 };
 
 export type RetryResult =
@@ -97,6 +106,14 @@ export type RetryInput = {
   readonly deps: UpstreamDeps;
   /** 每次尝试结束后回调,供记账。 */
   readonly onAttempt?: (record: AttemptRecord) => void;
+  /**
+   * 取当前时刻,用于算每次尝试的耗时。注入以便测试断言确切的毫秒数。
+   *
+   * 默认 `Date.now`。**刻意不用 `performance.now()`**:耗时要与
+   * `upstream_attempts.at` 的墙钟时刻记在同一行，两个时间源混用会让
+   * 「这次尝试何时开始、耗了多久」在时钟调整后互相矛盾。
+   */
+  readonly clock?: () => number;
 };
 
 /**
@@ -107,6 +124,7 @@ export type RetryInput = {
  */
 export async function runRetryChain(input: RetryInput): Promise<RetryResult> {
   const attempts: AttemptRecord[] = [];
+  const clock = input.clock ?? Date.now;
   const limit = Math.max(1, Math.min(input.maxAttempts, input.targets.length));
 
   if (input.targets.length === 0) {
@@ -157,6 +175,8 @@ export async function runRetryChain(input: RetryInput): Promise<RetryResult> {
       proxyId: target.proxyId,
     };
 
+    const startedAt = clock();
+
     let response: UndiciResponse;
     try {
       response = await fetchUpstream(req, input.deps);
@@ -175,6 +195,9 @@ export async function runRetryChain(input: RetryInput): Promise<RetryResult> {
         failure: kind,
         blameWorker: !isSetup,
         retryAfter: null,
+        // 建连之前就失败 —— 没有状态码。见 AttemptRecord.status 的说明。
+        status: null,
+        latencyMs: clock() - startedAt,
       };
       attempts.push(record);
       input.onAttempt?.(record);
@@ -199,6 +222,8 @@ export async function runRetryChain(input: RetryInput): Promise<RetryResult> {
         failure: null,
         blameWorker: false,
         retryAfter: null,
+        status: response.status,
+        latencyMs: clock() - startedAt,
       };
       attempts.push(record);
       input.onAttempt?.(record);
@@ -216,6 +241,8 @@ export async function runRetryChain(input: RetryInput): Promise<RetryResult> {
       failure,
       blameWorker,
       retryAfter: response.headers.get("retry-after"),
+      status: response.status,
+      latencyMs: clock() - startedAt,
     };
     attempts.push(record);
     input.onAttempt?.(record);

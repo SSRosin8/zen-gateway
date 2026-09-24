@@ -37,6 +37,17 @@ function attempt(over: Partial<AttemptRecord> & { workerId: string }): AttemptRe
     failure: over.failure ?? null,
     blameWorker: over.blameWorker ?? false,
     retryAfter: over.retryAfter ?? null,
+    /*
+     * Phase 7 给 `AttemptRecord` 加了 `status` / `latencyMs`（统计要按尝试
+     * 记状态码与耗时）。调度器**不读**这两个字段 —— 它只依据
+     * `failure` / `blameWorker` / `retryAfter` 判冷却，所以这里给中性默认值。
+     *
+     * 默认 `status: null` 而不是 200：调度的分支由 `failure` 决定，
+     * 给一个成功的状态码会让"失败但 status=200"这种自相矛盾的入参
+     * 看起来是合法的。null 表示"这一维度本用例不关心"。
+     */
+    status: over.status ?? null,
+    latencyMs: over.latencyMs ?? 0,
   };
 }
 

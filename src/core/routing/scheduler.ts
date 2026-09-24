@@ -3,6 +3,7 @@ import { RoutingConfigSchema } from "../../shared/schema.ts";
 import { shouldCooldown, type FailureKind } from "../failures.ts";
 import type { AttemptRecord, AttemptTarget } from "../upstream/retry.ts";
 import { AffinityMap, containsStaleReasoning } from "./affinity.ts";
+import type { AffinitySink, RestoredBinding } from "./affinity.ts";
 import { WorkerPool } from "./workerPool.ts";
 import { select, type Selection } from "./select.ts";
 
@@ -46,7 +47,7 @@ export type ScheduleContext = {
 
 export class Scheduler {
   #pool = new WorkerPool();
-  #affinity = new AffinityMap();
+  #affinity: AffinityMap;
   /**
    * 上一次 sync 用的配置对象**引用**。
    *
@@ -70,8 +71,27 @@ export class Scheduler {
   /** 注入以便测试断言确切的冷却时长。 */
   readonly #jitter: () => number;
 
-  constructor(opts?: { jitter?: () => number }) {
+  /**
+   * `affinitySink` 传入则亲和绑定镜像落盘（Phase 7）。
+   *
+   * 不传则纯内存 —— 全部既有单测走这条路，而它们测的是调度逻辑，
+   * 不该为此各自建一个临时数据库。
+   */
+  constructor(opts?: { jitter?: () => number; affinitySink?: AffinitySink }) {
     this.#jitter = opts?.jitter ?? Math.random;
+    this.#affinity = new AffinityMap(opts?.affinitySink);
+  }
+
+  /**
+   * 启动时把持久化的亲和绑定装回内存。
+   *
+   * 必须按 `at` 升序传入 —— 见 `AffinityMap.restore`。
+   */
+  restoreAffinity(
+    sessions: readonly RestoredBinding[],
+    blobs: readonly RestoredBinding[],
+  ): void {
+    this.#affinity.restore(sessions, blobs);
   }
 
   /** 排出候选链并落下会话绑定。 */

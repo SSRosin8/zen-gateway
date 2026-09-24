@@ -1,10 +1,11 @@
+import { randomUUID } from "node:crypto";
 import { Hono, type Context } from "hono";
 import type { Config } from "../../shared/schema.ts";
 import type { ProtocolRegistry } from "../../core/protocols/registry.ts";
 import type { ProtocolSurface } from "../../core/protocols/types.ts";
 import { judgeFree } from "../../core/models/free.ts";
 import { ModelCatalog, catalogIdentityOf, slotOf } from "../../core/models/catalog.ts";
-import { createUsageCollector, describeUsage } from "../../core/models/usage.ts";
+import { createUsageCollector, describeUsage, type TokenUsage } from "../../core/models/usage.ts";
 import { redactText } from "../../shared/redact.ts";
 import { buildUpstreamHeaders } from "../../core/upstream/headers.ts";
 import { upstreamUrl } from "../../core/upstream/url.ts";
@@ -73,6 +74,41 @@ export type RelayDeps = {
   /** 注入以便测试断言确切的冷却与 TTL 边界。 */
   readonly clock?: () => number;
   readonly log?: (message: string) => void;
+  /**
+   * 统计写入（Phase 7）。不传则不记 —— 统计是诊断设施，
+   * 不传它的测试（大多数）测的是转发行为本身，不该为此各建一个库。
+   *
+   * 实现侧**不得抛异常**：写统计失败绝不能让一个本来会成功的转发失败。
+   * 见 `StatsStore` 的类注释。
+   */
+  readonly stats?: StatsSink;
+};
+
+/**
+ * 转发路径需要的统计写入面。
+ *
+ * 只声明这两个方法而不直接依赖 `StatsStore`：`src/core/` 与 `src/server/routes/`
+ * 不该认识 SQLite（`store/` 才是持久化层），而窄接口也让测试能塞一个
+ * 记录调用的假实现，断言「记了什么」而不是「库里有什么」。
+ */
+export type StatsSink = {
+  recordAttempt(row: {
+    requestId: string;
+    attemptIndex: number;
+    workerId: string;
+    protocol: string;
+    model: string | null;
+    status: number | null;
+    failureKind: string | null;
+    latencyMs: number | null;
+    at: number;
+  }): void;
+  recordUsage(row: {
+    model: string;
+    workerId: string;
+    at: number;
+    usage: TokenUsage | null;
+  }): void;
 };
 
 /** 客户端请求体上限。转发面对多模态保持宽松,但不能无界。 */
@@ -342,6 +378,19 @@ async function handleRelay(
   }
 
   /* ---- 6. 重试链 ---- */
+
+  /*
+   * 一条客户端请求一个 `requestId`,它的每次上游尝试共用它。
+   *
+   * 这正是统计里最容易搞错的那条语义:**请求数 ≠ 尝试数**。
+   * 一条 `w1 限流 → w2 成功` 的链是一个请求、两次尝试,而两个数字
+   * 都要能查到(`requestCounts()` 用 `DISTINCT request_id` 数前者)。
+   *
+   * 复用 `deps.newId`(测试注入的那个),不另起一个随机源。
+   */
+  const requestId = (deps.newId ?? randomUUID)();
+  let attemptIndex = 0;
+
   let result;
   try {
     result = await runRetryChain({
@@ -360,7 +409,33 @@ async function handleRelay(
        * `nowOf()` 在回调里**现取**,不用 `planNow`:这个回调在该次尝试
        * 结束时同步触发,所以此刻就是失败发生的时刻。见上面 `nowOf` 的说明。
        */
-      onAttempt: (record) => deps.scheduler.record(record, config, nowOf()),
+      onAttempt: (record) => {
+        const at = nowOf();
+        deps.scheduler.record(record, config, at);
+        /*
+         * 统计与调度**分开记**,顺序上调度在前。
+         *
+         * 调度记账影响正确性(冷却),统计只是诊断 —— 与 `onDone` 里
+         * 「不变量相关的动作排在诊断动作之前」同一条规则。`StatsSink` 的
+         * 实现已保证不抛,但顺序仍按这条规则摆:它不依赖实现的承诺。
+         *
+         * `attemptIndex` 从 0 起,与 `result.attempts` 的下标一致 ——
+         * 用一个自增闭包而不是读 `attempts.length`:那个数组在 retry.ts 里,
+         * 这里拿不到,而两处各数一遍正是纪律 #4 的形态。
+         */
+        deps.stats?.recordAttempt({
+          requestId,
+          attemptIndex: attemptIndex++,
+          workerId: record.workerId,
+          protocol: surface.id,
+          // model 是客户端可控字符串 —— 进库也要限长,理由同进日志。
+          model: redactText(model, 128),
+          status: record.status,
+          failureKind: record.failure,
+          latencyMs: record.latencyMs,
+          at,
+        });
+      },
       buildHeaders: (target) =>
         buildUpstreamHeaders({
           clientHeaders,
@@ -502,6 +577,29 @@ async function handleRelay(
            */
           if (usage.dropped()) {
             deps.log?.(`用量 ${label}: 响应过大,本次未能完整解析用量(不影响转发)`);
+          }
+
+          /*
+           * 用量入库(Phase 7)。
+           *
+           * **`totals === null` 也要记** —— 那一行进 `requests_without_usage`。
+           * 少记它会让「usage 覆盖率」的分母漏掉这次请求,于是覆盖率虚高:
+           * 一个「上游从不报用量」的模型会显示成 100% 覆盖。规划里写的
+           * 「缺失的 usage 如实显示为缺失,不估算」正是这个意思 ——
+           * 而"如实"的前提是分母得数上它。
+           *
+           * `workerId` 为 null 时不记:那是失败路径(见 pipeOrFail 的参数说明),
+           * 没有承接者,记进任何 Worker 名下都是错的。用量归属必须是**实际
+           * 承接者**,不是候选链首位。
+           */
+          if (workerId !== null) {
+            deps.stats?.recordUsage({
+              // 与日志同一份限长处理 —— 两处都不能让客户端字符串无界进去。
+              model: redactText(model, 128),
+              workerId,
+              at: nowOf(),
+              usage: totals,
+            });
           }
         },
       });

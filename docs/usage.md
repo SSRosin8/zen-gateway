@@ -385,5 +385,64 @@ curl -s -H "Authorization: Bearer <apiSecret>" \
 格式是 `面/模型`，随后是 token 数。为 0 的缓存字段不打印。
 **只有数字，不含任何响应内容** —— 对话正文绝不进日志。
 
-上游没报用量时**不打这一行**（免费模型未必报），所以看不到它不代表出错。
-写进数据库并按模型／Worker 聚合是 Phase 7 的事，眼下只有这行日志。
+上游没报用量时**不打这一行**（免费模型未必报），所以看不到它不代表出错 ——
+但那次请求仍会进数据库的 `requests_without_usage`（见下）。
+
+---
+
+## 运行时数据库
+
+`data/runtime.db`（SQLite WAL，0600，与 WAL/SHM 旁路文件一起收紧）。
+存**可再生的运行时数据**：用量统计、上游尝试日志、Worker 计数、探测结果、
+会话与推理指纹亲和。凭证与用户意图全在 `config.json`，不在这里。
+
+**打不开不影响启动**：统计与亲和持久化都是可用性改善，不是转发的正确性前提。
+库坏了（磁盘满、档位高于本程序）网关照常起，只是退回纯内存 —— 日志会说明。
+想重置统计直接删掉它，重启自动重建（**只丢统计，不丢配置**）。
+
+### 两条最容易搞错的语义
+
+**请求数 ≠ 尝试数。** 一条 `w1 限流 → w2 成功` 的重试链是**一个**客户端请求、
+**两次**上游尝试。`upstream_attempts` 按尝试记行、用 `request_id` 串起同一条链，
+所以两个数字都能查到，且每次尝试都在对应 Worker 名下可见。
+
+**缺失的用量如实记为缺失，不估算。** `model_usage` 把 `requests_with_usage` 与
+`requests_without_usage` 分开计数。少记后者会让覆盖率虚高 ——
+一个「上游从不报用量」的模型会显示成 100% 覆盖。
+
+用量**归属实际承接者**：上面那条链里 token 记在 **w2** 名下，不是候选链首位的 w1。
+多账号场景下「哪个账号烧了多少」正是最要紧的那个数字。
+
+### 亲和持久化
+
+重启后会话粘滞**不归零**：绑定在每次变更时镜像落盘，启动时装回内存
+（日志里会有 `已恢复亲和绑定:会话 N 条、推理指纹 M 条`）。
+
+内存仍是唯一的**查询**来源 —— `node:sqlite` 是同步 API，把亲和查询换成查库
+等于在每请求的关键路径上阻塞事件循环。代价是进程被 `kill -9` 时可能丢掉
+最后一刻的绑定，后果只是那条会话下一轮重挑一次 Worker。
+
+两张亲和表只存 **sha256 摘要**，且 schema 的 `CHECK` 把这条从约定变成结构约束
+（长度 64 且只含小写十六进制）——原始会话标识与推理内容结构上进不去。
+
+### 现在还没有查看入口
+
+聚合查询已经实现（per-model token、Worker 计数、缓存命中率、usage 覆盖率、
+最近尝试），但**没有 HTTP 端点** —— 管理 API 的形状留给 Phase 9。
+眼下要看数据直接查库：
+
+```bash
+# 不依赖外部 sqlite3 命令 —— 用 Node 内置的 node:sqlite（本项目的运行时要求）
+node -e 'const{DatabaseSync}=require("node:sqlite");
+const db=new DatabaseSync("data/runtime.db",{readOnly:true});
+console.table(db.prepare("SELECT model, worker_id, input_tokens, output_tokens, requests_with_usage, requests_without_usage FROM model_usage").all())'
+```
+
+装了 `sqlite3` 命令的话也可以直接查（注意它不在本项目的依赖里）：
+
+```bash
+sqlite3 data/runtime.db "SELECT model, input_tokens, output_tokens, requests_with_usage, requests_without_usage FROM model_usage"
+```
+
+统计写失败会被吞掉（不该让转发失败）但**有计数**，只是那个计数目前也没有
+读者 —— `doctor` 会报它（Phase 8）。一个一直写失败的库会安静地给出全 0 报表。

@@ -5,6 +5,11 @@ import { resolvePort } from "../store/port.ts";
 import { EgressService } from "../core/proxy/egress.ts";
 import { ModelCatalog, catalogIdentityOf } from "../core/models/catalog.ts";
 import { ConfigError } from "../store/config.ts";
+import { Scheduler } from "../core/routing/scheduler.ts";
+import { openRuntimeDb } from "../store/db/open.ts";
+import { StatsStore } from "../store/db/stats.ts";
+import { AffinityStore } from "../store/db/affinityStore.ts";
+import { safeErrorMessage } from "../shared/redact.ts";
 
 /**
  * 服务入口。
@@ -52,12 +57,75 @@ async function main(): Promise<void> {
    * Phase 3 还没有改配置的入口,所以这里返回的始终是启动时那份;
    * 但把形状定成函数,Phase 9 加管理 API 时就不必回头改所有调用点。
    */
+  /*
+   * 运行时数据库（Phase 7）。
+   *
+   * ## 打不开**不阻止启动**
+   *
+   * 统计与亲和持久化都是**可用性改善**，不是转发的正确性前提：
+   * 前者是诊断设施，后者只影响「重启后要不要重挑一次 Worker」。
+   * 一个坏掉的统计库（磁盘满、档位高于本程序、文件权限错）让整个网关
+   * 起不来是错误的取舍 —— 用户要的是转发能用。
+   *
+   * 所以这里失败只打一行可自查的话然后继续，`stats`/`affinitySink`
+   * 保持未注入，转发路径退回纯内存（Phase 6 的行为）。
+   *
+   * 与 `loadConfig` 的处置刻意不同：配置坏了**必须**拒绝启动，
+   * 因为那意味着凭证、出口绑定、放行规则都是未知的 —— 那是正确性。
+   */
+  let stats: StatsStore | undefined;
+  let affinityStore: AffinityStore | undefined;
+  try {
+    const db = await openRuntimeDb();
+    stats = new StatsStore(db);
+    affinityStore = new AffinityStore(db);
+  } catch (err) {
+    console.error(
+      `运行时数据库不可用,统计与亲和持久化本次停用(转发不受影响):${safeErrorMessage(err)}`,
+    );
+  }
+
+  /*
+   * 调度器在这里建，而不是让 `createApp` 兜底 new 一个 ——
+   * 它需要拿到 `affinityStore` 才能镜像落盘，而装配层不该认识数据库。
+   */
+  const scheduler = new Scheduler(
+    affinityStore !== undefined ? { affinitySink: affinityStore } : {},
+  );
+
+  /*
+   * 装回上次的亲和绑定。
+   *
+   * **在开始监听之前**做完：装载是同步的本地读，很快；而若放在监听之后，
+   * 头几个请求会看到一张空表，于是刚重启的那一刻粘滞失效 ——
+   * 那正是持久化要解决的问题本身。
+   *
+   * 失败只打一行：内存里那份是空的，行为退回 Phase 6，不影响正确性。
+   */
+  if (affinityStore !== undefined) {
+    try {
+      const now = Date.now();
+      // 先清过期行，再读 —— 少读一批马上会被内存判废的条目。
+      affinityStore.pruneExpired(now);
+      const sessions = affinityStore.loadSessions(now);
+      const blobs = affinityStore.loadBlobs(now);
+      scheduler.restoreAffinity(sessions, blobs);
+      if (sessions.length > 0 || blobs.length > 0) {
+        console.log(`已恢复亲和绑定:会话 ${sessions.length} 条、推理指纹 ${blobs.length} 条`);
+      }
+    } catch (err) {
+      console.error(`亲和绑定恢复失败,本次从空表开始:${safeErrorMessage(err)}`);
+    }
+  }
+
   const catalog = new ModelCatalog({ log: (message) => console.error(message) });
 
   const app = createApp({
     configOf: () => config,
     egress,
     catalog,
+    scheduler,
+    ...(stats !== undefined ? { stats } : {}),
     log: (message) => console.error(message),
   });
 

@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { mkdtemp, rm, mkdir } from "node:fs/promises";
+import { mkdtemp, rm, mkdir, stat } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
@@ -215,6 +215,34 @@ describe("结构约束", () => {
         .all() as Array<{ worker_id: string }>;
       // 请求数 ≠ 尝试数，但每次尝试都要在对应 Worker 上可见。
       expect(rows.map((r) => r.worker_id)).toEqual(["w1", "w2"]);
+    } finally {
+      db.close();
+    }
+  });
+});
+
+describe("库文件权限", () => {
+  /*
+   * 本项目对 `data/` 下的东西一律 0600（config.json、日志、state 都是），
+   * 而 SQLite 按 umask 建文件 —— 实测是 **0644**。库里有会话摘要、
+   * Worker id 与用量明细：不是凭证，但足以还原「谁在什么时候用哪个账号
+   * 跑了多少 token」，而且这张库会进备份与诊断导出。
+   *
+   * `data/` 是 0700 所以同机其他用户实际进不来 —— 但依赖目录权限是**单点
+   * 防护**，任何一次目录权限被改宽都会让文件权限直接暴露。
+   */
+  it("openRuntimeDb 把库与 WAL/SHM 都收到 0600", async () => {
+    const { openRuntimeDb, dbPath } = await import("../../src/store/db/open.ts");
+    const db = await openRuntimeDb(root);
+    try {
+      // 写一笔，确保 WAL/SHM 真的被创建出来（空库可能还没有）。
+      db.exec("INSERT INTO worker_stats (worker_id) VALUES ('w1')");
+
+      const target = dbPath(root);
+      for (const path of [target, `${target}-wal`, `${target}-shm`]) {
+        const st = await stat(path);
+        expect(st.mode & 0o777, `${path} 应当是 0600`).toBe(0o600);
+      }
     } finally {
       db.close();
     }
