@@ -108,8 +108,12 @@ export const MIGRATIONS: Migration[] = [
       --
       -- 只查长度是不够的:实测 64 个字符的原始推理文本、64 个 CJK 字符
       -- (192 字节)都能照常写进来,于是注释里「不可能有人存进原始推理内容」
-      -- 这句是假的。加上字符集限制后,只有小写十六进制能通过 ——
-      -- 正好是 Node 的 digest("hex") 输出形态,任何自然语言都进不来。
+      -- 这句是假的。加上字符集限制后,只有小写十六进制能通过。
+      --
+      -- ⚠️ 这一版仍然可被 NUL 字节绕过(第七轮审核实测):length() 与 GLOB
+      -- 对 TEXT 都在首个 NUL 处停止,所以「64 个 hex + 一个 NUL + 任意明文」通过。
+      -- 档位 2 补了 length(CAST(... AS BLOB)) = 64 才真正收口 ——
+      -- 看这张表的当前形状要读档位 2,不是这里。
       CREATE TABLE blob_affinity (
         blob_hash   TEXT PRIMARY KEY CHECK (
                       length(blob_hash) = 64
@@ -145,6 +149,80 @@ export const MIGRATIONS: Migration[] = [
         started_at        INTEGER NOT NULL,
         updated_at        INTEGER NOT NULL
       ) STRICT;
+    `,
+  },
+  {
+    version: 2,
+    name: "hash-check-counts-bytes",
+    /*
+     * 修掉一个**被第七轮审核实测绕过**的约束。
+     *
+     * 档位 1 的两个 CHECK 写的是 `length(hash) = 64`,而 SQLite 的 `length()`
+     * 对 TEXT **在首个 NUL 字节处停止计数**,`GLOB` 同样只看 NUL 之前那段。
+     * 于是「64 个 hex 字符 + 一个 NUL 字节 + 任意明文」完整通过校验:
+     *
+     *   length('abc' || char(0) || 'defghij')          → 3
+     *   ('aaa'||char(0)||'ZZZ!!') NOT GLOB '*[^0-9a-f]*' → 1（通过）
+     *
+     * 实测经 `AffinityStore.putSession()` 写入这样一个值:`writeFailures` 为 0,
+     * SQL 侧看到的 `length()` 是 64 而实际字节数 99,**明文完整落在磁盘文件里**
+     * (wal_checkpoint 后 `strings` 搜得到),而 JS 读回时在 NUL 处被截断 ——
+     * 也就是说所有读路径都看不见那条尾巴。
+     *
+     * 补 `length(CAST(hash AS BLOB)) = 64`:BLOB 的长度是真实字节数,NUL
+     * 不再能截断判定。两个条件都留着 —— 字符长度与字节长度**都**必须是 64
+     * 才能排除多字节字符(64 个 CJK 是 64 字符 / 192 字节,单看任一个都不够)。
+     *
+     * ## 为什么这条值得一个迁移而不是"反正生产路径不会触发"
+     *
+     * 今天确实触发不到:生产路径每个键都经 `digestOf()`,输出恒为纯 hex。
+     * 但档位 1 的注释声称「把『只存 sha256 摘要』从约定**变成结构约束**」、
+     * 「任何自然语言都进不来」—— 而那句是假的。**假的强保证比没有保证更危险**:
+     * 下一条写入路径(Phase 9 的管理 API 手工绑定、导入/恢复工具、诊断回灌)
+     * 的作者会读这句注释,然后不再自己检查。
+     *
+     * 迁移方式是**重建表 + 搬数据**:SQLite 不支持 ALTER 修改 CHECK。
+     * 旧行全部来自 `digestOf()` 所以必然合规;万一有不合规的(手工改过库、
+     * 从别处恢复的库),`INSERT INTO ... SELECT` 会被新 CHECK 拦下并让整条
+     * 迁移回滚 —— 那是对的:一个装着非摘要值的库应当拒绝启动并让人来看,
+     * 而不是静默丢掉那些行。
+     */
+    up: `
+      CREATE TABLE session_affinity_new (
+        session_hash  TEXT PRIMARY KEY CHECK (
+                        length(session_hash) = 64
+                        AND length(CAST(session_hash AS BLOB)) = 64
+                        AND session_hash NOT GLOB '*[^0-9a-f]*'
+                      ),
+        worker_id     TEXT NOT NULL,
+        bound_at      INTEGER NOT NULL,
+        expires_at    INTEGER NOT NULL
+      ) STRICT;
+
+      INSERT INTO session_affinity_new (session_hash, worker_id, bound_at, expires_at)
+        SELECT session_hash, worker_id, bound_at, expires_at FROM session_affinity;
+
+      DROP TABLE session_affinity;
+      ALTER TABLE session_affinity_new RENAME TO session_affinity;
+      CREATE INDEX idx_session_expires ON session_affinity (expires_at);
+
+      CREATE TABLE blob_affinity_new (
+        blob_hash   TEXT PRIMARY KEY CHECK (
+                      length(blob_hash) = 64
+                      AND length(CAST(blob_hash AS BLOB)) = 64
+                      AND blob_hash NOT GLOB '*[^0-9a-f]*'
+                    ),
+        worker_id   TEXT NOT NULL,
+        learned_at  INTEGER NOT NULL,
+        expires_at  INTEGER NOT NULL
+      ) STRICT;
+
+      INSERT INTO blob_affinity_new (blob_hash, worker_id, learned_at, expires_at)
+        SELECT blob_hash, worker_id, learned_at, expires_at FROM blob_affinity;
+
+      DROP TABLE blob_affinity;
+      ALTER TABLE blob_affinity_new RENAME TO blob_affinity;
+      CREATE INDEX idx_blob_expires ON blob_affinity (expires_at);
     `,
   },
 ];

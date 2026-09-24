@@ -11,7 +11,7 @@ import { ModelCatalog, catalogIdentityOf } from "../../src/core/models/catalog.t
 import { Scheduler } from "../../src/core/routing/scheduler.ts";
 import { ConfigSchema, type Config } from "../../src/shared/schema.ts";
 import { openDb } from "../../src/store/db/open.ts";
-import { StatsStore } from "../../src/store/db/stats.ts";
+import { StatsStore, dayKey } from "../../src/store/db/stats.ts";
 import { AffinityStore } from "../../src/store/db/affinityStore.ts";
 
 /**
@@ -110,13 +110,14 @@ async function warmCatalog(cfg: Config): Promise<ModelCatalog> {
   return catalog;
 }
 
-async function makeApp(cfg: Config, scheduler?: Scheduler) {
+async function makeApp(cfg: Config, scheduler?: Scheduler, clock?: () => number) {
   return createApp({
     configOf: () => cfg,
     egress,
     catalog: await warmCatalog(cfg),
     scheduler: scheduler ?? new Scheduler({ affinitySink: affinityStore }),
     stats,
+    ...(clock !== undefined ? { clock } : {}),
     log: () => {},
   });
 }
@@ -145,8 +146,15 @@ describe("统计真的经转发路径落库", () => {
       status: 200,
       failureKind: null,
     });
-    // 耗时是真实测量的，不是写死的 0。
-    expect(attempt?.latencyMs).toBeGreaterThanOrEqual(0);
+    /*
+     * 耗时**不断言具体值**（真实 IO，无法稳定），但要断言它不是写死的 ——
+     * 先前这里写 `toBeGreaterThanOrEqual(0)`，而耗时永远 ≥0，于是把
+     * `latencyMs: record.latencyMs` 改成 `latencyMs: 0` 后全套测试仍然全绿
+     * （第七轮审核实测）。唯一能让那条断言红的值是 null。
+     *
+     * 真正钉住"从转发路径流到 DB"这件事的是下面那条注入时钟的用例。
+     */
+    expect(attempt?.latencyMs).not.toBeNull();
 
     const [usageRow] = stats.modelUsage();
     expect(usageRow).toMatchObject({
@@ -194,6 +202,62 @@ describe("统计真的经转发路径落库", () => {
   });
 });
 
+describe("时刻真的从转发路径流到库里", () => {
+  /*
+   * 第七轮审核查出的最有后果的空壳：把 `recordAttempt` 与 `recordUsage` 的
+   * `at` 字段**双双写死 0**，45 条相关测试全绿。
+   *
+   * 后果不是"少一个字段"：`at` 经 `dayKey()` 成为 `model_usage` 的**主键之一**，
+   * 写死 0 意味着所有用量永久堆在 `1970-01-01` 一行里、`sinceDay` 过滤全部失效、
+   * `recentAttempts` 的 `ORDER BY at DESC` 退化成 `id DESC`。
+   *
+   * 成因是单测与集成测试的分工留了个缝：`stats.test.ts` 把 `at` 当**输入**
+   * （直接喂给 StatsStore），而集成测试当它**不存在** —— 中间"转发路径有没有
+   * 把真实时刻传进来"没人管。注入时钟一次盖掉这个缝。
+   */
+  const FIXED = Date.UTC(2026, 5, 15, 8, 30, 0);
+
+  it("注入时钟后,库里的 at 就是那个时刻(而不是 0 或 Date.now)", async () => {
+    const app = await makeApp(config(), undefined, () => FIXED);
+    await (await app.request("/v1/chat/completions", relay(chatBody()))).text();
+
+    expect(stats.recentAttempts()[0]?.at).toBe(FIXED);
+
+    // 用量按 UTC 日分行 —— 主键里的 day 必须来自那个时刻。
+    expect(stats.modelUsage(dayKey(FIXED))).toHaveLength(1);
+    expect(stats.modelUsage("1970-01-02")).toHaveLength(1); // 1970 之后的都能看到
+    expect(stats.modelUsage("2026-06-16")).toHaveLength(0); // 次日之后看不到
+  });
+
+  it("耗时是真的测量出来的 —— 递进时钟下 latencyMs 等于两次读表的差", async () => {
+    /*
+     * 常量时钟下耗时恒为 0（那是正确的：两次读同一个时钟），所以要钉住
+     * "耗时真的被测量"必须用**递进**的时钟。每调用一次 +7ms：
+     * `retry.ts` 在 fetch 前后各读一次，于是 latencyMs 应当恰好是 7。
+     *
+     * 这同时钉住了 relay 把注入的时钟**传给了 retry 链** —— 不传的话
+     * `latencyMs` 用 `Date.now()`，值不可预期。
+     */
+    let t = FIXED;
+    const app = await makeApp(config(), undefined, () => (t += 7));
+    await (await app.request("/v1/chat/completions", relay(chatBody()))).text();
+
+    expect(stats.recentAttempts()[0]?.latencyMs).toBe(7);
+  });
+
+  it("写死 at=0 会让 sinceDay 过滤失效 —— 反向断言", async () => {
+    /*
+     * 这条钉住"day 真的来自 at"：若 `at` 被写死 0，`day` 恒为 1970-01-01，
+     * 于是按当天筛会得到空结果。上一条的 `modelUsage(dayKey(FIXED))` 有值
+     * 就已经排除了这种情形，这里再从另一侧确认 worker_stats 的时刻也对。
+     */
+    const app = await makeApp(config(), undefined, () => FIXED);
+    await (await app.request("/v1/chat/completions", relay(chatBody()))).text();
+
+    expect(stats.workerTotals()[0]?.lastUsedAt).toBe(FIXED);
+  });
+});
+
 describe("重试链的统计语义", () => {
   it("一条 w1 失败 → w2 成功的链 = 1 个请求、2 次尝试,两个 Worker 各自可见", async () => {
     let n = 0;
@@ -220,8 +284,21 @@ describe("重试链的统计语义", () => {
     expect(rows).toHaveLength(2);
     // 同一条链共用 request_id —— 否则「这两次尝试属于同一个请求」查不出来。
     expect(new Set(rows.map((r) => r.requestId)).size).toBe(1);
-    // attempt_index 按顺序。
-    expect(rows.map((r) => r.attemptIndex).sort()).toEqual([0, 1]);
+    /*
+     * attempt_index 要能回答"哪次尝试是第几次"。
+     *
+     * 先前这里写 `.map(...).sort()` —— 而 `.sort()` 恰好销毁了"顺序"这个
+     * 被断言的性质，它只验证了集合 `{0,1}`。第七轮审核实测：把
+     * `attemptIndex: attemptIndex++` 改成 `1 - attemptIndex++`（索引倒序）
+     * 后全绿。
+     *
+     * `rows` 按 `at DESC` 返回，所以第 1 次尝试（w1，失败）排在后面。
+     * 直接断言"哪个 Worker 是第几次"才是这个字段的实际用途。
+     */
+    expect(rows.map((r) => ({ w: r.workerId, i: r.attemptIndex }))).toEqual([
+      { w: "w2", i: 1 },
+      { w: "w1", i: 0 },
+    ]);
 
     const byWorker = new Map(stats.workerTotals().map((w) => [w.workerId, w]));
     expect(byWorker.get("w1")).toMatchObject({ attempts: 1, failures: 1, successes: 0 });
@@ -258,13 +335,24 @@ describe("重试链的统计语义", () => {
 
   it("网关在请求出去之前拒掉时,不写任何尝试", async () => {
     const app = await makeApp(config());
+
+    /*
+     * 先发一次**成功**请求确立基线。
+     *
+     * 少了这一步，"403 之后计数为 0" 对「正确地没记」与「统计根本没接线」
+     * 是同一个观测值 —— 第七轮审核实测：把 `recordAttempt` 整个不接，
+     * 这条测试仍然通过。有了基线，没接线会让第一个断言先红。
+     */
+    await (await app.request("/v1/chat/completions", relay(chatBody()))).text();
+    expect(stats.requestCounts()).toEqual({ requests: 1, attempts: 1 });
+
     // 付费模型 → 免费闸门在第 3 步拒绝，压根没有上游尝试。
     const res = await app.request("/v1/chat/completions", relay(chatBody({ model: "claude-opus-5" })));
     expect(res.status).toBe(403);
 
-    // 一次没发生的上游尝试不该出现在 upstream_attempts 里 ——
+    // 计数**仍然**是 1/1：一次没发生的上游尝试不该出现在 upstream_attempts 里，
     // 否则「这个 Worker 转发过什么」会包含它根本没参与的请求。
-    expect(stats.requestCounts()).toEqual({ requests: 0, attempts: 0 });
+    expect(stats.requestCounts()).toEqual({ requests: 1, attempts: 1 });
   });
 });
 

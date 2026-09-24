@@ -299,7 +299,14 @@ describe("写入失败吞掉但可观测", () => {
     // 吞掉不等于可以不知道 —— 一直写失败的库会安静地给出全 0 报表。
     expect(f.lastError).not.toBeNull();
 
-    // afterEach 会再 close 一次；node:sqlite 对重复 close 是容忍的。
+    /*
+     * 重新打开是**必需的**，不是清理礼节：`afterEach` 会再 close 一次，
+     * 而 `node:sqlite` 对重复 close **会抛** `database is not open`（实测）。
+     * 重新赋值让 afterEach 关到一个新的、打开的库。
+     *
+     * （先前这里的注释写的是"node:sqlite 对重复 close 是容忍的" —— 那是
+     * 事实错误，会让下一个人以为可以删掉这一行。）
+     */
     db = openDb(join(root, "data", "runtime.db"));
   });
 });

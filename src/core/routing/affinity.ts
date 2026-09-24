@@ -224,7 +224,8 @@ export function containsStaleReasoning(text: string): boolean {
  * 绑定表
  * ------------------------------------------------------------------ */
 
-type Binding = { workerId: string; at: number };
+/** 一条绑定。导出仅供测试构造 `evict` 的输入 —— 见 `evict` 的说明。 */
+export type Binding = { workerId: string; at: number };
 
 /**
  * 持久化接收端。
@@ -450,8 +451,20 @@ function fresh(binding: Binding, now: number, ttlMs: number): boolean {
  * **返回被淘汰的键**（Phase 7）：持久化层要把它们一并删掉，否则重启时
  * 它们会从 DB 复活并再次挤占容量。返回而不是在这里直接写 DB ——
  * 这是个纯函数，让它认识存储会把「淘汰规则」与「怎么落盘」耦在一起。
+ *
+ * ## 为什么导出（第七轮审核）
+ *
+ * 第一轮「先清过期」与无条件 FIFO 的差别只在**淘汰谁**，而要让差别显现，
+ * 必须让一条**新鲜**绑定排在插入顺序的**最前**。那个状态经
+ * `AffinityMap` 的公开 API **构造不出来**：「新鲜」意味着绑定得晚，
+ * 而插入顺序就是绑定顺序，两者在全局 TTL 下互相矛盾（`bindSession` 的
+ * 重新绑定也只会把条目移到队尾）。
+ *
+ * 于是那条承重规则在第七轮之前**没有任何测试守着** —— 删掉整个第一轮，
+ * 110 条相关测试全绿。它是纯函数，直接构造 `Map` 就能穷举，
+ * 所以导出它比绕着公开 API 造一个不可能的状态诚实。
  */
-function evict(map: Map<string, Binding>, cap: number, now: number, ttlMs: number): string[] {
+export function evict(map: Map<string, Binding>, cap: number, now: number, ttlMs: number): string[] {
   if (map.size <= cap) return [];
 
   const dropped: string[] = [];

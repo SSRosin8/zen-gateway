@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+import { TARGET_VERSION } from "../../src/store/db/migrations.ts";
 import { execFile } from "node:child_process";
 import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -99,7 +100,18 @@ describe("共享模块可被 .mjs 脚本直接 import(strip-only 模式)", () =>
         await rm(root, { recursive: true, force: true });
       }
     `);
-    expect(stdout).toMatch(/version: 1 target: 1/);
+    /*
+     * 从唯一真相取值,不写档位字面量。
+     *
+     * 先前这里写的是 `/version: 1 target: 1/` —— 第七轮加档位 2 时它红了,
+     * 而红的原因与这条测试要验的事(共享模块能被 .mjs 直接 import)毫无关系。
+     * 这正是纪律 #7 的「会漂的数字不该写进断言」:档位号每加一条迁移就变一次。
+     *
+     * 断言改成「实际档位等于目标档位」—— 那个性质与档位号无关,
+     * 而它恰好是这条测试真正关心的:迁移跑完了。
+     */
+    const target = TARGET_VERSION;
+    expect(stdout.trim()).toBe(`version: ${target} target: ${target}`);
   });
 
   it("出口链路模块可用(Phase 8 的 doctor 要用它做分层诊断)", async () => {

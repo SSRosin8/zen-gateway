@@ -1,7 +1,9 @@
 import { describe, expect, it } from "vitest";
+import type { Binding } from "../../src/core/routing/affinity.ts";
 import {
   AffinityMap,
   containsStaleReasoning,
+  evict,
   digestOf,
   extractBlobHashes,
   normalizeSessionKey,
@@ -293,6 +295,77 @@ describe("AffinityMap:会话绑定", () => {
     // 最早的那些被挤掉,最新的还在。
     expect(map.lookupSession("h0", NOW + 10_050, TTL, always)).toBeNull();
     expect(map.lookupSession("h10049", NOW + 10_050, TTL, always)).toBe("w1");
+  });
+
+  /*
+   * `evict()` 的**第一轮「先清过期」**的回归防护。
+   *
+   * 这条规则是第五轮审核修过的一个真实缺陷:先前是无条件 FIFO,于是灌满这张表
+   * 就能把别人**仍然有效**的绑定挤掉 —— 受害者正在进行的长对话丢失粘滞、
+   * 下一轮换 Worker、客户端回放的加密推理块被上游拒。也就是
+   * **Phase 5 刻意要避免的那个症状可以被主动诱发**。
+   *
+   * 第七轮审核发现它**没有任何测试守着**:删掉整个第一轮,110 条相关测试全绿。
+   * 既有的容量测试用的全是活跃条目,第一轮清不到东西、直接掉到第二轮 FIFO ——
+   * 被测的一直只有兜底那条路。
+   *
+   * 直接测 `evict`（已导出）而不绕 `AffinityMap`：两种实现的差别只在
+   * **淘汰谁**，要让差别显现必须让一条**新鲜**绑定排在插入顺序的**最前**，
+   * 而那个状态经公开 API 构造不出来（新鲜=绑定得晚，插入顺序=绑定顺序，
+   * 在全局 TTL 下矛盾）。理由记在 `evict` 的文档注释里。
+   */
+  it("evict 优先淘汰过期项,不动排在更前面的新鲜绑定", () => {
+    const CAP = 3;
+    // 队首是**新鲜**的，其后两条已过期 —— 无条件 FIFO 会淘汰队首那条新鲜的。
+    const map = new Map<string, Binding>([
+      ["新鲜的", { workerId: "w-live", at: NOW }],
+      ["过期A", { workerId: "w1", at: NOW - TTL * 10 }],
+      ["过期B", { workerId: "w1", at: NOW - TTL * 10 }],
+      ["新来的", { workerId: "w2", at: NOW }],
+    ]);
+
+    const dropped = evict(map, CAP, NOW, TTL);
+
+    // 承重：淘汰的是过期项，而不是队首那条新鲜的。
+    expect(dropped).toEqual(["过期A"]);
+    expect(map.has("新鲜的")).toBe(true);
+    expect([...map.keys()]).toEqual(["新鲜的", "过期B", "新来的"]);
+  });
+
+  it("evict 全是新鲜条目时退回 FIFO —— 兜底存在,内存不会无界", () => {
+    /*
+     * 与上一条互补：证明第一轮清不到东西时第二轮仍然工作。
+     * 否则「先清过期」可能被实现成「只清过期，清不到就不淘汰」——
+     * 那样内存无界，而这张表的上限正是防这个。
+     */
+    const CAP = 2;
+    const map = new Map<string, Binding>([
+      ["老", { workerId: "w1", at: NOW }],
+      ["中", { workerId: "w1", at: NOW + 1 }],
+      ["新", { workerId: "w1", at: NOW + 2 }],
+    ]);
+
+    expect(evict(map, CAP, NOW + 2, TTL)).toEqual(["老"]);
+    expect([...map.keys()]).toEqual(["中", "新"]);
+  });
+
+  it("evict 在容量未满时什么都不做", () => {
+    const map = new Map<string, Binding>([["a", { workerId: "w1", at: NOW }]]);
+    expect(evict(map, 10, NOW, TTL)).toEqual([]);
+    expect(map.size).toBe(1);
+  });
+
+  it("容量满且全部活跃时才退回 FIFO —— 兜底仍然存在", () => {
+    /*
+     * 与上一条互补:证明第一轮清不到东西时第二轮仍然工作,
+     * 否则"先清过期"可能被实现成"只清过期,清不到就不淘汰"（内存无界）。
+     */
+    const map = new AffinityMap();
+    const CAP = 10_000;
+    for (let i = 0; i <= CAP; i += 1) map.bindSession(`活${i}`, "w1", NOW + i, TTL);
+
+    expect(map.sizes().sessions).toBe(CAP);
+    expect(map.lookupSession("活0", NOW + CAP, TTL, always)).toBeNull();
   });
 });
 

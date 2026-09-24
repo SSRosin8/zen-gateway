@@ -409,6 +409,16 @@ async function handleRelay(
        * `nowOf()` 在回调里**现取**,不用 `planNow`:这个回调在该次尝试
        * 结束时同步触发,所以此刻就是失败发生的时刻。见上面 `nowOf` 的说明。
        */
+      /*
+       * 把注入的时钟传下去 —— 否则 `AttemptRecord.latencyMs` 恒用 `Date.now()`,
+       * 于是它**结构上不可被测试固定**。第七轮审核实测:把 `latencyMs` 写死 0
+       * 之后集成测试仍然全绿,因为没有任何断言能预期一个真实 IO 的耗时。
+       *
+       * 传下去之后注入常量时钟会让耗时恒为 0（那是**正确**的:两次读同一个
+       * 时钟），所以要钉住"耗时真的被测量"需要一个**递进**的时钟，
+       * 见 `phase7.test.ts` 的对应用例。
+       */
+      ...(deps.clock !== undefined ? { clock: deps.clock } : {}),
       onAttempt: (record) => {
         const at = nowOf();
         deps.scheduler.record(record, config, at);

@@ -262,11 +262,34 @@ describe("写入失败不影响内存行为", () => {
 });
 
 describe("不传 sink 时是纯内存", () => {
-  it("不落盘,也不报错", () => {
+  it("带 sink 的落盘、不带的不落 —— 同一个库上对照", () => {
+    /*
+     * 先前这里只断言 `store.loadSessions(T0)` 为空，而 `store` 由 beforeEach
+     * 新建在空库上、从头到尾没被写过 —— 那是**初始状态**而不是行为结果，
+     * 把整个被测动作删掉断言也通过（第七轮审核实测）。
+     *
+     * 改成同库对照：两个 map 各写一条，断言库里**只有**带 sink 那条。
+     */
+    const withSink = new AffinityMap(store);
+    const withoutSink = new AffinityMap();
+
+    withSink.bindSession(h("落盘的"), "w1", T0, TTL);
+    withoutSink.bindSession(h("不落盘的"), "w2", T0, TTL);
+
+    // 两边的内存都正常工作。
+    expect(withSink.lookupSession(h("落盘的"), T0 + 1, TTL, always)).toBe("w1");
+    expect(withoutSink.lookupSession(h("不落盘的"), T0 + 1, TTL, always)).toBe("w2");
+
+    // 库里只有带 sink 那条。
+    expect(store.loadSessions(T0).map((r) => r.hash)).toEqual([h("落盘的")]);
+  });
+
+  it("不传 sink 时写入不抛 —— 可选调用是承重的", () => {
+    // 把 `this.#sink?.putSession` 的可选调用去掉会让这条红。
     const map = new AffinityMap();
-    map.bindSession(h("s1"), "w1", T0, TTL);
-    expect(map.lookupSession(h("s1"), T0 + 1, TTL, always)).toBe("w1");
-    // 库里什么都没有 —— 既有的全部单测走的正是这条路。
-    expect(store.loadSessions(T0)).toHaveLength(0);
+    expect(() => map.bindSession(h("s1"), "w1", T0, TTL)).not.toThrow();
+    expect(() => map.unbindSession(h("s1"))).not.toThrow();
+    expect(() => map.learnBlobs([h("b1")], "w1", T0, TTL)).not.toThrow();
+    expect(() => map.forgetBlobs([h("b1")])).not.toThrow();
   });
 });

@@ -248,3 +248,98 @@ describe("库文件权限", () => {
     }
   });
 });
+
+describe("档位 2：摘要列的字节长度约束", () => {
+  /*
+   * 第七轮审核实测出的绕过：SQLite 的 `length()` 与 `GLOB` 对 TEXT 都在
+   * 首个 NUL 字节处停止，所以档位 1 的 `length(hash) = 64` 可以被
+   * 「64 个 hex + 一个 NUL + 任意明文」通过 —— 明文完整落盘，而所有读路径
+   * 都在 NUL 处截断看不见它。档位 2 补 `length(CAST(... AS BLOB)) = 64`。
+   *
+   * 这些断言直接打在 SQL 层（不经 AffinityStore），因为要验的是**结构约束**
+   * 本身 —— 经过 store 的话 `#safe()` 会把失败吞掉，测出来的是"没抛"而不是
+   * "被拦下"。
+   */
+  const hex64 = "a".repeat(64);
+
+  it("NUL 载荷被拦下 —— 档位 1 的绕过已关闭", () => {
+    const db = openDb(file);
+    try {
+      const ins = db.prepare("INSERT INTO session_affinity VALUES (?, ?, ?, ?)");
+      expect(() => ins.run(`${hex64}\0PATIENT RECORD`, "w1", 1, 2)).toThrow(/CHECK/);
+      expect(() => ins.run(`${"b".repeat(63)}\0`, "w1", 1, 2)).toThrow(/CHECK/);
+
+      const insBlob = db.prepare("INSERT INTO blob_affinity VALUES (?, ?, ?, ?)");
+      expect(() => insBlob.run(`${hex64}\0RAW REASONING`, "w1", 1, 2)).toThrow(/CHECK/);
+    } finally {
+      db.close();
+    }
+  });
+
+  it("合法的 64 位小写十六进制仍然能写 —— 约束没有收得过紧", () => {
+    const db = openDb(file);
+    try {
+      db.prepare("INSERT INTO session_affinity VALUES (?, ?, ?, ?)").run(hex64, "w1", 1, 2);
+      db.prepare("INSERT INTO blob_affinity VALUES (?, ?, ?, ?)").run(hex64, "w1", 1, 2);
+      expect(db.prepare("SELECT COUNT(*) AS c FROM session_affinity").get()).toEqual({ c: 1 });
+    } finally {
+      db.close();
+    }
+  });
+
+  it("多字节字符仍被拦下 —— 两个长度条件各司其职", () => {
+    const db = openDb(file);
+    try {
+      const ins = db.prepare("INSERT INTO session_affinity VALUES (?, ?, ?, ?)");
+      // 64 字符 / 192 字节：字符长度过关而字节长度不过。
+      expect(() => ins.run("一".repeat(64), "w1", 1, 2)).toThrow(/CHECK/);
+      // 64 字节 / 64 字符但非 hex。
+      expect(() => ins.run("Z".repeat(64), "w1", 1, 2)).toThrow(/CHECK/);
+      // 大写 hex 也不行（`digestOf` 输出小写）。
+      expect(() => ins.run("A".repeat(64), "w1", 1, 2)).toThrow(/CHECK/);
+    } finally {
+      db.close();
+    }
+  });
+
+  it("从档位 1 升级到 2 不丢数据 —— 重建表要搬行", () => {
+    /*
+     * 这条同时是**多档位迁移路径的首次真跑**：在 Phase 7 之前
+     * `MIGRATIONS` 只有一档，`migrate()` 的循环从未在"跨一档以上"的
+     * 情况下执行过。
+     */
+    const db = openDb(file);
+    try {
+      // 先降档并塞回档位 1 的形状，模拟一个真实的旧库。
+      db.exec("DROP TABLE session_affinity");
+      db.exec(`CREATE TABLE session_affinity (
+        session_hash TEXT PRIMARY KEY CHECK (
+          length(session_hash) = 64 AND session_hash NOT GLOB '*[^0-9a-f]*'),
+        worker_id TEXT NOT NULL, bound_at INTEGER NOT NULL, expires_at INTEGER NOT NULL) STRICT`);
+      db.prepare("INSERT INTO session_affinity VALUES (?, ?, ?, ?)").run(hex64, "w-old", 111, 222);
+      db.exec("PRAGMA user_version = 1");
+    } finally {
+      db.close();
+    }
+
+    const again = openDb(file);
+    try {
+      expect(currentVersion(again)).toBe(TARGET_VERSION);
+      // 旧行必须还在，且字段值原样。
+      expect(
+        again.prepare("SELECT session_hash, worker_id, bound_at FROM session_affinity").all(),
+      ).toEqual([{ session_hash: hex64, worker_id: "w-old", bound_at: 111 }]);
+      // 索引要被重建 —— 重建表会连带丢掉它。
+      const idx = again
+        .prepare("SELECT name FROM sqlite_master WHERE type='index' AND name='idx_session_expires'")
+        .all();
+      expect(idx).toHaveLength(1);
+      // 新约束在升级后的表上生效。
+      expect(() =>
+        again.prepare("INSERT INTO session_affinity VALUES (?, ?, ?, ?)").run(`${hex64}\0x`, "w", 1, 2),
+      ).toThrow(/CHECK/);
+    } finally {
+      again.close();
+    }
+  });
+});
