@@ -273,6 +273,63 @@ describe("大数不让聚合崩掉", () => {
   });
 });
 
+describe("写入侧的夹取（与读侧是两层，各自承重）", () => {
+  /*
+   * 第七轮审核查出：既有的大数测试只**跨行**灌（三个不同 Worker 各一行），
+   * 于是它验的是读侧 `MIN(SUM(...))`；**写入侧 upsert 的累加夹取**
+   * （同一 `(model, worker, day)` 反复累加）从未被触发 ——
+   * 去掉它之后 17 条测试全绿。
+   *
+   * 两层都需要：写侧防「累加溢出 INTEGER 列」，读侧防「跨行求和越过
+   * MAX_SAFE 让 SUM 抛」。少了写侧，一行自己就能涨到 JS 读不回来的值。
+   *
+   * 单次就能饱和：`clampTokens` 把上游报的巨数（实测 `prompt_tokens: 1e300`）
+   * 夹到 MAX_SAFE，写进库就是一个饱和行。
+   */
+  it("同一行反复累加 MAX_SAFE 后仍能读回", () => {
+    const huge = usage({ promptTokens: Number.MAX_SAFE_INTEGER, totalTokens: Number.MAX_SAFE_INTEGER });
+    for (let i = 0; i < 3; i += 1) {
+      stats.recordUsage({ model: "m", workerId: "w1", at: T0, usage: huge });
+    }
+
+    /*
+     * 断言**库里存的原始值**，不是 `modelUsage()` 的返回值 ——
+     * 后者的读侧 `MIN(SUM(...))` 会把写侧的溢出掩盖掉，于是断言它等于
+     * MAX_SAFE 在两种实现下都通过（我第一版就是这么写的，变异全绿）。
+     *
+     * 去掉写侧夹取后这一行会存成 27021597764222973，而直接 SELECT 它
+     * 会抛 `Value is too large to be represented as a JavaScript number`。
+     */
+    const raw = db.prepare("SELECT input_tokens FROM model_usage").get();
+    expect(raw).toEqual({ input_tokens: Number.MAX_SAFE_INTEGER });
+    expect(() => stats.rates()).not.toThrow();
+  });
+
+  it("输出与缓存列同样夹住 —— 四个 token 列不能只夹一个", () => {
+    const huge = usage({
+      promptTokens: Number.MAX_SAFE_INTEGER,
+      completionTokens: Number.MAX_SAFE_INTEGER,
+      cacheReadTokens: Number.MAX_SAFE_INTEGER,
+      cacheWriteTokens: Number.MAX_SAFE_INTEGER,
+      totalTokens: Number.MAX_SAFE_INTEGER,
+    });
+    for (let i = 0; i < 3; i += 1) {
+      stats.recordUsage({ model: "m", workerId: "w1", at: T0, usage: huge });
+    }
+
+    // 同上：断言库里的原始值，读侧的夹取会掩盖写侧的溢出。
+    expect(
+      db
+        .prepare("SELECT output_tokens, cache_read_tokens, cache_write_tokens FROM model_usage")
+        .get(),
+    ).toEqual({
+      output_tokens: Number.MAX_SAFE_INTEGER,
+      cache_read_tokens: Number.MAX_SAFE_INTEGER,
+      cache_write_tokens: Number.MAX_SAFE_INTEGER,
+    });
+  });
+});
+
 describe("写入失败吞掉但可观测", () => {
   it("库关掉后写入不抛,并计入 writeFailures", () => {
     db.close();

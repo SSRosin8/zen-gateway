@@ -332,10 +332,11 @@ curl -s -H "Authorization: Bearer <apiSecret>" \
 |---|---|
 | `x-zen-gateway-worker` | 这次由哪个 Worker 承接。失败时是最后一次尝试的那个 |
 | `x-zen-gateway-route` | 为什么是它：`sticky`（会话粘滞）／`blob_hint`（推理指纹提示）／`strategy`（按策略排序）／`all_cooling`（全员冷却，给了最早恢复的那个） |
-| `x-zen-gateway-attempts` | 失败时尝试了几个 Worker |
+| `x-zen-gateway-attempts` | 这次一共尝试了几个 Worker（成功前重试过时 >1） |
 | `x-zen-gateway-free` | **仅在放行未经在架核验时出现**：`suffix_unverified`／`extra_unverified`。有它 = 那一刻拿不到在架目录，所以只按后缀与名单放行了（见上文「免费判定」） |
 
-前三个头在**成功与失败时都有**。`route` 先前只在成功路径设置，而这恰好让它在
+前三个头在**成功与失败时都有**（第七轮审核补上了成功路径的 `attempts` ——
+在那之前这句话对第三个头是假的）。`route` 先前只在成功路径设置，而这恰好让它在
 最需要的时候缺席 —— 第五轮审核查出并修了。
 
 `x-zen-gateway-free` 同理**两条路径都设**，而且失败时更有用：上游返回

@@ -239,6 +239,19 @@ export class StatsStore {
     });
   }
 
+  /**
+   * 记一次出口探测。
+   *
+   * ⚠️ **当前无生产调用点，且无测试覆盖** —— 这条 SQL 从未执行过
+   * （第七轮审核查出）。`EgressService.probeAll()` 确实在跑真实探测并产出
+   * `egressIp`，但结果只存在于返回值里，没有持久化。
+   *
+   * 保留而不删：Phase 9 的出口隔离视图要按实测 `egressIp` 分组，而
+   * `probe_results` 的形状（含 `at`）正是为「这个代理上周是不是换过出口 IP」
+   * 这个问题准备的。但**它的参数顺序与列名到 Phase 9 接上时要当全新代码验**
+   * —— Phase 7 对两张亲和表认出了这个陷阱（「CHECK 在生产路径上一次都没
+   * 执行过」）并真跑了，对这张表没有。
+   */
   recordProbe(row: {
     proxyId: string;
     at: number;

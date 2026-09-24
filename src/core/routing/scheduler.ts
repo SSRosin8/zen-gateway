@@ -274,7 +274,17 @@ export class Scheduler {
     });
   }
 
-  /** 供 `/health` 与管理后台。 */
+  /**
+   * Worker 就绪数与总数。
+   *
+   * ⚠️ **本方法当前没有生产调用点。** 先前这里写的是「供 `/health` 与管理后台」
+   * —— 而 `/health` 的 handler 只返回 `ok/version/uptimeSeconds/pid`，
+   * **完全不调 scheduler**（第七轮审核查出）。那句话是一个**假的调用点声明**，
+   * 比 `snapshot()`/`status()` 那几处更糟：后者都老实标了「无生产调用点」。
+   *
+   * 与它们同属一类（实现了、有单测、不含凭证、但没人读），
+   * 已登记在 `docs/architecture.md` 的缺口清单（→ Phase 8 的 doctor / Phase 9 的管理 API）。
+   */
   counts(config: Config, now: number): { ready: number; total: number } {
     this.#ensureSynced(config);
     return this.#pool.counts(now);

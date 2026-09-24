@@ -653,6 +653,16 @@ async function handleRelay(
         "x-zen-gateway-worker": result.workerId,
         // 为什么是它 —— 粘滞/指纹提示/策略/全员冷却。排查"为什么换了 Worker"用。
         "x-zen-gateway-route": plan.reason,
+        /*
+         * 成功前试了几个 Worker。**成功路径也要给** ——
+         * 这是「诊断手段只在一半路径可用」的第三次发生(前两次是 `route`
+         * 与 `free`,都修了),而第七轮审核发现文档写着"前三个头在成功与失败时
+         * 都有"却只有失败路径设置它。
+         *
+         * 成功前重试过 2 个 Worker 恰恰是**该被看见**的信号:多账号轮换下
+         * 它意味着前面那些进了冷却,而响应本身完全正常、日志也不会提。
+         */
+        "x-zen-gateway-attempts": String(result.attempts.length),
         ...freeHeaders,
       },
       result.workerId,

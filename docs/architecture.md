@@ -12,7 +12,7 @@
 ```
 src/
 ├── shared/      # 三端唯一契约 —— 必须浏览器可移植（admin 会打包它）
-│   ├── schema.ts    zod schema + 推导类型 + 引用完整性（468 行）
+│   ├── schema.ts    zod schema + 推导类型 + 引用完整性
 │   ├── contract.ts  /health 与 poolHealth 的契约
 │   ├── redact.ts    脱敏的单点定义
 │   └── ip.ts        IP 校验（WHATWG URL 实现，不用 node:net —— 见下）
@@ -118,7 +118,15 @@ schema：实测 +57ms，而 `service.mjs status` 全程只有 51ms。
 
 两条依据，都只存 **sha256 摘要**：会话键（`x-opencode-session`，或 Responses 面
 体内的会话指针）、加密推理指纹（`encrypted_content` / `signature`）。
-`runtime.db` 两张表的 `CHECK` 把这条约定变成结构约束。
+`runtime.db` 两张表的 `CHECK`（档位 2）同时限定**字符长度、字节长度与字符集**。
+
+> 三个条件缺一不可。档位 1 只查字符长度与字符集，而 SQLite 的 `length()` 与
+> `GLOB` 对 TEXT 都在首个 NUL 处停止 —— 第七轮审核实测「64 个 hex + NUL +
+> 任意明文」完整通过校验并落盘，而所有读路径在 NUL 处截断看不见它。
+> 补 `length(CAST(hash AS BLOB)) = 64` 才真正收口。
+>
+> 安全性的**第一道**防线仍是 `digestOf()`（生产路径每个键都过它）；
+> CHECK 是第二道，防的是将来新增的写入路径漏掉 digest。
 
 **TTL 是滑动的** —— 每次选择刷新绑定时间，度量的是**闲置**时长。固定 TTL 会在
 一条正在进行的长对话中途强制换 Worker，而那恰好是粘滞要避免的事。
@@ -332,14 +340,17 @@ schema：实测 +57ms，而 `service.mjs status` 全程只有 51ms。
 | 4 | 上游协议发现（范围按实测缩减，见 `upstream-quirks.md`） | ✅ |
 | 5 | 调度状态机：`workerPool` / `cooldown` / `affinity` / `select` / `scheduler` | ✅ |
 | 6 | 其余协议面（`responses`/`messages`）+ 免费注册表与在架目录求交集 + `parseUsage` | ✅ |
-| 7 | 统计 SQL 聚合 + 亲和持久化 | 待做 |
+| 7 | 统计 SQL 聚合 + 亲和持久化 | ✅（**无 HTTP 端点** —— 管理 API 形状留给 Phase 9） |
 | 8 | `setup.mjs`（一键配置）、`doctor.mjs`（分层诊断） | 待做 |
 | 9 | 管理后台 6 页 + 首启向导 + 批量探测长任务状态机 | 待做 |
 | 10 | 订阅拉取与多格式解析、多 Clash 内核择优 | 待做 |
 | 11 | 精简 `AGENTS.md`、4 个 skill、`docs/` 补全 | 部分 |
 
-**1293 测试全绿**（39 个文件：unit 28 / integration 8 / design 1 / admin 2）。
-源码 8590 行 / 测试 14504 行。经**六轮**独立子 agent 审核。
+经**七轮**独立子 agent 审核（一轮审规划 + 六轮审代码/文档）。
+
+> 规模数字（测试条数、文件数、代码行数）刻意不写在文档里 —— 它们每次提交
+> 都变，而第七轮审核发现这里的五个数字全部过期（测试数差 62、源码行差 1176）。
+> 要当前值就跑 `npm run validate`，或 `find src -name '*.ts*' | xargs wc -l`。
 
 ### 当前已知缺口
 
@@ -383,12 +394,69 @@ schema：实测 +57ms，而 `service.mjs status` 全程只有 51ms。
    默认配置下**所有**模型的 `/v1/messages` 请求都会被拒 —— 而那个面刚刚验证可用。
    所以这里要先定清楚它的语义（是"放行闸门"还是"后台展示用的提示"），
    再决定默认值。眼下当作后备展示数据，不参与判定（→ Phase 9 的 Models 页）
-11. **统计写失败只能从 `writeFailures()` 看，没有生产读者**：`StatsStore` 与
+11. **「网关拒绝」这项规划要求没有实现**：Phase 7 的验收列了六项统计，
+   前五项都有（Worker 计数 / per-model token / 缓存命中 / usage 覆盖率 /
+   上游尝试日志），而**第六项「网关拒绝」没有表、没有列、没有写入点**
+   （第七轮审核查出）。`relay.ts` 有 6 条在打上游之前就返回的路径
+   （400 读体失败 / 413 超限 / 400 空体 / 400 非法 JSON / 403 免费闸门 /
+   503 无可用 Worker），全部零记录 —— 403 那条连日志都不打。
+   于是「我有多少请求被网关自己挡了」现在完全无法回答，而
+   `not_free` 与 `retired` 的处置完全不同（前者改模型名、后者删
+   `extraFreeIds` 条目），哪种发生得多也不可观测（→ Phase 8/9）
+12. **`Scheduler.counts()` 曾带一个假的调用点声明**：注释写着「供 `/health`
+   与管理后台」，而 `/health` 的 handler 完全不调 scheduler。已改为显式标注
+   「无生产调用点」，与 `snapshot()`/`status()` 同格式。这类成员现已有六个
+   （`snapshot` / `status` / `surfacesFor` / `counts` / `writeFailures` ×2 /
+   `recordProbe`），**逐个标注是手工约定而实例还在增加** ——
+   该建一道关卡（对白名单外的导出成员断言至少有一个非定义处引用）
+13. **`recordProbe()` 无生产调用点且无测试覆盖**：这条 SQL 从未执行过，
+   参数顺序与列名到 Phase 9 接上时要当全新代码验。同类陷阱 Phase 7 对两张
+   亲和表认出来了（「CHECK 在生产路径上一次都没执行过」）并真跑了，
+   对 `probe_results` 没有（→ Phase 9）
+14. **`requestCounts()` 是唯一随时间线性变慢的聚合**：`COUNT(DISTINCT
+   request_id)` 全表扫，实测 100k 行 **12.4ms**、1M 行约 124ms，而它是同步
+   调用 —— 接 HTTP 端点后会阻塞事件循环那么久。容量本身不是问题
+   （实测 100k 行 21.6 MB，按每天 600 行算约 47 MB/年，不需要清理机制），
+   但加端点时该给它一个 `sinceDay` 参数，与 `modelUsage`/`rates` 一致
+15. **`restore()` 绕过容量上限**：`loadSessions`/`loadBlobs` 没有 `LIMIT`，
+   而 `restore()` 不调 `evict`。今天不会越界（DB 是内存的忠实镜像、内存有
+   cap），但它**依赖一个没有守卫的不变量**：「DB 行数 ≤ cap」。
+   `SESSION_CAP` 被调小、或从一个旧库/备份恢复时会不成立。
+   修法是 `LIMIT` 从内存侧的 cap 推导（那两个常量目前是 `affinity.ts` 私有，
+   `affinityStore.ts` 拿不到 —— 本身就是分叉隐患）
+16. **统计写失败只能从 `writeFailures()` 看，没有生产读者**：`StatsStore` 与
    `AffinityStore` 都吞掉写异常并计数（统计是诊断设施，不该让转发失败），
    但那个计数目前**没有调用方** —— 与 `Scheduler.snapshot()` 同一个形态。
    一个一直写失败的库会安静地给出全 0 报表，而那看起来像「没人用」。
    `doctor.mjs` 应当报它（→ Phase 8）
-12. **目录拉空与上游不可达在外部看起来一样**：两者都让 `/v1/models` 返回
+17. **「我们自己丢了用量」被记成「上游没报用量」**：`createUsageCollector.dropped()`
+   的文档明写它与 `usage() === null` 必须分开，否则「覆盖率会把我们自己丢的
+   计成上游没报的」—— 而 `recordUsage` 只看 `totals`，全仓 `.dropped()` 的唯一
+   读者是一行日志（第七轮审核查出）。两个入口都可达：一条 >1MiB 的 `data:` 行
+   被 `MAX_LINE_LENGTH` 整条弃掉，以及**上游中途断流**（更常见）。
+   与「上游从不报用量显示成 100% 覆盖」严格对称，而处置方向相反
+   （一个要改代码、一个不用）。修法是给 `model_usage` 加一列或让
+   `recordUsage` 入参带上 `dropped`（→ Phase 9 做统计页时一起）
+18. **`SUM()` 的 int64 溢出仍未挡住**：`MIN(SUM(x), MAX_SAFE)` 只挡住了
+   「JS 转换阶段的越界」，而 `SUM` 的累加本身是 int64 —— 实测 **1025 个饱和行**
+   （每行 MAX_SAFE = 2^53，2^53 × 1024 = 2^63）时 SQLite 直接报
+   `integer overflow`，`MIN` 来不及夹。可达性极低（要上游持续报天文数字，
+   41 模型 × 3 Worker 约 9 天），但**注释与测试声称的性质比实际强**。
+   若要真做到，`CAST(MIN(total(x), MAX_SAFE) AS INTEGER)` 可以
+   （`total()` 返回 REAL 不溢出，实测 1025 行下正确返回）
+19. **`latencyMs` 可为负、非整数会丢整行**：`clock` 可注入任意实现而
+   `latencyMs = clock() - startedAt` 无下界也不取整。实测 `1.5` 会让 STRICT 表
+   拒绝 REAL 进 INTEGER 列 → `recordAttempt` **整条事务回滚**，明细与累计
+   两条记录都丢（只留一个 `writeFailures` 计数）；`-5000` 照常写进库。
+   生产上 `clock` 恒为 `Date.now` 所以不可达，但 `Math.max(0, Math.round(...))`
+   的代价是一行，理由与 `clampTokens` 同源
+20. **`upstream_attempts` / `probe_results` 无保留策略**：`pruneExpired` 只管
+   两张亲和表（它的注释说「增长受内存侧容量上限约束」，那句只对亲和表成立）。
+   容量不是问题（实测约 157 B/行，每天 600 行约 47 MB/年），但**毫秒级时间戳
+   让它成为一份作息时间线** —— 在「意外把文件复制/打包出去」这个已列明的
+   威胁下，明细比聚合值敏感得多。另：`secure_delete` 默认关闭且 `VACUUM`
+   也清不掉已删页，所以加保留期时要一并 `PRAGMA secure_delete = ON`
+21. **目录拉空与上游不可达在外部看起来一样**：两者都让 `/v1/models` 返回
    `data: []` 加 HTTP 200。已实测的一个成因是 TLS 中间人 —— 本机
    `opencode.ai` 被内网 DNS 指向内网地址、证书由企业 CA 签发，而 Node 不读
    系统 CA 库（需 `NODE_EXTRA_CA_CERTS`，见 `docs/usage.md`）。日志现在能

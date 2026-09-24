@@ -168,6 +168,30 @@ describe("内存淘汰要镜像到库 —— 否则被淘汰的条目重启后�
     expect(hashes.size).toBe(CAP);
   });
 
+  it("被淘汰的**指纹**也不在库里(真的灌满 BLOB_CAP)", () => {
+    /*
+     * 第七轮审核查出：上面那条只灌了会话表（注释自己写明「这里用会话表验」），
+     * 而**指纹表的同一条路径没有任何测试** —— 去掉 `learnBlobs` 的淘汰镜像后
+     * 163 条相关测试全绿。
+     *
+     * commit message 声称「**每一次**内存变更都通知 sink —— 包括容量淘汰
+     * 删掉的那些」，指纹侧那半句此前无人守着。BLOB_CAP 是 5000，比会话表小，
+     * 所以这条比它还快。
+     */
+    const map = new AffinityMap(store);
+    const CAP = 5_000;
+
+    // 全部在 TTL 内 → 第一轮清不到，必然走第二轮 FIFO。
+    for (let i = 0; i <= CAP; i += 1) map.learnBlobs([h(`b${i}`)], "w", T0 + i, TTL);
+
+    expect(map.sizes().blobs).toBe(CAP);
+    const hashes = new Set(store.loadBlobs(T0).map((r) => r.hash));
+    // 最老的被淘汰 —— 库里也必须没有它，否则重启会把它装回来并再占额度。
+    expect(hashes.has(h("b0"))).toBe(false);
+    expect(hashes.has(h(`b${CAP}`))).toBe(true);
+    expect(hashes.size).toBe(CAP);
+  });
+
   it("prune 清掉的会话不在库里", () => {
     const map = new AffinityMap(store);
     map.bindSession(h("s1"), "w-gone", T0, TTL);
@@ -188,6 +212,55 @@ describe("内存淘汰要镜像到库 —— 否则被淘汰的条目重启后�
     map.prune(T0 + 1, TTL, (id) => id === "w-live");
 
     expect(store.loadBlobs(T0 + 1).map((r) => r.workerId)).toEqual(["w-live"]);
+  });
+
+  it("findBlobWorker 读到指向已删除 Worker 的指纹时,内存与库都清掉", () => {
+    /*
+     * 第七轮审核查出：`findBlobWorker` 先前只 `return null`，一条 `delete`
+     * 都没有 —— 而文件头写着「`lookupSession` / `findBlobWorker` 读到过期
+     * 条目时就地删掉」。会话侧成立，指纹侧缺席（纪律 #4）。
+     *
+     * **指向已删除 Worker** 的条目最要紧：`expires_at` 还在未来所以
+     * `pruneExpired` 不碰它，而内存侧唯一会清它的 `prune()` 生产无调用方 ——
+     * 实测它每次重启都从 DB 复活，一直占着 BLOB_CAP 的额度。
+     */
+    const map = new AffinityMap(store);
+    map.learnBlobs([h("b1")], "w-gone", T0, TTL);
+
+    expect(map.findBlobWorker([h("b1")], T0 + 1, TTL, () => false)).toBeNull();
+    expect(map.sizes().blobs).toBe(0);
+    expect(store.loadBlobs(T0 + 1)).toHaveLength(0);
+  });
+
+  it("findBlobWorker 读到过期指纹时也清掉,不等 pruneExpired", () => {
+    const map = new AffinityMap(store);
+    map.learnBlobs([h("b1")], "w1", T0, TTL);
+
+    expect(map.findBlobWorker([h("b1")], T0 + TTL + 1, TTL, always)).toBeNull();
+    expect(map.sizes().blobs).toBe(0);
+  });
+
+  it("重启后失效指纹不复活 —— 三次重启都不在", () => {
+    const map = new AffinityMap(store);
+    map.learnBlobs([h("b1")], "w-gone", T0, TTL);
+
+    for (let i = 0; i < 3; i += 1) {
+      const revived = new AffinityMap(store);
+      revived.restore(store.loadSessions(T0 + 1), store.loadBlobs(T0 + 1));
+      revived.findBlobWorker([h("b1")], T0 + 1, TTL, () => false);
+      expect(store.loadBlobs(T0 + 1), `第 ${i + 1} 次重启后不该还在`).toHaveLength(0);
+    }
+  });
+
+  it("有效指纹不会被顺带清掉 —— 清理不过度", () => {
+    const map = new AffinityMap(store);
+    map.learnBlobs([h("好的")], "w-live", T0, TTL);
+    map.learnBlobs([h("坏的")], "w-gone", T0, TTL);
+
+    // 查坏的那个 → 只清它，好的留下。
+    map.findBlobWorker([h("坏的")], T0 + 1, TTL, (id) => id === "w-live");
+    expect(store.loadBlobs(T0 + 1).map((r) => r.workerId)).toEqual(["w-live"]);
+    expect(map.findBlobWorker([h("好的")], T0 + 1, TTL, (id) => id === "w-live")).toBe("w-live");
   });
 
   it("读到指向已删除 Worker 的绑定时,库里那行也被删掉", () => {

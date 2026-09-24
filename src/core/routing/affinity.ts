@@ -367,14 +367,61 @@ export class AffinityMap {
     workerExists: (workerId: string) => boolean,
   ): string | null {
     if (hashes.length === 0) return null;
+
+    /*
+     * 失效条目就地删掉 —— 与 `lookupSession` 同构（第七轮审核补上）。
+     *
+     * 先前这里只 `return null`，而文件头写着「`lookupSession` /
+     * `findBlobWorker` 读到过期条目时就地删掉」—— 会话侧成立，指纹侧
+     * 一条 `delete` 都没有。纪律 #4 的形态：两处同构的守卫，一处承重一处缺席。
+     *
+     * 后果不只是内存多留一会儿。**指向已删除 Worker** 的条目
+     * `expires_at` 还在未来，所以 `pruneExpired` 不碰它；内存侧唯一会清它的
+     * `prune()` 生产无调用方 —— 于是它**每次重启都从 DB 复活**（实测连续三次
+     * 重启都在），一直占着 `BLOB_CAP` 的额度直到 TTL 自然到期。
+     * 而 `lookupSession` 的对应注释恰好写明了这件事要避免。
+     *
+     * 收集后统一删：一次请求可带 64 个指纹，逐条调 sink 会开 64 个事务。
+     */
+    const stale: string[] = [];
     let candidate: string | null = null;
+    let usable = true;
+
     for (const hash of hashes) {
       const found = this.#blobs.get(hash);
-      if (found === undefined || !fresh(found, now, ttlMs)) return null;
+      if (found === undefined) {
+        usable = false;
+        continue;
+      }
+      if (!fresh(found, now, ttlMs)) {
+        this.#blobs.delete(hash);
+        stale.push(hash);
+        usable = false;
+        continue;
+      }
       if (candidate === null) candidate = found.workerId;
-      else if (candidate !== found.workerId) return null;
+      else if (candidate !== found.workerId) usable = false;
     }
-    if (candidate === null || !workerExists(candidate)) return null;
+
+    /*
+     * 指向已删除 Worker 的条目也要清 —— 它们不会过期，只会一直占额度。
+     * 注意这一步在收集完之后：`workerExists` 只需对候选者问一次。
+     */
+    if (candidate !== null && !workerExists(candidate)) {
+      for (const hash of hashes) {
+        const found = this.#blobs.get(hash);
+        if (found !== undefined && found.workerId === candidate) {
+          this.#blobs.delete(hash);
+          stale.push(hash);
+        }
+      }
+      usable = false;
+    }
+
+    if (stale.length > 0) this.#sink?.deleteBlobs(stale);
+
+    // 「全体一致才给提示」的语义不变：任何一项不可用就返回 null。
+    if (!usable || candidate === null) return null;
     return candidate;
   }
 
