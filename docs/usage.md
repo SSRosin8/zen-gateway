@@ -401,15 +401,55 @@ curl -s -H "Authorization: Bearer <apiSecret>" \
 库坏了（磁盘满、档位高于本程序）网关照常起，只是退回纯内存 —— 日志会说明。
 想重置统计直接删掉它，重启自动重建（**只丢统计，不丢配置**）。
 
+### 三张聚合表分别答什么
+
+| 表 | 答的问题 | 粒度 |
+|---|---|---|
+| `worker_stats` | 哪个账号被用得多／失败多 | 累计（不可按时间切） |
+| `model_usage` | 哪个模型烧了多少 token、缓存命中多少 | 按 (模型, Worker, UTC 日) |
+| `gateway_rejections` | **被网关自己挡了多少、为什么** | 按 (原因, 协议面, 模型, UTC 日) |
+
+`upstream_attempts` 与 `probe_results` 是**明细**，答"什么时候发生了什么"——
+它们有 **30 天保留期**（启动时清一次）。删明细不损失上面三张表的统计能力，
+那正是分开存的理由；而明细的毫秒级时间戳合起来是一份作息时间线，
+不该无限期攒着。
+
+### 网关拒绝：`not_free` 与 `retired` 要分开看
+
+两者处置完全不同：
+
+- **`not_free`** —— 模型名不符合免费约定。你配错了模型名。
+- **`retired`** —— 免费依据成立（后缀或名单命中）但**已不在上游在架目录**。
+  去 `models.extraFreeIds` 里把那个 id 删掉。
+
+其余五种（`body_*` / `model_missing` / `stream_unsupported` / `no_worker`）
+里最值得看的是 **`no_worker`**：它意味着全池冷却或全员不可用。
+
+> 被拒请求里的 `model` 是**客户端可控**且**没通过任何校验**的字符串，
+> 所以不形似模型 id（`[A-Za-z0-9._-]{1,64}`）的一律记成 `<other>` ——
+> 否则每发一个不同的名字就建一行，而这张表没有免费闸门那道保护。
+
 ### 两条最容易搞错的语义
 
 **请求数 ≠ 尝试数。** 一条 `w1 限流 → w2 成功` 的重试链是**一个**客户端请求、
 **两次**上游尝试。`upstream_attempts` 按尝试记行、用 `request_id` 串起同一条链，
 所以两个数字都能查到，且每次尝试都在对应 Worker 名下可见。
 
-**缺失的用量如实记为缺失，不估算。** `model_usage` 把 `requests_with_usage` 与
-`requests_without_usage` 分开计数。少记后者会让覆盖率虚高 ——
-一个「上游从不报用量」的模型会显示成 100% 覆盖。
+**缺失的用量如实记为缺失，不估算。** 而且有**三种**，不是两种：
+
+| 列 | 含义 | 处置 |
+|---|---|---|
+| `requests_with_usage` | 拿到了 | — |
+| `requests_without_usage` | **上游没报**（免费模型常见） | 不用改 |
+| `requests_dropped_usage` | **我们自己**没解析完整 | 看我们的界定常量 |
+
+后两者必须分开：处置方向相反。少记 `without` 会让覆盖率虚高（一个「上游从不报」
+的模型显示成 100% 覆盖）；把 `dropped` 折进 `without` 则把"我们丢了"伪装成
+"上游没报" —— 于是你会去查上游，而真实原因在我们这边。
+
+`dropped` 非 0 时看 `/health` 之外还要看日志里那行「响应过大,本次未能完整解析
+用量」。注意 `dropped` 与 `with_usage` **可以同时成立**：`dropped` 的语义是
+「这条响应没被完整解析」，而尾部的 usage 事件可能恰好落在丢弃之前的那一段里。
 
 用量**归属实际承接者**：上面那条链里 token 记在 **w2** 名下，不是候选链首位的 w1。
 多账号场景下「哪个账号烧了多少」正是最要紧的那个数字。
@@ -445,5 +485,11 @@ console.table(db.prepare("SELECT model, worker_id, input_tokens, output_tokens, 
 sqlite3 data/runtime.db "SELECT model, input_tokens, output_tokens, requests_with_usage, requests_without_usage FROM model_usage"
 ```
 
-统计写失败会被吞掉（不该让转发失败）但**有计数**，只是那个计数目前也没有
-读者 —— `doctor` 会报它（Phase 8）。一个一直写失败的库会安静地给出全 0 报表。
+统计写失败会被吞掉（不该让转发失败）但**有计数**，而 `/health` 会报它：
+
+```bash
+curl -s http://127.0.0.1:9877/health | node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>console.log(JSON.parse(s).storeWriteFailures))'
+```
+
+**0 是正常值。非 0 说明库有问题**（磁盘满／权限／档位不匹配），统计数字不可信 ——
+一个一直写失败的库会安静地给出全 0 报表，而那看起来像「没人用」。

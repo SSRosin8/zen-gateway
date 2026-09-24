@@ -394,7 +394,7 @@ schema：实测 +57ms，而 `service.mjs status` 全程只有 51ms。
    默认配置下**所有**模型的 `/v1/messages` 请求都会被拒 —— 而那个面刚刚验证可用。
    所以这里要先定清楚它的语义（是"放行闸门"还是"后台展示用的提示"），
    再决定默认值。眼下当作后备展示数据，不参与判定（→ Phase 9 的 Models 页）
-11. **「网关拒绝」这项规划要求没有实现**：Phase 7 的验收列了六项统计，
+11. ~~**「网关拒绝」这项规划要求没有实现**~~ —— **已补**（档位 3 的 `gateway_rejections`，七条拒绝路径全部记账，`not_free` 与 `retired` 分开）。原文：：Phase 7 的验收列了六项统计，
    前五项都有（Worker 计数 / per-model token / 缓存命中 / usage 覆盖率 /
    上游尝试日志），而**第六项「网关拒绝」没有表、没有列、没有写入点**
    （第七轮审核查出）。`relay.ts` 有 6 条在打上游之前就返回的路径
@@ -403,33 +403,33 @@ schema：实测 +57ms，而 `service.mjs status` 全程只有 51ms。
    于是「我有多少请求被网关自己挡了」现在完全无法回答，而
    `not_free` 与 `retired` 的处置完全不同（前者改模型名、后者删
    `extraFreeIds` 条目），哪种发生得多也不可观测（→ Phase 8/9）
-12. **`Scheduler.counts()` 曾带一个假的调用点声明**：注释写着「供 `/health`
+12. **仍有四个「实现了但没有生产读者」的成员**（`snapshot` / `status` / `surfacesFor` / `counts`；`writeFailures` 与 `recordProbe` 已在第七轮接上）。`counts()` 曾带一个假的调用点声明：注释写着「供 `/health`
    与管理后台」，而 `/health` 的 handler 完全不调 scheduler。已改为显式标注
    「无生产调用点」，与 `snapshot()`/`status()` 同格式。这类成员现已有六个
    （`snapshot` / `status` / `surfacesFor` / `counts` / `writeFailures` ×2 /
    `recordProbe`），**逐个标注是手工约定而实例还在增加** ——
    该建一道关卡（对白名单外的导出成员断言至少有一个非定义处引用）
-13. **`recordProbe()` 无生产调用点且无测试覆盖**：这条 SQL 从未执行过，
+13. ~~**`recordProbe()` 无生产调用点且无测试覆盖**~~ —— **已接**进 `EgressService.probeProxy`（汇合点）。原文：：这条 SQL 从未执行过，
    参数顺序与列名到 Phase 9 接上时要当全新代码验。同类陷阱 Phase 7 对两张
    亲和表认出来了（「CHECK 在生产路径上一次都没执行过」）并真跑了，
    对 `probe_results` 没有（→ Phase 9）
-14. **`requestCounts()` 是唯一随时间线性变慢的聚合**：`COUNT(DISTINCT
+14. **`requestCounts()` 是唯一随时间线性变慢的聚合**（已加 `sinceDay` 参数，管理 API 应总是传它）：`COUNT(DISTINCT
    request_id)` 全表扫，实测 100k 行 **12.4ms**、1M 行约 124ms，而它是同步
    调用 —— 接 HTTP 端点后会阻塞事件循环那么久。容量本身不是问题
    （实测 100k 行 21.6 MB，按每天 600 行算约 47 MB/年，不需要清理机制），
    但加端点时该给它一个 `sinceDay` 参数，与 `modelUsage`/`rates` 一致
-15. **`restore()` 绕过容量上限**：`loadSessions`/`loadBlobs` 没有 `LIMIT`，
+15. ~~**`restore()` 绕过容量上限**~~ —— **已修**：`LIMIT` 从 `SESSION_CAP`/`BLOB_CAP` 推导，取最新的 cap 条。原文：：`loadSessions`/`loadBlobs` 没有 `LIMIT`，
    而 `restore()` 不调 `evict`。今天不会越界（DB 是内存的忠实镜像、内存有
    cap），但它**依赖一个没有守卫的不变量**：「DB 行数 ≤ cap」。
    `SESSION_CAP` 被调小、或从一个旧库/备份恢复时会不成立。
    修法是 `LIMIT` 从内存侧的 cap 推导（那两个常量目前是 `affinity.ts` 私有，
    `affinityStore.ts` 拿不到 —— 本身就是分叉隐患）
-16. **统计写失败只能从 `writeFailures()` 看，没有生产读者**：`StatsStore` 与
+16. ~~**统计写失败没有生产读者**~~ —— **已接**进 `/health` 的 `storeWriteFailures`。原文：：`StatsStore` 与
    `AffinityStore` 都吞掉写异常并计数（统计是诊断设施，不该让转发失败），
    但那个计数目前**没有调用方** —— 与 `Scheduler.snapshot()` 同一个形态。
    一个一直写失败的库会安静地给出全 0 报表，而那看起来像「没人用」。
    `doctor.mjs` 应当报它（→ Phase 8）
-17. **「我们自己丢了用量」被记成「上游没报用量」**：`createUsageCollector.dropped()`
+17. ~~**「我们自己丢了用量」被记成「上游没报」**~~ —— **已分开**（`requests_dropped_usage`）。原文：：`createUsageCollector.dropped()`
    的文档明写它与 `usage() === null` 必须分开，否则「覆盖率会把我们自己丢的
    计成上游没报的」—— 而 `recordUsage` 只看 `totals`，全仓 `.dropped()` 的唯一
    读者是一行日志（第七轮审核查出）。两个入口都可达：一条 >1MiB 的 `data:` 行
@@ -450,7 +450,7 @@ schema：实测 +57ms，而 `service.mjs status` 全程只有 51ms。
    两条记录都丢（只留一个 `writeFailures` 计数）；`-5000` 照常写进库。
    生产上 `clock` 恒为 `Date.now` 所以不可达，但 `Math.max(0, Math.round(...))`
    的代价是一行，理由与 `clampTokens` 同源
-20. **`upstream_attempts` / `probe_results` 无保留策略**：`pruneExpired` 只管
+20. ~~**明细表无保留策略**~~ —— **已加**：启动时清 30 天前的明细，并开 `secure_delete`（否则「已清理」是假保证）。原文：：`pruneExpired` 只管
    两张亲和表（它的注释说「增长受内存侧容量上限约束」，那句只对亲和表成立）。
    容量不是问题（实测约 157 B/行，每天 600 行约 47 MB/年），但**毫秒级时间戳
    让它成为一份作息时间线** —— 在「意外把文件复制/打包出去」这个已列明的
