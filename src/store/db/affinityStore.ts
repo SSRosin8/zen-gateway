@@ -1,4 +1,9 @@
 import type { DatabaseSync, StatementSync } from "node:sqlite";
+/*
+ * 容量上限从 `affinity.ts` 取，不在这里另写一个数字（纪律 #4）——
+ * 两份必然分叉，而分叉方向是「DB 装回来的比内存上限多」。
+ */
+import { BLOB_CAP, SESSION_CAP } from "../../core/routing/affinity.ts";
 
 /**
  * 会话/指纹亲和的持久化。
@@ -147,12 +152,26 @@ export class AffinityStore {
    * 改小，那种情况下多留一会儿由内存侧的 `fresh()` 收口（它按当前 TTL 判）。
    */
   loadSessions(now: number): StoredBinding[] {
-    const rows = this.#db
-      .prepare(
-        `SELECT session_hash, worker_id, bound_at FROM session_affinity
-         WHERE expires_at > ? ORDER BY bound_at ASC`,
-      )
-      .all(now) as Array<Record<string, unknown>>;
+    /*
+     * `LIMIT` 从内存侧的 cap 推导。
+     *
+     * `restore()` 不调 `evict`，所以装载量若超过 cap，内存会在**下一次
+     * `bindSession` 之前**一直超容 —— 而那一次 `evict` 会一口气 FIFO 淘汰掉
+     * (size - cap) 个**活跃**绑定，正是「先清过期」那条承重规则要防的事，
+     * 只是触发路径从「攻击者灌表」换成了「重启」。
+     *
+     * 取**最新的** cap 条（`DESC LIMIT` 后反转）而不是最老的：超容时该留下
+     * 最可能还活跃的那些。反转是为了让返回顺序仍是升序 —— `Map` 的迭代顺序
+     * 就是 FIFO 淘汰顺序，见类注释。
+     */
+    const rows = (
+      this.#db
+        .prepare(
+          `SELECT session_hash, worker_id, bound_at FROM session_affinity
+           WHERE expires_at > ? ORDER BY bound_at DESC LIMIT ?`,
+        )
+        .all(now, SESSION_CAP) as Array<Record<string, unknown>>
+    ).reverse();
     return rows.map((r) => ({
       hash: r["session_hash"] as string,
       workerId: r["worker_id"] as string,
@@ -161,12 +180,15 @@ export class AffinityStore {
   }
 
   loadBlobs(now: number): StoredBinding[] {
-    const rows = this.#db
-      .prepare(
-        `SELECT blob_hash, worker_id, learned_at FROM blob_affinity
-         WHERE expires_at > ? ORDER BY learned_at ASC`,
-      )
-      .all(now) as Array<Record<string, unknown>>;
+    // 同 `loadSessions`：取最新的 cap 条，再反转回升序。
+    const rows = (
+      this.#db
+        .prepare(
+          `SELECT blob_hash, worker_id, learned_at FROM blob_affinity
+           WHERE expires_at > ? ORDER BY learned_at DESC LIMIT ?`,
+        )
+        .all(now, BLOB_CAP) as Array<Record<string, unknown>>
+    ).reverse();
     return rows.map((r) => ({
       hash: r["blob_hash"] as string,
       workerId: r["worker_id"] as string,

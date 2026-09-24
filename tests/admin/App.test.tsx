@@ -45,7 +45,14 @@ describe("App 首次启动", () => {
       vi.fn(() =>
         Promise.resolve({
           ok: true,
-          json: () => Promise.resolve({ ok: true, version: "0.1.0", uptimeSeconds: 12, pid: 4242 }),
+          json: () =>
+            Promise.resolve({
+              ok: true,
+              version: "0.1.0",
+              uptimeSeconds: 12,
+              pid: 4242,
+              storeWriteFailures: 0,
+            }),
         }),
       ),
     );
@@ -64,7 +71,14 @@ describe("App 首次启动", () => {
         Promise.resolve({
           ok: false,
           status: 500,
-          json: () => Promise.resolve({ ok: true, version: "伪造", uptimeSeconds: 0, pid: 1 }),
+          json: () =>
+            Promise.resolve({
+              ok: true,
+              version: "伪造",
+              uptimeSeconds: 0,
+              pid: 1,
+              storeWriteFailures: 0,
+            }),
         }),
       ),
     );

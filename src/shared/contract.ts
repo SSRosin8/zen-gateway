@@ -20,6 +20,20 @@ export const HealthSchema = z.object({
    * 管理面仅 loopback,pid 对同一用户不构成信息泄露。
    */
   pid: z.number().int().positive(),
+  /**
+   * 统计与亲和持久化的**累计写失败次数**。
+   *
+   * 两个 store 都吞掉写异常（诊断设施不该让转发失败），但**吞掉不等于可以
+   * 不知道**：一个一直写失败的库会安静地给出全 0 报表，而那看起来像
+   * 「没人用」。第七轮审核指出那个计数此前**没有任何生产读者** ——
+   * 与 `Scheduler.snapshot()` 同一形态。
+   *
+   * 放在 `/health` 而不是等 Phase 8 的 `doctor`：`service.mjs` 本来就在轮询
+   * 这个端点，而 doctor 也可以读它 —— 一个出口服务两个消费者。
+   *
+   * 0 是正常值。非 0 说明库有问题（磁盘满／权限／档位），统计数字不可信。
+   */
+  storeWriteFailures: z.number().int().nonnegative(),
 });
 export type Health = z.infer<typeof HealthSchema>;
 

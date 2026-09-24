@@ -7,6 +7,11 @@ import { judgeFree } from "../../core/models/free.ts";
 import { ModelCatalog, catalogIdentityOf, slotOf } from "../../core/models/catalog.ts";
 import { createUsageCollector, describeUsage, type TokenUsage } from "../../core/models/usage.ts";
 import { redactText } from "../../shared/redact.ts";
+/*
+ * 拒绝原因的联合类型从 `store/db/stats.ts` 取，不在这里另定义一份 ——
+ * 两份并行的字符串联合脱节方向必然是漏一个（纪律 #4）。
+ */
+import type { RejectionReason } from "../../store/db/stats.ts";
 import { buildUpstreamHeaders } from "../../core/upstream/headers.ts";
 import { upstreamUrl } from "../../core/upstream/url.ts";
 import type { UpstreamDeps } from "../../core/upstream/fetch.ts";
@@ -108,8 +113,19 @@ export type StatsSink = {
     workerId: string;
     at: number;
     usage: TokenUsage | null;
+    /** **我们自己**没解析完整（而不是上游没报）。见 `StatsStore.UsageRow`。 */
+    dropped?: boolean;
+  }): void;
+  /** 网关自己拒掉一次请求（从未到达上游）。 */
+  recordRejection(row: {
+    reason: RejectionReason;
+    protocol: string;
+    model: string | null;
+    at: number;
   }): void;
 };
+
+export type { RejectionReason };
 
 /** 客户端请求体上限。转发面对多模态保持宽松,但不能无界。 */
 const MAX_RELAY_BODY_BYTES = 64 * 1024 * 1024;
@@ -145,19 +161,46 @@ async function handleRelay(
 ): Promise<Response> {
   const config = deps.configOf();
 
+  /*
+   * 取当前时刻。**声明在函数开头**，因为第 1 步的拒绝记账就要用它 ——
+   * 三个动作各用它实际发生的那一刻，理由见下文 `planNow` 处的表。
+   */
+  const nowOf = (): number => deps.clock?.() ?? Date.now();
+
+  /*
+   * 网关拒绝的记账（规划要求的第六项统计）。
+   *
+   * 六条在打上游**之前**就返回的路径此前全部零记录 —— 于是「我有多少请求
+   * 被网关自己挡了」无法回答，而 `not_free` 与 `retired` 的处置完全不同
+   * （前者改模型名、后者删 `extraFreeIds` 条目），哪种发生得多也不可观测。
+   *
+   * 刻意**不写进 `upstream_attempts`**：那张表的语义是「上游尝试」，
+   * 把没发生的尝试写进去会让「这个 Worker 转发过什么」包含它没参与的请求。
+   *
+   * `model` 可能还没解析出来（体读失败/非法 JSON），传 null 由
+   * `normalizeRejectionModel` 收口 —— 它同时防住「客户端可控字符串进主键」
+   * 这个写放大原语（这张表没有免费闸门那道保护）。
+   */
+  const reject = (reason: RejectionReason, model: string | null): void => {
+    deps.stats?.recordRejection({ reason, protocol: surface.id, model, at: nowOf() });
+  };
+
   /* ---- 1. 读原始字节(只读一次) ---- */
   let raw: Uint8Array;
   try {
     raw = new Uint8Array(await c.req.arrayBuffer());
   } catch (err) {
     deps.log?.(`读取请求体失败: ${logMessageFor(err)}`);
+    reject("body_unreadable", null);
     return c.json(gatewayError("invalid_request", "无法读取请求体"), 400);
   }
 
   if (raw.byteLength > MAX_RELAY_BODY_BYTES) {
+    reject("body_too_large", null);
     return c.json(gatewayError("invalid_request", "请求体超过上限"), 413);
   }
   if (raw.byteLength === 0) {
+    reject("body_empty", null);
     return c.json(gatewayError("invalid_request", "请求体为空"), 400);
   }
 
@@ -167,11 +210,13 @@ async function handleRelay(
     parsed = JSON.parse(new TextDecoder().decode(raw));
   } catch {
     // 不回显原始体:它可能很大,也可能含用户的对话内容。
+    reject("body_not_json", null);
     return c.json(gatewayError("invalid_request", "请求体不是合法 JSON"), 400);
   }
 
   const model = surface.extractModel(parsed);
   if (model === null) {
+    reject("model_missing", null);
     return c.json(
       gatewayError("invalid_request", "请求体缺少合法的 model 字段"),
       400,
@@ -265,6 +310,12 @@ async function handleRelay(
       verdict.reason === "retired"
         ? `模型 ${model} 已不在上游在架目录中(它符合免费约定,但上游已下架)。可刷新 /v1/models 确认,并从配置的 models.extraFreeIds 中移除`
         : `模型 ${model} 不在免费集内。本网关只放行免费模型;可在配置的 models.extraFreeIds 中调整`;
+    /*
+     * `not_free` 与 `retired` **分开计数**：处置完全不同 ——
+     * 前者是用户配错了模型名，后者要去 `extraFreeIds` 里删一个已下架的 id。
+     * 哪种发生得多，是决定"该改文档还是该改配置"的那个数字。
+     */
+    reject(verdict.reason === "retired" ? "retired" : "not_free", model);
     return c.json(gatewayError("model_not_allowed", message), 403);
   }
 
@@ -307,6 +358,7 @@ async function handleRelay(
    * 把「只声明了 sse」当成「必须流式」会拦掉合法请求。
    */
   if (surface.streaming === "none" && streaming) {
+    reject("stream_unsupported", model);
     return c.json(
       gatewayError(
         "invalid_request",
@@ -347,7 +399,6 @@ async function handleRelay(
    * 我原先写在 `scheduler.ts` 的注释说「亲和绑定与冷却必须看同一个 now」——
    * 那句只对第一行成立,被我错误地推广到了整条链。
    */
-  const nowOf = (): number => deps.clock?.() ?? Date.now();
   const planNow = nowOf();
 
   /* ---- 5. 选 Worker(调度状态机) ---- */
@@ -371,6 +422,12 @@ async function handleRelay(
   const plan = deps.scheduler.plan({ config, now: planNow, sessionHash, blobHashes });
   const targets: readonly AttemptTarget[] = plan.targets;
   if (targets.length === 0) {
+    /*
+     * 这条是六种拒绝里**最需要计数**的：它意味着全池冷却或全员不可用，
+     * 而那正是 `x-zen-gateway-route` 想诊断的东西 —— 但头只有发起请求的
+     * 那个客户端看得到，事后完全查不到。
+     */
+    reject("no_worker", model);
     return c.json(
       gatewayError("no_worker_available", describeNoWorker(config)),
       503,
@@ -609,6 +666,20 @@ async function handleRelay(
               workerId,
               at: nowOf(),
               usage: totals,
+              /*
+               * **我们自己丢了**要与「上游没报」分开记。
+               *
+               * `createUsageCollector.dropped()` 的文档早就写明这两者必须分开
+               * （否则"覆盖率会把我们自己丢的计成上游没报的"），而
+               * Phase 7 只看 `totals`，把 `.dropped()` 的唯一读者留在一行日志上。
+               * 与「不记 without 会让覆盖率虚高」严格对称，而处置方向相反：
+               * 这一侧非 0 说明**我们的界定常量**要看（改代码），
+               * 那一侧是上游的性质（不用改）。
+               *
+               * 两个入口：一条 >1 MiB 的 `data:` 行被整条弃掉，
+               * 以及**上游中途断流**（更常见）。
+               */
+              dropped: usage.dropped(),
             });
           }
         },

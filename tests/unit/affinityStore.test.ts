@@ -5,7 +5,7 @@ import { join } from "node:path";
 import type { DatabaseSync } from "node:sqlite";
 import { openDb } from "../../src/store/db/open.ts";
 import { AffinityStore } from "../../src/store/db/affinityStore.ts";
-import { AffinityMap, digestOf } from "../../src/core/routing/affinity.ts";
+import { AffinityMap, BLOB_CAP, digestOf, SESSION_CAP } from "../../src/core/routing/affinity.ts";
 
 let root: string;
 let file: string;
@@ -271,6 +271,48 @@ describe("内存淘汰要镜像到库 —— 否则被淘汰的条目重启后�
     // 否则每次重启它都会复活一次。
     expect(map.lookupSession(h("s1"), T0 + 1, TTL, () => false)).toBeNull();
     expect(store.loadSessions(T0 + 1)).toHaveLength(0);
+  });
+});
+
+describe("装载受容量上限约束（restore 不调 evict）", () => {
+  /*
+   * 第七轮审核：`loadSessions` 先前无 `LIMIT`，而 `restore()` 不调 `evict` ——
+   * 装载量超过 cap 时内存会一直超容到**下一次 `bindSession`**，而那一次
+   * `evict` 会一口气 FIFO 淘汰掉 (size - cap) 个**活跃**绑定 —— 正是
+   * 「先清过期」那条承重规则要防的事，只是触发路径换成了「重启」。
+   *
+   * 今天 DB 是内存的忠实镜像所以不会越界，但那**依赖一个没有守卫的不变量**
+   * 「DB 行数 ≤ cap」—— cap 被调小、或从旧库/备份恢复时不成立。
+   */
+  it("库里超过 cap 时只装回 cap 条,且取最新的", () => {
+    const over = SESSION_CAP + 50;
+    // 绕过内存侧的 cap，直接往库里塞（模拟"从一个旧库恢复"）。
+    for (let i = 0; i < over; i += 1) {
+      store.putSession(h(`s${i}`), "w", T0 + i, TTL);
+    }
+
+    const loaded = store.loadSessions(T0);
+    expect(loaded).toHaveLength(SESSION_CAP);
+    // 取最新的那批：最老的 s0 不在，最新的在。
+    const hashes = new Set(loaded.map((r) => r.hash));
+    expect(hashes.has(h("s0"))).toBe(false);
+    expect(hashes.has(h(`s${over - 1}`))).toBe(true);
+    // 顺序仍是升序 —— Map 的迭代顺序就是 FIFO 淘汰顺序。
+    expect(loaded[0]!.at).toBeLessThan(loaded[loaded.length - 1]!.at);
+  });
+
+  it("指纹表同理", () => {
+    const over = BLOB_CAP + 20;
+    for (let i = 0; i < over; i += 1) store.putBlobs([h(`b${i}`)], "w", T0 + i, TTL);
+
+    const loaded = store.loadBlobs(T0);
+    expect(loaded).toHaveLength(BLOB_CAP);
+    expect(loaded[0]!.at).toBeLessThan(loaded[loaded.length - 1]!.at);
+  });
+
+  it("未超 cap 时全部装回 —— 上限不过度裁剪", () => {
+    for (let i = 0; i < 5; i += 1) store.putSession(h(`s${i}`), "w", T0 + i, TTL);
+    expect(store.loadSessions(T0)).toHaveLength(5);
   });
 });
 

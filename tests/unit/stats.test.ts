@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { DatabaseSync } from "node:sqlite";
 import { openDb } from "../../src/store/db/open.ts";
-import { StatsStore, dayKey } from "../../src/store/db/stats.ts";
+import { StatsStore, dayKey, UNKNOWN_MODEL } from "../../src/store/db/stats.ts";
 import type { TokenUsage } from "../../src/core/models/usage.ts";
 
 let root: string;
@@ -215,7 +215,12 @@ describe("派生比值:分母为 0 给 null 而不是 0", () => {
    * 后者是一个需要排查的真实数字。给 0 会把前者伪装成后者。
    */
   it("空库两个比值都是 null", () => {
-    expect(stats.rates()).toEqual({ cacheHitRate: null, usageCoverage: null });
+    expect(stats.rates()).toEqual({
+      cacheHitRate: null,
+      usageCoverage: null,
+      // 计数型字段给 0 而不是 null —— 它不是比值，"还没有丢过"是个确定的事实。
+      droppedUsageCount: 0,
+    });
   });
 
   it("有请求但 token 全 0 时,覆盖率有值而命中率仍是 null", () => {
@@ -390,5 +395,232 @@ describe("recentAttempts", () => {
     // limit 越界不报错，夹到合法范围。
     expect(stats.recentAttempts(0)).toHaveLength(1);
     expect(stats.recentAttempts(10_000)).toHaveLength(5);
+  });
+});
+
+describe("网关拒绝（规划要求的第六项统计）", () => {
+  /*
+   * Phase 7 的验收列了六项统计，前五项都实现了，而第六项「网关拒绝」
+   * 没有表、没有列、没有写入点（第七轮审核查出）。`relay.ts` 有六条在打上游
+   * **之前**就返回的路径全部零记录 —— 403 那条连日志都不打。
+   *
+   * 于是「我有多少请求被网关自己挡了」完全无法回答，而 `not_free` 与
+   * `retired` 的处置完全不同（前者改模型名、后者删 `extraFreeIds` 条目）。
+   */
+  it("按 reason × protocol × model × day 累加", () => {
+    stats.recordRejection({ reason: "not_free", protocol: "chat", model: "gpt-4", at: T0 });
+    stats.recordRejection({ reason: "not_free", protocol: "chat", model: "gpt-4", at: T0 + 1 });
+    stats.recordRejection({ reason: "retired", protocol: "chat", model: "glm-5-free", at: T0 });
+
+    const rows = stats.rejections();
+    expect(rows).toHaveLength(2);
+    expect(rows[0]).toEqual({ reason: "not_free", protocol: "chat", model: "gpt-4", count: 2 });
+    expect(stats.rejectionsByReason()).toEqual({ not_free: 2, retired: 1 });
+  });
+
+  it("not_free 与 retired 分开计数 —— 处置完全不同", () => {
+    stats.recordRejection({ reason: "not_free", protocol: "chat", model: "a", at: T0 });
+    stats.recordRejection({ reason: "retired", protocol: "chat", model: "b", at: T0 });
+    const byReason = stats.rejectionsByReason();
+    // 合成一类的话「该改文档还是该改配置」就没有答案了。
+    expect(byReason["not_free"]).toBe(1);
+    expect(byReason["retired"]).toBe(1);
+  });
+
+  it("model 为 null（体还没解析出来）时记占位符", () => {
+    stats.recordRejection({ reason: "body_not_json", protocol: "chat", model: null, at: T0 });
+    expect(stats.rejections()[0]?.model).toBe(UNKNOWN_MODEL);
+  });
+
+  /*
+   * 这张表的主键**含客户端可控字符串**，而被拒请求里的 `model` 恰好是
+   * 没通过任何校验的那个 —— 不归一化就是一个写放大原语。
+   * `model_usage` 靠免费闸门挡住了这件事，这张表没有那道闸门。
+   */
+  it("畸形 model 被归一化 —— 不让客户端任意扩张主键基数", () => {
+    for (const bad of [
+      "x".repeat(200),
+      "evil‮model",
+      "a b",
+      "has space",
+      "semi;colon",
+      "",
+    ]) {
+      stats.recordRejection({ reason: "not_free", protocol: "chat", model: bad, at: T0 });
+    }
+    // 六个畸形值全部折叠成一行占位符。
+    const rows = stats.rejections();
+    expect(rows).toHaveLength(1);
+    expect(rows[0]).toMatchObject({ model: UNKNOWN_MODEL, count: 6 });
+  });
+
+  it("形似模型 id 的值保留原样 —— 归一化不过度", () => {
+    for (const ok of ["mimo-v2.6-flash-free", "big-pickle", "gpt-4.1_turbo"]) {
+      stats.recordRejection({ reason: "not_free", protocol: "chat", model: ok, at: T0 });
+    }
+    expect(stats.rejections().map((r) => r.model).sort()).toEqual([
+      "big-pickle",
+      "gpt-4.1_turbo",
+      "mimo-v2.6-flash-free",
+    ]);
+  });
+
+  it("sinceDay 过滤", () => {
+    const nextDay = T0 + 24 * 3_600_000;
+    stats.recordRejection({ reason: "not_free", protocol: "chat", model: "a", at: T0 });
+    stats.recordRejection({ reason: "not_free", protocol: "chat", model: "a", at: nextDay });
+    expect(stats.rejections()[0]?.count).toBe(2);
+    expect(stats.rejections(dayKey(nextDay))[0]?.count).toBe(1);
+  });
+});
+
+describe("「我们自己丢了用量」与「上游没报」分开", () => {
+  /*
+   * `createUsageCollector.dropped()` 的文档明写这两者必须分开，否则
+   * 「覆盖率会把我们自己丢的计成上游没报的」—— 而 Phase 7 只看 `totals`。
+   *
+   * 处置方向相反：dropped 非 0 说明**我们的界定常量**要看（改代码），
+   * without 是上游的性质（不用改）。
+   */
+  it("dropped 进独立计数，不进 without", () => {
+    stats.recordUsage({ model: "m", workerId: "w1", at: T0, usage: null, dropped: true });
+
+    const row = stats.modelUsage()[0];
+    expect(row).toMatchObject({
+      requestsWithUsage: 0,
+      // 关键：**不**计进 without —— 我们根本不知道上游有没有报。
+      requestsWithoutUsage: 0,
+      requestsDroppedUsage: 1,
+    });
+  });
+
+  it("上游没报仍进 without", () => {
+    stats.recordUsage({ model: "m", workerId: "w1", at: T0, usage: null, dropped: false });
+    expect(stats.modelUsage()[0]).toMatchObject({
+      requestsWithoutUsage: 1,
+      requestsDroppedUsage: 0,
+    });
+  });
+
+  it("dropped 算进覆盖率的分母 —— 那些请求确实发生过", () => {
+    stats.recordUsage({ model: "m", workerId: "w1", at: T0, usage: usage() });
+    stats.recordUsage({ model: "m", workerId: "w1", at: T0, usage: null, dropped: true });
+
+    // 把 dropped 从分母去掉会得到 1.0（虚高），与「不记 without」同一个错误。
+    expect(stats.rates().usageCoverage).toBe(0.5);
+    // 且它单独可见 —— 非 0 说明要看我们的界定常量。
+    expect(stats.rates().droppedUsageCount).toBe(1);
+  });
+
+  it("三个计数互斥", () => {
+    stats.recordUsage({ model: "m", workerId: "w1", at: T0, usage: usage() });
+    stats.recordUsage({ model: "m", workerId: "w1", at: T0, usage: null });
+    stats.recordUsage({ model: "m", workerId: "w1", at: T0, usage: null, dropped: true });
+
+    expect(stats.modelUsage()[0]).toMatchObject({
+      requestsWithUsage: 1,
+      requestsWithoutUsage: 1,
+      requestsDroppedUsage: 1,
+    });
+  });
+});
+
+describe("明细表的保留期", () => {
+  /*
+   * `upstream_attempts` 与 `probe_results` 的每行带毫秒级时间戳 ——
+   * 合起来是一份作息时间线，在「意外把文件复制出去」这个威胁下比聚合值
+   * 敏感得多。聚合所需的信息已在按天的两张表里，所以删明细不损失统计能力。
+   */
+  it("只删早于 cutoff 的明细，聚合表不动", () => {
+    const old = T0 - 40 * 24 * 3_600_000;
+    for (const [at, req] of [[old, "旧"], [T0, "新"]] as Array<[number, string]>) {
+      stats.recordAttempt({
+        requestId: req,
+        attemptIndex: 0,
+        workerId: "w1",
+        protocol: "chat",
+        model: "m",
+        status: 200,
+        failureKind: null,
+        latencyMs: 1,
+        at,
+      });
+    }
+    stats.recordProbe({ proxyId: "p1", at: old, ok: true, egressIp: "1.2.3.4", latencyMs: 5, failureKind: null });
+    stats.recordUsage({ model: "m", workerId: "w1", at: old, usage: usage() });
+
+    const removed = stats.pruneDetailsBefore(T0 - 24 * 3_600_000);
+    expect(removed).toBe(2); // 旧 attempt + 旧 probe
+
+    expect(stats.recentAttempts().map((r) => r.requestId)).toEqual(["新"]);
+    // worker_stats 与 model_usage 是按天聚合的，不受影响 —— 那正是分开存的理由。
+    expect(stats.workerTotals()[0]?.attempts).toBe(2);
+    expect(stats.modelUsage()[0]?.requestsWithUsage).toBe(1);
+  });
+
+  it("没有过期行时删 0 条，不报错", () => {
+    stats.recordAttempt({
+      requestId: "r",
+      attemptIndex: 0,
+      workerId: "w1",
+      protocol: "chat",
+      model: "m",
+      status: 200,
+      failureKind: null,
+      latencyMs: 1,
+      at: T0,
+    });
+    expect(stats.pruneDetailsBefore(T0 - 1_000)).toBe(0);
+    expect(stats.recentAttempts()).toHaveLength(1);
+  });
+});
+
+describe("recordProbe（此前零调用零测试）", () => {
+  /*
+   * 第七轮审核查出：这条 SQL **从未执行过** —— 参数顺序与列名都未经验证。
+   * Phase 7 对两张亲和表认出了同一个陷阱（「CHECK 在生产路径上一次都没
+   * 执行过」）并真跑了，对 `probe_results` 没有。
+   */
+  it("成功的探测写下 egressIp 与耗时", () => {
+    stats.recordProbe({
+      proxyId: "node-us",
+      at: T0,
+      ok: true,
+      egressIp: "203.0.113.7",
+      latencyMs: 142,
+      failureKind: null,
+    });
+    const row = db.prepare("SELECT * FROM probe_results").get() as Record<string, unknown>;
+    expect(row).toMatchObject({
+      proxy_id: "node-us",
+      at: T0,
+      ok: 1,
+      egress_ip: "203.0.113.7",
+      latency_ms: 142,
+      failure_kind: null,
+    });
+  });
+
+  it("失败的探测 ok=0 且 egressIp 为 null", () => {
+    stats.recordProbe({
+      proxyId: "node-jp",
+      at: T0,
+      ok: false,
+      egressIp: null,
+      latencyMs: null,
+      failureKind: "transport",
+    });
+    expect(db.prepare("SELECT ok, egress_ip, failure_kind FROM probe_results").get()).toEqual({
+      ok: 0,
+      egress_ip: null,
+      failure_kind: "transport",
+    });
+  });
+
+  it("ok 的 CHECK 只接受 0/1 —— schema 约束真的生效", () => {
+    // 直接打 SQL（绕过布尔转换）验 CHECK 存在。
+    expect(() =>
+      db.prepare("INSERT INTO probe_results (proxy_id, at, ok) VALUES (?, ?, ?)").run("p", 1, 7),
+    ).toThrow(/CHECK/);
   });
 });

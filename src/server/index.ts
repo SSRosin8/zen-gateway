@@ -38,40 +38,17 @@ async function main(): Promise<void> {
   }
 
   /*
-   * 出口服务在进程内**唯一**。
+   * 运行时数据库。**打不开不阻止启动。**
    *
-   * 转发与探测共用它 —— 见 EgressService.upstreamDeps 的说明:
-   * Clash selector 的 `now` 是进程外的全局状态,两套锁会让探测量到的出口
-   * 与转发实际用的出口不一致,而出口隔离报告正是按实测 IP 分组。
-   */
-  const egress = new EgressService({
-    timeouts: {
-      headersTimeoutMs: config.gateway.headersTimeoutMs,
-      bodyTimeoutMs: config.gateway.bodyTimeoutMs,
-    },
-  });
-
-  /*
-   * 配置读取做成函数,让热更新后下一个请求即生效。
+   * 统计、探测历史与亲和持久化都是**可用性改善**，不是转发的正确性前提。
+   * 一个坏掉的统计库（磁盘满、档位高于本程序、权限错）让整个网关起不来
+   * 是错误的取舍 —— 用户要的是转发能用。失败只打一行然后继续，
+   * 三个 sink 保持未注入，行为退回 Phase 6。
    *
-   * Phase 3 还没有改配置的入口,所以这里返回的始终是启动时那份;
-   * 但把形状定成函数,Phase 9 加管理 API 时就不必回头改所有调用点。
-   */
-  /*
-   * 运行时数据库（Phase 7）。
+   * 与 `loadConfig` 刻意相反：配置坏了**必须**拒绝启动，因为那意味着凭证、
+   * 出口绑定、放行规则都是未知的 —— 那是正确性。
    *
-   * ## 打不开**不阻止启动**
-   *
-   * 统计与亲和持久化都是**可用性改善**，不是转发的正确性前提：
-   * 前者是诊断设施，后者只影响「重启后要不要重挑一次 Worker」。
-   * 一个坏掉的统计库（磁盘满、档位高于本程序、文件权限错）让整个网关
-   * 起不来是错误的取舍 —— 用户要的是转发能用。
-   *
-   * 所以这里失败只打一行可自查的话然后继续，`stats`/`affinitySink`
-   * 保持未注入，转发路径退回纯内存（Phase 6 的行为）。
-   *
-   * 与 `loadConfig` 的处置刻意不同：配置坏了**必须**拒绝启动，
-   * 因为那意味着凭证、出口绑定、放行规则都是未知的 —— 那是正确性。
+   * 放在 egress **之前**：`EgressService` 要拿 `probes` sink。
    */
   let stats: StatsStore | undefined;
   let affinityStore: AffinityStore | undefined;
@@ -85,7 +62,23 @@ async function main(): Promise<void> {
     );
   }
 
+  const egress = new EgressService({
+    timeouts: {
+      headersTimeoutMs: config.gateway.headersTimeoutMs,
+      bodyTimeoutMs: config.gateway.bodyTimeoutMs,
+    },
+    // 探测结果落盘 —— `egressIp` 是出口隔离判定的唯一依据，而先前它只活在返回值里。
+    ...(stats !== undefined ? { probes: stats } : {}),
+  });
+
   /*
+   * 出口服务在进程内**唯一** —— 见 `EgressService.upstreamDeps`：
+   * Clash selector 的 `now` 是进程外的全局状态，两套锁会让探测量到的出口
+   * 与转发实际用的出口不一致，而出口隔离报告正是按实测 IP 分组。
+   *
+   * 配置读取做成函数，让热更新后下一个请求即生效（Phase 9 加管理 API 时
+   * 不必回头改所有调用点）。
+   *
    * 调度器在这里建，而不是让 `createApp` 兜底 new 一个 ——
    * 它需要拿到 `affinityStore` 才能镜像落盘，而装配层不该认识数据库。
    */
@@ -118,6 +111,46 @@ async function main(): Promise<void> {
     }
   }
 
+  /*
+   * 明细表的保留期清理。
+   *
+   * `upstream_attempts` 与 `probe_results` 的每行带**毫秒级时间戳**，合起来
+   * 是一份作息时间线（哪天几点在工作、连续多久）—— 在「意外把文件复制/
+   * 打包出去」这个威胁下比聚合值敏感得多。容量本身不是问题（约 47 MB/年）。
+   *
+   * 聚合所需的信息已在 `worker_stats` 与 `model_usage` 里（按天，不按毫秒），
+   * 所以删明细不损失统计能力。`secure_delete = ON` 保证删掉的页真被擦掉，
+   * 否则「已经清过了」是个假保证。
+   *
+   * 30 天：够排查「上周那次限流是怎么回事」，又不至于攒成一年的时间线。
+   * 启动时跑一次即可 —— 这是个自用工具，不值得养一个 interval。
+   */
+  const DETAIL_RETENTION_DAYS = 30;
+  if (stats !== undefined) {
+    const cutoff = Date.now() - DETAIL_RETENTION_DAYS * 24 * 3_600_000;
+    const removed = stats.pruneDetailsBefore(cutoff);
+    if (removed > 0) {
+      console.log(`已清理 ${removed} 条超过 ${DETAIL_RETENTION_DAYS} 天的明细记录`);
+    }
+  }
+
+  /*
+   * 统计/持久化的写失败**汇合到一处报告**。
+   *
+   * 两个 store 各有一个 `writeFailures()`，而 `affinityStore` 被塞进
+   * `Scheduler` 的构造参数后就再也拿不出来 —— 第七轮审核指出这是个会在
+   * Phase 8 才发现的装配问题（doctor 要报两个数，而进程里没有地方同时
+   * 持有两个引用）。现在这里持有它们，`/health` 读这个函数。
+   *
+   * 吞掉写失败是对的（诊断设施不该让转发失败），但**吞掉不等于可以不知道**：
+   * 一个一直写失败的库会安静地给出全 0 报表，而那看起来像「没人用」。
+   */
+  const storeWriteFailures = (): number => {
+    const a = stats?.writeFailures().count ?? 0;
+    const b = affinityStore?.writeFailures().count ?? 0;
+    return a + b;
+  };
+
   const catalog = new ModelCatalog({ log: (message) => console.error(message) });
 
   const app = createApp({
@@ -126,6 +159,7 @@ async function main(): Promise<void> {
     catalog,
     scheduler,
     ...(stats !== undefined ? { stats } : {}),
+    storeWriteFailures,
     log: (message) => console.error(message),
   });
 

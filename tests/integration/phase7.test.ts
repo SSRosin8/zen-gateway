@@ -410,6 +410,242 @@ describe("重试链的统计语义", () => {
   });
 });
 
+describe("writeFailures 有了生产读者（/health）", () => {
+  /*
+   * 第七轮审核：两个 store 的 `writeFailures()` **没有任何生产读者** ——
+   * 与 `Scheduler.snapshot()` 同一形态。一个一直写失败的库会安静地给出
+   * 全 0 报表，而那看起来像「没人用」。
+   *
+   * 放在 `/health` 而不是等 Phase 8 的 doctor：`service.mjs` 本来就在轮询
+   * 这个端点。断言必须验**非 0 会被报出来** —— 只验字段存在的话，
+   * 把它写死成 0 仍然通过（实测过）。
+   */
+  it("库坏掉后 /health 报出非 0 的失败次数", async () => {
+    const app = createApp({
+      configOf: () => config(),
+      egress,
+      scheduler: new Scheduler(),
+      stats,
+      storeWriteFailures: () => stats.writeFailures().count,
+      log: () => {},
+    });
+
+    // 先确认基线是 0。
+    const before = (await (await app.request("/health")).json()) as { storeWriteFailures: number };
+    expect(before.storeWriteFailures).toBe(0);
+
+    // 关掉库制造写失败。
+    db.close();
+    stats.recordUsage({ model: "m", workerId: "w1", at: Date.now(), usage: null });
+
+    const after = (await (await app.request("/health")).json()) as { storeWriteFailures: number };
+    expect(after.storeWriteFailures).toBeGreaterThan(0);
+
+    db = openDb(join(root, "data", "runtime.db"));
+  });
+});
+
+describe("探测结果落盘（recordProbe 有了生产调用点）", () => {
+  /*
+   * 第七轮审核：`recordProbe` 零调用点**且零测试** —— 那条 SQL 从未执行过，
+   * 而 `probeAll` 的结果只存在于返回值里。于是「这个代理上周是不是换过
+   * 出口 IP」无法回答，而 `egressIp` 正是出口隔离判定的唯一依据。
+   */
+  it("probeProxy 把结果写进 probe_results", async () => {
+    const svc = new EgressService({
+      timeouts: { headersTimeoutMs: 3_000, bodyTimeoutMs: 3_000 },
+      probes: stats,
+      services: [
+        {
+          url: `http://127.0.0.1:${upstreamPort}/echo-ip`,
+          extract: (text) => (text.trim() === "" ? null : text.trim()),
+        },
+      ],
+      probeTimeoutMs: 3_000,
+    });
+    handler = (_req, res) => {
+      res.writeHead(200, { "content-type": "text/plain" });
+      res.end("203.0.113.9");
+    };
+
+    try {
+      const r = await svc.probeProxy(config(), null);
+      expect(r.outcome.ok).toBe(true);
+
+      const row = db.prepare("SELECT proxy_id, ok, egress_ip FROM probe_results").get();
+      expect(row).toMatchObject({ proxy_id: "__direct__", ok: 1, egress_ip: "203.0.113.9" });
+    } finally {
+      await svc.close();
+    }
+  });
+
+  it("失败的探测也记一行 —— 「上周探测失败过」同样要能查", async () => {
+    const svc = new EgressService({
+      timeouts: { headersTimeoutMs: 3_000, bodyTimeoutMs: 3_000 },
+      probes: stats,
+      services: [{ url: "http://127.0.0.1:1/never", extract: () => null }],
+      probeTimeoutMs: 500,
+    });
+    try {
+      const r = await svc.probeProxy(config(), null);
+      expect(r.outcome.ok).toBe(false);
+
+      const row = db.prepare("SELECT ok, egress_ip, failure_kind FROM probe_results").get() as
+        | Record<string, unknown>
+        | undefined;
+      expect(row?.["ok"]).toBe(0);
+      expect(row?.["egress_ip"]).toBeNull();
+      expect(row?.["failure_kind"]).not.toBeNull();
+    } finally {
+      await svc.close();
+    }
+  });
+});
+
+describe("「我们自己丢了用量」经转发路径落库", () => {
+  /*
+   * `createUsageCollector.dropped()` 的文档明写它与 `usage() === null`
+   * 必须分开，否则「覆盖率会把我们自己丢的计成上游没报的」。
+   *
+   * 这一条必须是集成测试：单测能验 store 按 `dropped: true` 写对了行，
+   * 但验不了**转发路径真的把 `usage.dropped()` 传下来** —— 实测把它改成
+   * `dropped: false` 后单测与既有集成测试全绿。
+   */
+  it("响应过大且分块到达时记 dropped,而不是 without", async () => {
+    /*
+     * **分块**写出而不是一次 `res.end()`。
+     *
+     * 实测差别（我第一版写错了，记下来）：一次性 feed 一个巨大 JSON 时
+     * `usage()` 仍能拿到（那一次 feed 里 `buffered` 还没超限就把整段收下了，
+     * 尾部的 usage 恰好在里面），于是结果是「有用量 **且** dropped」。
+     * 而真实的流式响应是**分块**到达的 —— 那时 `buffered` 在中途就超限，
+     * 后续块不再累积，尾部的 usage 就真的丢了。
+     *
+     * 后者才是这条要验的形态：**我们自己丢了**，而"上游有没有报"我们不知道。
+     */
+    handler = (_req, res) => {
+      res.writeHead(200, { "content-type": "application/json" });
+      const payload = JSON.stringify({
+        id: "x",
+        filler: "x".repeat(1024 * 1024 + 1024),
+        usage: { prompt_tokens: 7, completion_tokens: 3 },
+      });
+      for (let i = 0; i < payload.length; i += 65_536) {
+        res.write(payload.slice(i, i + 65_536));
+      }
+      res.end();
+    };
+    const app = await makeApp(config());
+    await (await app.request("/v1/chat/completions", relay(chatBody()))).text();
+
+    /*
+     * 实测结果（比我预期的更有信息量，记下来）：`requestsWithUsage: 1`
+     * **且** `requestsDroppedUsage: 1`。
+     *
+     * 两个标记是**独立**的，这是对的 —— `dropped` 的语义是「我们**没能完整**
+     * 解析这条响应」，而不是「我们拿不到用量」。这一次恰好两者都成立：
+     * 尾部的 usage 事件落在超限**之前**的那一段里所以拿到了，
+     * 而中间那 1 MiB 我们确实丢了。
+     *
+     * 所以正确的断言是：`dropped` 被记下（我们丢过东西这件事可观测），
+     * 而**不**被计进 `without`（我们没有假装"上游没报"）。
+     */
+    const row = stats.modelUsage()[0];
+    expect(row?.requestsDroppedUsage).toBe(1);
+    // 关键：不记进 without —— 那会把"我们丢了"伪装成"上游没报"。
+    expect(row?.requestsWithoutUsage).toBe(0);
+    expect(stats.rates().droppedUsageCount).toBe(1);
+  });
+
+  it("正常大小的响应不记 dropped —— 不误报", async () => {
+    const app = await makeApp(config());
+    await (await app.request("/v1/chat/completions", relay(chatBody()))).text();
+    expect(stats.modelUsage()[0]).toMatchObject({
+      requestsWithUsage: 1,
+      requestsDroppedUsage: 0,
+    });
+  });
+});
+
+describe("网关拒绝真的经转发路径落库", () => {
+  /*
+   * 规划要求的第六项统计。六条在打上游**之前**返回的路径此前全部零记录 ——
+   * 而这里要验的正是「转发路径真的调了 `recordRejection`」，
+   * 单测只能验 store 按给定入参写对了行。
+   */
+  it("免费闸门拒绝时记 not_free,且不写任何上游尝试", async () => {
+    const app = await makeApp(config());
+    const res = await app.request(
+      "/v1/chat/completions",
+      relay(chatBody({ model: "claude-opus-5" })),
+    );
+    expect(res.status).toBe(403);
+
+    expect(stats.rejectionsByReason()).toEqual({ not_free: 1 });
+    // 一次没发生的上游尝试不该出现在 upstream_attempts 里。
+    expect(stats.requestCounts()).toEqual({ requests: 0, attempts: 0 });
+  });
+
+  it("已下架的模型记 retired 而不是 not_free —— 处置不同", async () => {
+    /*
+     * `retired` 是「免费依据成立但已不在上游在架目录」——
+     * 用户要去 `extraFreeIds` 里删一个 id，而 `not_free` 是配错了模型名。
+     */
+    const app = await makeApp(config());
+    const res = await app.request(
+      "/v1/chat/completions",
+      // `-free` 后缀命中，但假上游的目录里没有它。
+      relay(chatBody({ model: "glm-5-free" })),
+    );
+    expect(res.status).toBe(403);
+    expect(stats.rejectionsByReason()).toEqual({ retired: 1 });
+  });
+
+  it("非法 JSON 记 body_not_json,model 为占位符", async () => {
+    const app = await makeApp(config());
+    const res = await app.request("/v1/chat/completions", {
+      method: "POST",
+      headers: { authorization: `Bearer ${TOKEN}`, "content-type": "application/json" },
+      body: "{ 这不是 JSON",
+    });
+    expect(res.status).toBe(400);
+
+    const rows = stats.rejections();
+    expect(rows).toHaveLength(1);
+    // 体没解析出来 → 拿不到 model → 占位符。
+    expect(rows[0]).toMatchObject({ reason: "body_not_json", protocol: "chat" });
+  });
+
+  it("空体记 body_empty", async () => {
+    const app = await makeApp(config());
+    const res = await app.request("/v1/chat/completions", {
+      method: "POST",
+      headers: { authorization: `Bearer ${TOKEN}`, "content-type": "application/json" },
+      body: "",
+    });
+    expect(res.status).toBe(400);
+    expect(stats.rejectionsByReason()).toEqual({ body_empty: 1 });
+  });
+
+  it("无可用 Worker 记 no_worker —— 六种拒绝里最需要计数的那个", async () => {
+    /*
+     * 它意味着全池冷却或全员不可用，而那正是 `x-zen-gateway-route` 想诊断的
+     * 东西 —— 但头只有发起请求的那个客户端看得到，事后完全查不到。
+     */
+    const cfg = config({ workers: [] });
+    const app = await makeApp(cfg);
+    const res = await app.request("/v1/chat/completions", relay(chatBody()));
+    expect(res.status).toBe(503);
+    expect(stats.rejectionsByReason()).toEqual({ no_worker: 1 });
+  });
+
+  it("成功的请求不记拒绝", async () => {
+    const app = await makeApp(config());
+    await (await app.request("/v1/chat/completions", relay(chatBody()))).text();
+    expect(stats.rejections()).toHaveLength(0);
+  });
+});
+
 describe("亲和持久化:重启后粘滞不归零", () => {
   it("重启后同一会话仍路由到原 Worker", async () => {
     const cfg = config();

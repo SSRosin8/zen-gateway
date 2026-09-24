@@ -36,8 +36,17 @@ import { createHash } from "node:crypto";
  * 没有上限时,一个长期运行的网关会把每个见过的会话键永久留在内存里 ——
  * TTL 只在**读取时**过滤,不会自己腾出空间。
  */
-const SESSION_CAP = 10_000;
-const BLOB_CAP = 5_000;
+/**
+ * 会话/指纹表的容量上限。
+ *
+ * **导出**是为了让持久化层的 `LIMIT` 从这里推导，而不是另写一个数字 ——
+ * 第七轮审核指出 `restore()` 绕过容量上限（`loadSessions` 无 `LIMIT`，
+ * 而 `restore` 不调 `evict`）。今天不会越界（DB 是内存的忠实镜像、内存有 cap），
+ * 但它**依赖一个没有守卫的不变量**「DB 行数 ≤ cap」，而那在 cap 被调小、
+ * 或从一个旧库/备份恢复时不成立。
+ */
+export const SESSION_CAP = 10_000;
+export const BLOB_CAP = 5_000;
 
 /**
  * 会话键的长度上限。**超过就不参与亲和**,而不是截断 —— 见下。

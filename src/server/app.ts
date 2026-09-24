@@ -86,6 +86,13 @@ export type AppDeps = {
    * 由 `index.ts` 显式注入。
    */
   readonly stats?: StatsSink;
+  /**
+   * 统计/持久化的累计写失败数，供 `/health` 报出。
+   *
+   * 由 `index.ts` 提供 —— 它是唯一同时持有两个 store 引用的地方
+   * （`affinityStore` 被塞进 `Scheduler` 后拿不出来）。不传则报 0。
+   */
+  readonly storeWriteFailures?: () => number;
 };
 
 export function createApp(deps?: AppDeps): Hono {
@@ -99,6 +106,8 @@ export function createApp(deps?: AppDeps): Hono {
       uptimeSeconds: Math.floor((Date.now() - STARTED_AT) / 1000),
       // service.mjs 靠这个验明进程身份,决定能否安全发送 SIGTERM。
       pid: process.pid,
+      // 非 0 说明统计库有问题，报表数字不可信 —— 见 contract 里的说明。
+      storeWriteFailures: deps?.storeWriteFailures?.() ?? 0,
     });
     return c.json(body);
   });

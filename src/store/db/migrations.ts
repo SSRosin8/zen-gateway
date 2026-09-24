@@ -225,6 +225,62 @@ export const MIGRATIONS: Migration[] = [
       CREATE INDEX idx_blob_expires ON blob_affinity (expires_at);
     `,
   },
+  {
+    version: 3,
+    name: "gateway-rejections-and-dropped-usage",
+    /*
+     * 补齐规划要求的第六项统计（「网关拒绝」），并把「我们自己丢了用量」
+     * 与「上游没报用量」分开 —— 两条都是第七轮审核查出的缺口。
+     *
+     * ## 一、`gateway_rejections`
+     *
+     * Phase 7 的验收列了六项统计，前五项都实现了，而第六项没有表、没有列、
+     * 没有写入点。`relay.ts` 有六条在打上游**之前**就返回的路径
+     * （400 读体失败 / 413 超限 / 400 空体 / 400 非法 JSON / 403 免费闸门 /
+     * 503 无可用 Worker）全部零记录 —— 403 那条连日志都不打。
+     * 于是「我有多少请求被网关自己挡了」完全无法回答，而
+     * `not_free` 与 `retired` 的处置完全不同（前者改模型名、后者删
+     * `extraFreeIds` 条目），哪种发生得多也不可观测。
+     *
+     * **按天聚合而不是逐条记行**，与 `model_usage` 同构：这是计数不是日志。
+     * 更要紧的是它**不能无界增长** —— `model` 是客户端可控字符串，而被拒的
+     * 请求里它恰好**没通过**任何校验（`not_free` 那条尤其）。所以：
+     *
+     * - `model` 进库前要归一化成占位符，除非它在已知目录里（见 `normalizeRejectionModel`）
+     * - 按天 upsert，一个 reason × protocol × model 一行
+     *
+     * `reason` 的取值从 `judgeFree` 的 `reason` 联合类型 + 几个
+     * `invalid_request` 子类推导，不另手写一份（纪律 #4）。
+     *
+     * ## 二、`model_usage.requests_dropped_usage`
+     *
+     * `createUsageCollector.dropped()` 的文档明写它与 `usage() === null`
+     * **必须分开**，否则「覆盖率会把我们自己丢的计成上游没报的」——
+     * 而 `recordUsage` 先前只看 `totals`，`.dropped()` 的唯一读者是一行日志。
+     *
+     * 两个入口都可达：一条 >1 MiB 的 `data:` 行被整条弃掉，以及**上游中途
+     * 断流**（更常见）。与 Phase 7 刚修的「上游从不报用量显示成 100% 覆盖」
+     * **严格对称**，而处置方向相反 —— 一个要改代码（我们的界定常量错了），
+     * 一个不用（上游就是不报）。库里两者同形则分不出来。
+     *
+     * 新列有 DEFAULT 0，所以旧行不需要回填。
+     */
+    up: `
+      CREATE TABLE gateway_rejections (
+        reason    TEXT NOT NULL,
+        protocol  TEXT NOT NULL,
+        model     TEXT NOT NULL,
+        day       TEXT NOT NULL,
+        count     INTEGER NOT NULL DEFAULT 0,
+        PRIMARY KEY (reason, protocol, model, day)
+      ) STRICT;
+
+      CREATE INDEX idx_rejections_day ON gateway_rejections (day DESC);
+
+      ALTER TABLE model_usage
+        ADD COLUMN requests_dropped_usage INTEGER NOT NULL DEFAULT 0;
+    `,
+  },
 ];
 
 /** 目标档位 = 最后一条迁移的版本。 */

@@ -42,6 +42,19 @@ export function openDb(file: string): DatabaseSync {
   // 外键在本库里刻意不用:worker_id/proxy_id 是对 config.json 的弱引用,
   // 配置里删掉 Worker 不应该连带删掉它的历史统计。
   db.exec("PRAGMA busy_timeout = 5000");
+  /*
+   * 删除时擦掉页内容。
+   *
+   * 默认 `secure_delete = 0`：`DELETE` 只把页标记为空闲，**内容仍留在文件里**
+   * —— 实测 `DELETE` + `wal_checkpoint(TRUNCATE)` 之后会话摘要与模型名
+   * 仍能在主库文件里搜到，而 `VACUUM` 也清不掉（它重建文件但不擦原空闲页）。
+   *
+   * 于是 `pruneExpired` / `pruneDetailsBefore` 会给出一个**假的**清理保证：
+   * 「已经清过了」而备份/导出拿到的文件里那些行还在。开了它才名实相符。
+   *
+   * 代价是删除时多写一次零 —— 对本项目的删除频率（启动时各一次）可忽略。
+   */
+  db.exec("PRAGMA secure_delete = ON");
 
   migrate(db);
   return db;

@@ -16,8 +16,37 @@ import { SelectorLockRegistry } from "./selectorLock.ts";
  * 于是「该怎么走」可以被穷举测试,而这里只需验证「接得对」。
  */
 
+/**
+ * 探测结果的持久化接收端。
+ *
+ * 与 `AffinitySink` 同样的窄接口理由：`core/proxy/` 不该认识 SQLite
+ * （`store/` 才是持久化层），而窄接口让测试能塞一个记录调用的假实现。
+ *
+ * **不得抛异常**：探测本身已经成功了，记不下来不该让它变成失败。
+ */
+export type ProbeSink = {
+  recordProbe(row: {
+    proxyId: string;
+    at: number;
+    ok: boolean;
+    egressIp: string | null;
+    latencyMs: number | null;
+    failureKind: string | null;
+  }): void;
+};
+
 export type EgressServiceOptions = {
   timeouts: TimeoutConfig;
+  /**
+   * 探测结果落盘（第七轮审核补上）。
+   *
+   * 不传则不记 —— 大多数测试测的是探测行为本身，不该为此各建一个库。
+   *
+   * 先前 `StatsStore.recordProbe()` **零调用点且零测试**（那条 SQL 从未执行过），
+   * 而 `probeAll` 的结果只存在于返回值里。于是「这个代理上周是不是换过
+   * 出口 IP」无法回答，而 `egressIp` 正是出口隔离判定的唯一依据。
+   */
+  probes?: ProbeSink;
   /** 注入以便测试;生产用默认列表。 */
   services?: IpEchoService[];
   probeTimeoutMs?: number;
@@ -80,6 +109,29 @@ export class EgressService {
    */
   async probeProxy(config: Config, proxyId: string | null): Promise<ProbeProxyResult> {
     const id = proxyId ?? "__direct__";
+    const result = await this.#probeProxyInner(config, proxyId, id);
+    /*
+     * 落盘放在这里而不是 `probeAll` 里：`probeProxy` 是**唯一**产出探测结果的
+     * 地方（`probeAll` 只是并发调它），记在汇合点才不会漏掉单个探测的调用方。
+     * 这与 catalog 那条「记账放汇合点，不在四条 return null 上各写一遍」同构。
+     */
+    const o = result.outcome;
+    this.#opts.probes?.recordProbe({
+      proxyId: id,
+      at: Date.now(),
+      ok: o.ok,
+      egressIp: o.ok ? o.egressIp : null,
+      latencyMs: o.ok ? o.latencyMs : null,
+      failureKind: o.ok ? null : o.failureKind,
+    });
+    return result;
+  }
+
+  async #probeProxyInner(
+    config: Config,
+    proxyId: string | null,
+    id: string,
+  ): Promise<ProbeProxyResult> {
 
     const resolved = resolveProxy(config, proxyId);
     if (!resolved.ok) {

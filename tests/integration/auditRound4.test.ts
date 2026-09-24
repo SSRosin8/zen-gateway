@@ -136,8 +136,24 @@ describe("鉴权覆盖：守卫挂载点与注册表不得脱节", () => {
     const text = await res.text();
     expect(text).not.toContain(TOKEN);
     const body = JSON.parse(text) as Record<string, unknown>;
-    // 只允许这四个字段 —— 多一个字段就可能是一次无意的信息泄露。
-    expect(Object.keys(body).sort()).toEqual(["ok", "pid", "uptimeSeconds", "version"]);
+    /*
+     * **白名单**：多一个字段就可能是一次无意的信息泄露，所以这里断言的是
+     * 完整键集合而不是"包含某几个"。
+     *
+     * `storeWriteFailures` 是第七轮加的（给 `writeFailures()` 一个生产读者）。
+     * 它无害的理由要说清：一个**累计失败次数**不暴露配置、凭证、Worker id、
+     * 模型名或任何客户端数据 —— 它只回答"统计库有没有在正常写"。
+     * 而管理面仅 loopback，与 `pid` 同理。
+     */
+    expect(Object.keys(body).sort()).toEqual([
+      "ok",
+      "pid",
+      "storeWriteFailures",
+      "uptimeSeconds",
+      "version",
+    ]);
+    // 且它必须是个数字，不能是别的什么东西顺带漏出来。
+    expect(typeof body["storeWriteFailures"]).toBe("number");
   });
 });
 

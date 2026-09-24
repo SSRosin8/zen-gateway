@@ -317,6 +317,19 @@ describe("档位 2：摘要列的字节长度约束", () => {
           length(session_hash) = 64 AND session_hash NOT GLOB '*[^0-9a-f]*'),
         worker_id TEXT NOT NULL, bound_at INTEGER NOT NULL, expires_at INTEGER NOT NULL) STRICT`);
       db.prepare("INSERT INTO session_affinity VALUES (?, ?, ?, ?)").run(hex64, "w-old", 111, 222);
+
+      /*
+       * 降档要**把后续档位建的东西也撤掉**，否则重开时档位 3 会撞上
+       * 「table already exists」—— 那不是迁移的缺陷，是这个测试没把库
+       * 退回到一个真实的档位 1 状态（我第一版就漏了这步）。
+       */
+      db.exec("DROP TABLE IF EXISTS gateway_rejections");
+      db.exec(`CREATE TABLE model_usage_v1 AS
+        SELECT model, worker_id, day, input_tokens, output_tokens,
+               cache_read_tokens, cache_write_tokens,
+               requests_with_usage, requests_without_usage FROM model_usage`);
+      db.exec("DROP TABLE model_usage");
+      db.exec("ALTER TABLE model_usage_v1 RENAME TO model_usage");
       db.exec("PRAGMA user_version = 1");
     } finally {
       db.close();
