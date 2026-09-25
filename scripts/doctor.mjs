@@ -49,6 +49,8 @@ import { configExists, loadConfig, ConfigError } from "../src/store/config.ts";
 import { HealthSchema } from "../src/shared/contract.ts";
 import { isUsable } from "../src/core/routing/workerPool.ts";
 import { safeErrorMessage } from "../src/shared/redact.ts";
+import { probeBridges, selectBridge } from "../src/core/proxy/clash/select.ts";
+import { ClashController } from "../src/core/proxy/clash/controller.ts";
 import { createInstance, dataDirOf } from "./lib/instance.mjs";
 import { detail, heading, humanMs, line, nextStep } from "./lib/report.mjs";
 
@@ -453,10 +455,53 @@ async function layerClashControl() {
     };
   }
 
+  /*
+   * 报**择优结果**，而不只是"几个能连"（Phase 10）。
+   *
+   * 判据复用 `core/proxy/clash/select.ts` 的 `selectBridge` —— 与转发路径
+   * 同一份逻辑。doctor 自己再实现一遍会是第三份并行真相（纪律 #4），
+   * 而分叉的症状最难查：doctor 说"内核 A 可用"而网关实际在用 B。
+   *
+   * 这一层也顺带回答了一个此前答不上来的问题：多内核时"现在到底走哪个"。
+   */
+  const health = await probeBridges(bridges, (bridge) => new ClashController(bridge), {
+    redact: safeErrorMessage,
+  });
+  const selection = selectBridge(cfg.clash, health);
+
+  const healthLines = health.map((h) => {
+    const b = bridges.find((x) => x.id === h.bridgeId);
+    const name = `${h.bridgeId} (${b?.selectorGroup ?? "?"})`;
+    if (!h.alive) return `${name}: ✗ ${h.reason ?? "探活失败"}`;
+    if (h.usableNodes === 0) return `${name}: ! 连得上但${h.reason ?? "分组里没有节点"}`;
+    return `${name}: ✓ ${h.usableNodes} 个可用节点`;
+  });
+
+  if (selection.bridgeId === null) {
+    return {
+      status: needsBridge ? "fail" : "warn",
+      text: `控制面可连，但择优选不出内核：${selection.reason}`,
+      detail: [...lines, "", ...healthLines].join("\n"),
+      nextStep:
+        "检查 clash.bridges[].selectorGroup 是不是内核里真实存在的分组名。\n" +
+        "manual 模式下还要确认 clash.activeBridgeId 指向一个已启用的内核。",
+    };
+  }
+
+  const selectedHealthy = health.find((h) => h.bridgeId === selection.bridgeId);
+  const degraded = selectedHealthy?.alive !== true || selectedHealthy.usableNodes === 0;
+
   return {
-    status: ok.length < results.length ? "warn" : "pass",
-    text: `${ok.length}/${results.length} 个 Clash 内核可连通`,
-    detail: lines.join("\n"),
+    status: degraded || ok.length < results.length ? "warn" : "pass",
+    text: `${ok.length}/${results.length} 个 Clash 内核可连通 · 当前走 ${selection.bridgeId}`,
+    detail: [...lines, "", ...healthLines, "", `择优：${selection.reason}`].join("\n"),
+    ...(degraded
+      ? {
+          nextStep:
+            "当前选中的内核探活不通过 —— 桥接代理会全部失败。\n" +
+            "manual 模式不会自动切换（那是刻意的）；改成 auto 或换一个内核。",
+        }
+      : {}),
   };
 }
 

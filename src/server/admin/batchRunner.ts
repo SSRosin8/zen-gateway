@@ -7,6 +7,7 @@ import { applyProbeResult } from "../../core/proxy/egress.ts";
 import { resolveProxy } from "../../core/proxy/pool.ts";
 import { isUsable } from "../../core/routing/workerPool.ts";
 import { safeErrorMessage } from "../../shared/redact.ts";
+import { lockedBridgeFor, type BridgeHealth } from "../../core/proxy/clash/select.ts";
 
 /**
  * 批量探测的执行器 —— 把纯 reducer 接到真实探测上。
@@ -43,6 +44,14 @@ export type BatchRunnerDeps = {
   readonly store: BatchProbeStore;
   readonly log?: (message: string) => void;
   readonly now?: () => number;
+  /**
+   * 批测开始前探一遍 Clash 内核（Phase 10）。
+   *
+   * 不传则跳过锁定 —— 那是**降级而不是等价**：不锁的话一批探测跑到一半
+   * 换了内核，后半批量到的是另一个内核的出口，而隔离报告把两批混在一起
+   * 按 IP 分组。所以生产必须传。
+   */
+  readonly probeBridges?: () => Promise<readonly BridgeHealth[]>;
 };
 
 export class BatchProbeRunner {
@@ -167,6 +176,29 @@ export class BatchProbeRunner {
 
   async #run(proxyIds: Array<string | null>): Promise<void> {
     const config = this.#deps.configOf();
+
+    /* ---- 第 0 段：锁定单内核（Phase 10） ---- */
+    if (this.#deps.probeBridges !== undefined && config.clash.enabled) {
+      /*
+       * 批测期间锁定一个内核 —— 不变量 #5 的延伸。
+       *
+       * 桥接探测要**切 selector**，而 selector 是进程外的全局状态。
+       * 一批跑到一半换了内核，后半批量到的是另一个内核的出口 ——
+       * 而隔离报告把两批结果混在一起按实测 IP 分组，于是
+       * 「这两个 Worker 出口相同吗」这个问题的答案变成了噪声。
+       *
+       * 探不到任何可用内核时**不中止** —— 直连代理仍然能探。
+       * 中止会让"Clash 挂了"变成"批量探测完全不可用"，而那不成立。
+       */
+      try {
+        const health = await this.#deps.probeBridges();
+        const locked = lockedBridgeFor(config.clash, health);
+        this.#deps.log?.(locked.reason);
+      } catch (err) {
+        // 探活本身失败不该让批测停下 —— 它只是少了一个保证。
+        this.#deps.log?.(`内核探活失败，批测继续（未锁定）: ${safeErrorMessage(err)}`);
+      }
+    }
 
     /* ---- 第一段：筛选（纯本地，很快） ---- */
     const passed: Array<string | null> = [];
