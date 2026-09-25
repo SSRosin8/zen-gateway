@@ -21,6 +21,9 @@
     "stop": "node scripts/service.mjs stop",
     "restart": "npm run build && node scripts/service.mjs restart",
     "status": "node scripts/service.mjs status",
+    "open": "node scripts/service.mjs open",
+    "setup": "node scripts/setup.mjs",
+    "doctor": "node scripts/doctor.mjs",
     "discover:upstream": "node scripts/discover-upstream.mjs"
   },
   "dependencies": {

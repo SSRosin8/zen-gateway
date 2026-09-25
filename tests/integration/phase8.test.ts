@@ -1,0 +1,643 @@
+import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { execFile, spawn } from "node:child_process";
+import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { createServer, type Server } from "node:http";
+import { tmpdir } from "node:os";
+import { join, resolve } from "node:path";
+import { promisify } from "node:util";
+import { ConfigSchema, CONFIG_VERSION, type Config } from "../../src/shared/schema.ts";
+
+const execFileAsync = promisify(execFile);
+const PROJECT = resolve(import.meta.dirname, "..", "..");
+const DOCTOR = join(PROJECT, "scripts", "doctor.mjs");
+const SETUP = join(PROJECT, "scripts", "setup.mjs");
+const ENTRY = join(PROJECT, "dist", "server", "server", "index.js");
+
+/*
+ * Phase 8 的两个脚本。
+ *
+ * 只有真把脚本跑起来才测得到它们:`tsc` 看不到 `.mjs`,而这两个脚本的
+ * 价值全在「分层判断对不对」「会不会改坏配置」上,那些都是行为。
+ *
+ * 每个用例用独立的临时 data/ 与独立端口,互不干扰,也绝不碰用户的真实实例。
+ * Clash Controller 用一个**假的本机 HTTP 服务**冒充 —— 不依赖真实 Clash,
+ * 否则这些测试会在没开 Clash 的机器上红,而红的原因与被测逻辑无关。
+ */
+
+let dataDir: string;
+let port: number;
+let fakeClash: Server | undefined;
+let fakeClashPort: number;
+let strays: number[];
+
+// 避开 service.test.ts 的 19876+ 段与真实服务。
+let nextPort = 19940;
+
+beforeEach(async () => {
+  dataDir = await mkdtemp(join(tmpdir(), "zg-p8-"));
+  port = nextPort++;
+  fakeClashPort = nextPort++;
+  strays = [];
+});
+
+afterEach(async () => {
+  for (const pid of strays) {
+    try {
+      process.kill(pid, "SIGKILL");
+    } catch {
+      /* 已退出 */
+    }
+  }
+  if (fakeClash !== undefined) {
+    await new Promise<void>((r) => fakeClash!.close(() => r()));
+    fakeClash = undefined;
+  }
+  await rm(dataDir, { recursive: true, force: true });
+});
+
+type RunResult = { code: number; stdout: string; stderr: string };
+
+async function run(script: string, args: string[] = [], env: Record<string, string> = {}): Promise<RunResult> {
+  try {
+    const { stdout, stderr } = await execFileAsync(process.execPath, [script, ...args], {
+      env: { ...process.env, ZG_DATA_DIR: dataDir, ZG_PORT: String(port), ...env },
+      cwd: PROJECT,
+    });
+    return { code: 0, stdout, stderr };
+  } catch (err) {
+    const e = err as { code?: number; stdout?: string; stderr?: string };
+    return { code: e.code ?? 1, stdout: e.stdout ?? "", stderr: e.stderr ?? "" };
+  }
+}
+
+const configFile = () => join(dataDir, "config.json");
+
+async function writeConfig(overrides: Record<string, unknown> = {}): Promise<Config> {
+  const config = ConfigSchema.parse({
+    version: CONFIG_VERSION,
+    gateway: { relayToken: "test-token-not-a-real-secret", port },
+    ...overrides,
+  });
+  await writeFile(configFile(), JSON.stringify(config, null, 2), { mode: 0o600 });
+  return config;
+}
+
+/** 起一个真实服务实例。返回 pid。 */
+async function startServer(env: Record<string, string> = {}): Promise<number> {
+  const child = spawn(process.execPath, [ENTRY], {
+    cwd: PROJECT,
+    env: { ...process.env, ZG_DATA_DIR: dataDir, ZG_PORT: String(port), ...env },
+    stdio: "ignore",
+    detached: true,
+  });
+  child.unref();
+  strays.push(child.pid!);
+
+  const deadline = Date.now() + 20_000;
+  while (Date.now() < deadline) {
+    try {
+      const res = await fetch(`http://127.0.0.1:${port}/health`, { signal: AbortSignal.timeout(500) });
+      if (res.ok) return child.pid!;
+    } catch {
+      /* 还没起来 */
+    }
+    await new Promise((r) => setTimeout(r, 150));
+  }
+  throw new Error("服务在 20s 内未就绪");
+}
+
+/**
+ * 一个冒充 Clash Controller 的本机 HTTP 服务。
+ *
+ * 只实现 setup/doctor 真正会问的三条:`/version`、`/configs`、`/proxies`。
+ * `secret` 非空时校验 Bearer —— 那条分支(「连上了但要鉴权」)必须可测,
+ * 它是 setup 里最容易被合并进「没找到」的一态。
+ */
+async function startFakeClash(opts: {
+  secret?: string;
+  mode?: string;
+  mixedPort?: number | null;
+  socksPort?: number;
+  selectors?: Record<string, string[]>;
+  nodes?: string[];
+}): Promise<void> {
+  const secret = opts.secret ?? "";
+  const nodes = opts.nodes ?? ["节点A", "节点B"];
+  const selectors = opts.selectors ?? { Proxy: nodes };
+
+  fakeClash = createServer((req, res) => {
+    if (secret !== "" && req.headers.authorization !== `Bearer ${secret}`) {
+      res.writeHead(401, { "content-type": "application/json" });
+      res.end(JSON.stringify({ message: "Unauthorized" }));
+      return;
+    }
+    const url = new URL(req.url ?? "/", "http://x");
+    const json = (body: unknown) => {
+      res.writeHead(200, { "content-type": "application/json" });
+      res.end(JSON.stringify(body));
+    };
+
+    if (url.pathname === "/version") return json({ version: "v1.19.31", meta: true });
+    if (url.pathname === "/configs") {
+      const body: Record<string, unknown> = { mode: opts.mode ?? "rule" };
+      if (opts.mixedPort !== null) body["mixed-port"] = opts.mixedPort ?? 7897;
+      else body["mixed-port"] = 0;
+      if (opts.socksPort !== undefined) body["socks-port"] = opts.socksPort;
+      return json(body);
+    }
+    if (url.pathname === "/proxies") {
+      const proxies: Record<string, unknown> = {};
+      for (const name of nodes) proxies[name] = { type: "AnyTLS", history: [{ delay: 120 }] };
+      for (const [group, options] of Object.entries(selectors)) {
+        proxies[group] = { type: "Selector", now: options[0] ?? "", all: options };
+      }
+      proxies["DIRECT"] = { type: "Direct" };
+      return json({ proxies });
+    }
+    res.writeHead(404);
+    res.end();
+  });
+
+  await new Promise<void>((r) => fakeClash!.listen(fakeClashPort, "127.0.0.1", () => r()));
+}
+
+const fakeApi = () => `http://127.0.0.1:${fakeClashPort}`;
+
+/* ================================================================== *
+ * doctor:只读
+ * ================================================================== */
+
+describe("doctor 是只读的", () => {
+  it("配置不存在时报缺失,且**不替用户生成**", async () => {
+    /*
+     * `loadConfig` 在文件不存在时会生成一份默认配置并写盘(含新 Relay Token)
+     * —— 那对服务端是对的(首启),对诊断工具是错的:跑一次 doctor 就改了状态。
+     *
+     * 这条断言把「doctor 只读」钉住。变异测试:把 doctor 里的 `configExists`
+     * 前置判断删掉(直接 loadConfig),这条必须转红。
+     */
+    const result = await run(DOCTOR);
+
+    expect(result.code).toBe(1);
+    expect(result.stdout).toContain("配置不存在");
+    await expect(readFile(configFile(), "utf8")).rejects.toThrow(/ENOENT/);
+  });
+
+  it("不会跑数据库迁移 —— 库以 readOnly 打开", async () => {
+    await writeConfig();
+    /*
+     * doctor 绝不能升级数据库档位:一个旧档位的库被一次「跑下 doctor 看看」
+     * 升级掉是不可逆的,而用户可能正想用旧版程序读它。
+     *
+     * ## 这个 fixture 花了两次才对,两次都是变异测试逼出来的
+     *
+     * 1. **必须先起服务**:第 3 层在第 2 层之后,服务没跑时 doctor 在第 2 层
+     *    就停了 —— 那样这条测试落在「路径不存在」那一类,断言永远绿。
+     * 2. **库必须是真正空的文件**,不能只把已有库的 `user_version` 改回 0:
+     *    那种库里表还在,于是 `migrate()` 撞上 `table worker_stats already
+     *    exists` 而失败回滚,档位仍是 0 —— 变异体因此**看起来**没迁移。
+     *    删掉文件重建后,区分状态才出现:变异体留下档位 3,真实实现留下 0。
+     */
+    await startServer();
+
+    const { DatabaseSync } = await import("node:sqlite");
+    const dbFile = join(dataDir, "runtime.db");
+    // 服务已经建好并迁移过库了 —— 整个删掉,换成一个档位 0 的空文件。
+    for (const suffix of ["", "-wal", "-shm"]) {
+      await rm(`${dbFile}${suffix}`, { force: true });
+    }
+    const db = new DatabaseSync(dbFile);
+    db.exec("PRAGMA user_version = 0");
+    db.close();
+
+    const result = await run(DOCTOR);
+    // 确认真的走到了第 3 层 —— 否则下面的断言测的是「没跑过」而不是「只读」。
+    expect(result.stdout).toContain("3. 统计库");
+
+    const after = new DatabaseSync(dbFile, { readOnly: true });
+    const version = (after.prepare("PRAGMA user_version").get() as { user_version: number }).user_version;
+    after.close();
+    expect(version).toBe(0);
+  }, 40_000);
+});
+
+/* ================================================================== *
+ * doctor:分层
+ * ================================================================== */
+
+describe("doctor 只报第一个失败的层", () => {
+  it("第 1 层失败时不检查后面的层", async () => {
+    await writeFile(configFile(), "{ not json", { mode: 0o600 });
+
+    const result = await run(DOCTOR);
+
+    expect(result.code).toBe(1);
+    expect(result.stdout).toContain("配置无法加载(malformed)");
+    expect(result.stdout).toContain("后续 6 层未检查");
+
+    /*
+     * 断言**后面的层真的没跑**,而不只是那句「未检查」被打了出来。
+     *
+     * 这条区别是变异测试逼出来的:把 `break` 删掉之后,那句「后续 6 层未检查」
+     * **照样打印**(它在 break 之前),于是只检查那句话的版本依然全绿 ——
+     * 而此时它已经是一句**假话**:后面的层全跑了。
+     *
+     * 所以要验的是标题行不存在。逐层标题形如 `── 3. 统计库 ──`。
+     */
+    for (const later of ["2. 服务", "3. 统计库", "4. Worker", "5. Clash 控制面", "6. 模型目录"]) {
+      expect(result.stdout).not.toContain(`── ${later} ──`);
+    }
+  });
+
+  it("配置的四种失败各有不同的下一步建议", async () => {
+    /*
+     * `ConfigError.kind` 是专为 doctor 准备的稳定分类,而分类的价值在于
+     * **处置不同**。若四种给同一句建议,那个分类就是死信息。
+     */
+    await writeFile(configFile(), "{ not json", { mode: 0o600 });
+    const malformed = await run(DOCTOR);
+
+    await writeFile(configFile(), JSON.stringify({ version: 1, gateway: { relayToken: "tooshort" } }), {
+      mode: 0o600,
+    });
+    const invalid = await run(DOCTOR);
+
+    expect(malformed.stdout).toContain("修正 JSON 语法");
+    expect(invalid.stdout).toContain("按上面的字段路径逐条修正");
+    // 两条建议必须真的不同。
+    expect(malformed.stdout).not.toContain("按上面的字段路径逐条修正");
+  });
+
+  it("服务没在跑时报第 2 层,并提到 NODE_EXTRA_CA_CERTS", async () => {
+    await writeConfig();
+
+    const result = await run(DOCTOR);
+
+    expect(result.code).toBe(1);
+    expect(result.stdout).toContain("服务未在运行");
+    // 这条提示是规划要求「进交付物」的那条 —— 漏了它症状是「目录为空但不报错」。
+    expect(result.stdout).toContain("NODE_EXTRA_CA_CERTS");
+  });
+});
+
+describe("doctor 的第 6 层区分上游不可达与免费集为空", () => {
+  it("上游拉不到时报 502 一侧,并指出服务进程缺 CA", async () => {
+    await writeConfig({
+      workers: [{ id: "w1", kind: "authenticated", apiKey: "fake-key-not-real", proxyId: null }],
+    });
+    /*
+     * 服务**刻意不带** `NODE_EXTRA_CA_CERTS` 启动,而测试进程(以及 doctor)
+     * 可能带着 —— 这正是纪律 #8 要验的事:doctor 报的必须是**服务进程**的
+     * 环境,不是自己的。
+     *
+     * 若 doctor 读 `process.env` 而不是 `/proc/<服务pid>/environ`,
+     * 在带 CA 的环境里跑这条会得到「已设,成因在别处」,断言转红。
+     */
+    await startServer({ NODE_EXTRA_CA_CERTS: "" });
+
+    const result = await run(DOCTOR, [], {
+      NODE_EXTRA_CA_CERTS: "/etc/ssl/certs/ca-certificates.crt",
+    });
+
+    expect(result.code).toBe(1);
+    expect(result.stdout).toContain("上游模型目录拉不到(502)");
+    expect(result.stdout).toContain("服务进程没有设 NODE_EXTRA_CA_CERTS");
+  }, 40_000);
+});
+
+/* ================================================================== *
+ * setup:安全边界
+ * ================================================================== */
+
+describe("setup 的探测范围", () => {
+  it("只探 127.0.0.1 的固定白名单,不扫 LAN、不扫端口段", async () => {
+    await writeConfig();
+
+    const result = await run(SETUP, ["--dry-run"]);
+
+    /*
+     * 这是规划明确列出的安全约束。断言输出里报告的候选**全部**是 127.0.0.1,
+     * 且数量是个小的固定集合 —— 若有人把它改成扫端口段,数量会爆掉。
+     */
+    const tried = /已探测\(仅 127\.0\.0\.1\):(.+)/.exec(result.stdout)?.[1] ?? "";
+    const candidates = tried.split(", ").filter(Boolean);
+
+    expect(candidates.length).toBeGreaterThan(0);
+    expect(candidates.length).toBeLessThanOrEqual(8);
+    for (const c of candidates) {
+      expect(new URL(c).hostname).toBe("127.0.0.1");
+    }
+  });
+
+  it("「连上了但要 secret」与「没找到」是两态", async () => {
+    await writeConfig();
+    await startFakeClash({ secret: "a-secret-we-do-not-know" });
+
+    const result = await run(SETUP, ["--api", fakeApi(), "--dry-run"]);
+
+    expect(result.code).toBe(1);
+    /*
+     * 把 auth 合进 absent 是最容易犯的错:那会让一个配了 secret 的 Clash
+     * 被报成「没找到」,用户于是去查 Clash 是否运行 —— 而它正在运行。
+     */
+    expect(result.stdout).toContain("需要 secret");
+    expect(result.stdout).not.toContain("没有找到本机的 Clash Controller");
+  });
+});
+
+/* ================================================================== *
+ * setup:不丢用户数据
+ * ================================================================== */
+
+describe("setup 不动用户自己的东西", () => {
+  it("保留 Relay Token、Worker 的 key、以及被停用的内核", async () => {
+    const token = "user-token-must-survive-setup";
+    await startFakeClash({});
+    /*
+     * 已存在的内核**必须是 setup 这次会重新发现的那一个**(同 id),
+     * 否则走不到「更新已有条目」那条分支,而关于它的断言就是空壳 ——
+     * 变异测试实测过:把 `existing.enabled = true` 注进更新分支时,
+     * 用一个探测不到的端口(9999)做 fixture 的版本**依然全绿**。
+     *
+     * id 由 setup 从 apiBase 推导(`bridge-<host>-<port>`),所以这里
+     * 照同一个规则构造 —— 让 fixture 与被测代码指向同一个条目。
+     */
+    const rediscoveredId = `bridge-127.0.0.1-${fakeClashPort}`;
+    await writeFile(
+      configFile(),
+      JSON.stringify(
+        ConfigSchema.parse({
+          version: CONFIG_VERSION,
+          gateway: { relayToken: token, port },
+          workers: [{ id: "mine", kind: "authenticated", apiKey: "MY-KEY", proxyId: null }],
+          clash: {
+            enabled: true,
+            selectionMode: "manual",
+            activeBridgeId: null,
+            bridges: [
+              {
+                id: rediscoveredId,
+                name: "用户改过的名字",
+                enabled: false,
+                apiBase: fakeApi(),
+                apiSecret: "",
+                localProxyPort: 1080,
+                selectorGroup: "Proxy",
+              },
+            ],
+          },
+        }),
+      ),
+      { mode: 0o600 },
+    );
+
+    const result = await run(SETUP, ["--api", fakeApi()]);
+    expect(result.code).toBe(0);
+
+    const after = JSON.parse(await readFile(configFile(), "utf8")) as Config;
+
+    expect(after.gateway.relayToken).toBe(token);
+    expect(after.workers).toHaveLength(1);
+    expect(after.workers[0]!.apiKey).toBe("MY-KEY");
+
+    // 确认真的走了「更新」而不是「新增」—— 否则下面的断言又是空壳。
+    expect(after.clash.bridges).toHaveLength(1);
+    const old = after.clash.bridges.find((b) => b.id === rediscoveredId);
+    // 探测得来的事实要更新:端口从 1080 改成内核实际报告的值。
+    expect(old?.localProxyPort).toBe(7897);
+    // 而用户刻意停用的内核不该被重新启用 —— 那是撤销他的决定。
+    expect(old?.enabled).toBe(false);
+    expect(old?.name).toBe("用户改过的名字");
+    // 他选的 manual 模式也不动。
+    expect(after.clash.selectionMode).toBe("manual");
+  });
+
+  it("重跑不会重复添加(id 从节点名稳定推导)", async () => {
+    await writeConfig();
+    await startFakeClash({ nodes: ["节点A", "节点B", "节点C"] });
+
+    await run(SETUP, ["--api", fakeApi()]);
+    const first = JSON.parse(await readFile(configFile(), "utf8")) as Config;
+
+    await run(SETUP, ["--api", fakeApi()]);
+    const second = JSON.parse(await readFile(configFile(), "utf8")) as Config;
+
+    /*
+     * 不稳定的 id(随机或序号)会让每次 setup 都新增一批代理,而旧的那批
+     * 仍被 Worker 引用 —— 配置越长越乱,Worker 绑的出口悄悄变成陈旧条目。
+     */
+    expect(first.proxies).toHaveLength(3);
+    expect(second.proxies).toHaveLength(3);
+    expect(second.proxies.map((p) => p.id).sort()).toEqual(first.proxies.map((p) => p.id).sort());
+    expect(second.clash.bridges).toHaveLength(1);
+  });
+
+  it("写盘前备份,且备份是改动**之前**的内容", async () => {
+    await writeConfig();
+    await startFakeClash({});
+
+    await run(SETUP, ["--api", fakeApi()]);
+
+    const backup = JSON.parse(await readFile(`${configFile()}.bak`, "utf8")) as Config;
+    const current = JSON.parse(await readFile(configFile(), "utf8")) as Config;
+
+    // config.json 整个文件都是凭证,自动改写必须有可回退的副本。
+    expect(backup.clash.bridges).toHaveLength(0);
+    expect(current.clash.bridges).toHaveLength(1);
+  });
+
+  it("--dry-run 完全不写盘", async () => {
+    const before = await writeConfig();
+    await startFakeClash({});
+
+    await run(SETUP, ["--api", fakeApi(), "--dry-run"]);
+
+    const after = JSON.parse(await readFile(configFile(), "utf8")) as Config;
+    expect(after).toEqual(before);
+    await expect(readFile(`${configFile()}.bak`, "utf8")).rejects.toThrow(/ENOENT/);
+  });
+});
+
+/* ================================================================== *
+ * setup:端口与分组的判断
+ * ================================================================== */
+
+describe("setup 从 Controller 读端口,不硬编码", () => {
+  it("采用内核实际报告的 mixed-port,而不是文档默认的 7890", async () => {
+    await writeConfig();
+    // 一个刻意与任何常见默认值都不同的端口。
+    await startFakeClash({ mixedPort: 24680 });
+
+    await run(SETUP, ["--api", fakeApi()]);
+    const after = JSON.parse(await readFile(configFile(), "utf8")) as Config;
+
+    /*
+     * 硬编码任何一个值都会让桥接静默连到没人监听的端口:所有桥接代理
+     * 传输失败,而控制面明明是通的 —— 本项目最难自查的故障之一。
+     */
+    expect(after.clash.bridges[0]!.localProxyPort).toBe(24680);
+    for (const proxy of after.proxies) expect(proxy.port).toBe(24680);
+  });
+
+  it("mixed-port 为 0 时退回 socks-port", async () => {
+    await writeConfig();
+    await startFakeClash({ mixedPort: null, socksPort: 13579 });
+
+    await run(SETUP, ["--api", fakeApi()]);
+    const after = JSON.parse(await readFile(configFile(), "utf8")) as Config;
+
+    expect(after.clash.bridges[0]!.localProxyPort).toBe(13579);
+  });
+
+  it("三个端口都为 0 时**拒绝配置**,而不是猜一个默认值", async () => {
+    await writeConfig();
+    await startFakeClash({ mixedPort: null });
+
+    const result = await run(SETUP, ["--api", fakeApi()]);
+
+    expect(result.code).toBe(1);
+    expect(result.stdout).toContain("无法从 /configs 读出可用的代理端口");
+    const after = JSON.parse(await readFile(configFile(), "utf8")) as Config;
+    expect(after.clash.bridges).toHaveLength(0);
+  });
+});
+
+describe("setup 对 GLOBAL 分组的处置", () => {
+  it("rule 模式下宁选 Proxy 也不选 GLOBAL(即使节点数相同)", async () => {
+    await writeConfig();
+    /*
+     * 实测出来的陷阱:本机 GLOBAL 与 Proxy 都是 69 个可用节点,按名字
+     * tiebreak 会选中 GLOBAL —— 而 rule 模式下 GLOBAL **不参与选路**,
+     * 切它什么都不改变。后果是所有 Worker 共用同一个公网 IP,
+     * 而出口隔离正是本项目存在的理由。这个故障不报任何错。
+     */
+    const nodes = ["节点A", "节点B"];
+    await startFakeClash({ mode: "rule", nodes, selectors: { GLOBAL: nodes, Proxy: nodes } });
+
+    await run(SETUP, ["--api", fakeApi()]);
+    const after = JSON.parse(await readFile(configFile(), "utf8")) as Config;
+
+    expect(after.clash.bridges[0]!.selectorGroup).toBe("Proxy");
+  });
+
+  it("global 模式下 GLOBAL 不再被降级", async () => {
+    await writeConfig();
+    // 只有 GLOBAL 一个分组,且内核确实是 global 模式 —— 此时它是对的那个。
+    const nodes = ["节点A", "节点B"];
+    await startFakeClash({ mode: "global", nodes, selectors: { GLOBAL: nodes } });
+
+    const result = await run(SETUP, ["--api", fakeApi()]);
+    const after = JSON.parse(await readFile(configFile(), "utf8")) as Config;
+
+    expect(after.clash.bridges[0]!.selectorGroup).toBe("GLOBAL");
+    // 不该出现那条「切换它可能不生效」的告警。
+    expect(result.stdout).not.toContain("切换它可能不生效");
+  });
+
+  it("rule 模式下只有 GLOBAL 可用时照样配,但必须告警", async () => {
+    await writeConfig();
+    const nodes = ["节点A"];
+    await startFakeClash({ mode: "rule", nodes, selectors: { GLOBAL: nodes } });
+
+    const result = await run(SETUP, ["--api", fakeApi()]);
+    const after = JSON.parse(await readFile(configFile(), "utf8")) as Config;
+
+    expect(after.clash.bridges[0]!.selectorGroup).toBe("GLOBAL");
+    // 用户必须知道这件事才能去 Clash 里加一个分组。
+    expect(result.stdout).toContain("切换它可能不生效");
+  });
+});
+
+/* ================================================================== *
+ * setup:不建没有 key 的 Worker
+ * ================================================================== */
+
+describe("setup 刻意不创建 Worker", () => {
+  it("只配出口,并说明为什么不建匿名 Worker", async () => {
+    await writeConfig();
+    await startFakeClash({});
+
+    const result = await run(SETUP, ["--api", fakeApi()]);
+    const after = JSON.parse(await readFile(configFile(), "utf8")) as Config;
+
+    /*
+     * 规划原文是「为每个可用出口建匿名 Worker」,而匿名(免 key)通道已被
+     * 上游关闭。建一批没有 key 的 Worker 只会得到一池必定失败的条目 ——
+     * `isUsable()` 把它们全过滤掉,而用户看到「已建 N 个 Worker」却一个都不能用。
+     */
+    expect(after.workers).toHaveLength(0);
+    expect(after.proxies.length).toBeGreaterThan(0);
+    expect(result.stdout).toContain("FreeTierError");
+  });
+});
+
+/* ================================================================== *
+ * 凭证不进输出
+ * ================================================================== */
+
+describe("两个脚本都不回显凭证", () => {
+  it("setup 的输出不含 Controller secret", async () => {
+    const secret = "controller-secret-must-not-leak";
+    await writeConfig();
+    await startFakeClash({ secret });
+
+    const result = await run(SETUP, ["--api", fakeApi(), "--secret", secret]);
+
+    expect(result.code).toBe(0);
+    expect(result.stdout).not.toContain(secret);
+    expect(result.stderr).not.toContain(secret);
+  });
+
+  it("doctor 的输出不含 Relay Token 与 Controller secret", async () => {
+    const secret = "another-secret-must-not-leak";
+    const token = "relay-token-must-not-leak-either";
+    await startFakeClash({ secret: "wrong-on-purpose" });
+    await writeFile(
+      configFile(),
+      JSON.stringify(
+        ConfigSchema.parse({
+          version: CONFIG_VERSION,
+          gateway: { relayToken: token, port },
+          workers: [{ id: "w1", kind: "authenticated", apiKey: "k", proxyId: "p1" }],
+          proxies: [
+            {
+              id: "p1",
+              name: "n",
+              type: "anytls",
+              host: "127.0.0.1",
+              port: 7897,
+              source: "controller",
+              bridgeId: "b1",
+              clashNodeName: "节点A",
+              direct: false,
+              bridgeable: true,
+            },
+          ],
+          clash: {
+            enabled: true,
+            activeBridgeId: "b1",
+            bridges: [
+              {
+                id: "b1",
+                name: "fake",
+                apiBase: fakeApi(),
+                apiSecret: secret,
+                localProxyPort: 7897,
+                selectorGroup: "Proxy",
+              },
+            ],
+          },
+        }),
+      ),
+      { mode: 0o600 },
+    );
+    await startServer();
+
+    const result = await run(DOCTOR);
+
+    // 鉴权失败那条路径最容易顺手把 secret 拼进错误信息。
+    expect(result.stdout).toContain("鉴权被拒");
+    expect(result.stdout).not.toContain(secret);
+    expect(result.stdout).not.toContain(token);
+  }, 40_000);
+});

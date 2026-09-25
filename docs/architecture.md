@@ -341,7 +341,7 @@ schema：实测 +57ms，而 `service.mjs status` 全程只有 51ms。
 | 5 | 调度状态机：`workerPool` / `cooldown` / `affinity` / `select` / `scheduler` | ✅ |
 | 6 | 其余协议面（`responses`/`messages`）+ 免费注册表与在架目录求交集 + `parseUsage` | ✅ |
 | 7 | 统计 SQL 聚合 + 亲和持久化 | ✅（**无 HTTP 端点** —— 管理 API 形状留给 Phase 9） |
-| 8 | `setup.mjs`（一键配置）、`doctor.mjs`（分层诊断） | 待做 |
+| 8 | `setup.mjs`（一键配置）、`doctor.mjs`（分层诊断）、`service.mjs` 打开浏览器 | ✅ |
 | 9 | 管理后台 6 页 + 首启向导 + 批量探测长任务状态机 | 待做 |
 | 10 | 订阅拉取与多格式解析、多 Clash 内核择优 | 待做 |
 | 11 | 精简 `AGENTS.md`、4 个 skill、`docs/` 补全 | 部分 |
@@ -409,6 +409,16 @@ schema：实测 +57ms，而 `service.mjs status` 全程只有 51ms。
    （`snapshot` / `status` / `surfacesFor` / `counts` / `writeFailures` ×2 /
    `recordProbe`），**逐个标注是手工约定而实例还在增加** ——
    该建一道关卡（对白名单外的导出成员断言至少有一个非定义处引用）
+
+   > **Phase 8 没有接上其中任何一个**，这一点要说清楚而不是含糊过去。
+   > `doctor.mjs` 报的是 Worker 的**配置形态**（从 `config.json` 读，用
+   > `isUsable()` 判定），**不是**调度器的运行期状态 —— 后者住在服务进程里，
+   > 而进程外没有任何出口拿到它。所以 doctor 的第 4 层明确写着「『可用』只表示
+   > 配置形态对；它是否**就绪**（不在冷却中）眼下无法从外部查到」。
+   >
+   > 要接上它们需要一个 HTTP 端点（Phase 9 的管理 API）。在那之前，
+   > 给 doctor 硬塞一个「就绪数」只能靠重新实现一遍冷却判定 —— 那正是
+   > 纪律 #4 禁止的第二份并行真相，而它必然与调度器的那份分叉。
 13. ~~**`recordProbe()` 无生产调用点且无测试覆盖**~~ —— **已接**进 `EgressService.probeProxy`（汇合点）。原文：：这条 SQL 从未执行过，
    参数顺序与列名到 Phase 9 接上时要当全新代码验。同类陷阱 Phase 7 对两张
    亲和表认出来了（「CHECK 在生产路径上一次都没执行过」）并真跑了，
@@ -456,11 +466,44 @@ schema：实测 +57ms，而 `service.mjs status` 全程只有 51ms。
    让它成为一份作息时间线** —— 在「意外把文件复制/打包出去」这个已列明的
    威胁下，明细比聚合值敏感得多。另：`secure_delete` 默认关闭且 `VACUUM`
    也清不掉已删页，所以加保留期时要一并 `PRAGMA secure_delete = ON`
-21. **目录拉空与上游不可达在外部看起来一样**：两者都让 `/v1/models` 返回
-   `data: []` 加 HTTP 200。已实测的一个成因是 TLS 中间人 —— 本机
-   `opencode.ai` 被内网 DNS 指向内网地址、证书由企业 CA 签发，而 Node 不读
-   系统 CA 库（需 `NODE_EXTRA_CA_CERTS`，见 `docs/usage.md`）。日志现在能
-   区分（`safeErrorMessage` 跟随 `err.cause`，会打出
-   `fetch failed ← unable to get local issuer certificate`），但**健康检查
-   区分不了**：`/health` 只看进程活着。`doctor.mjs` 要把"上游可达但目录为空"
-   做成独立一层，它的下一步建议与"上游不可达"完全不同（→ Phase 8）
+21. ~~**目录拉空与上游不可达在外部看起来一样**~~ —— **前提本身是错的，已在
+   Phase 8 实测纠正**。原文写「两者都让 `/v1/models` 返回 `data: []` 加
+   HTTP 200」，而实测：从未成功拉到目录时 `routes/models.ts` 返回
+   **502 `upstream_unreachable`**（它的注释早就写明了理由）。
+
+   真正给出 `200 + data:[]` 的是**另一种**情况：目录**拉到了**（`total: 80`）
+   而免费集为空（`free: 0`）—— 把 `freeSuffix` 改成一个没有模型命中的值即可
+   复现。两者的下一步完全不同（设 CA／查出口 vs 查 `freeSuffix`），
+   所以 `doctor.mjs` 仍把它们分成两层，只是分界线与原先记的不一样，
+   判据是 `zen_gateway_catalog.total`。
+
+   `doctor` 的第 6 层还额外查**服务进程**的 `NODE_EXTRA_CA_CERTS`
+   （读 `/proc/<pid>/environ`，不是自己的 `process.env`）—— 那是纪律 #8：
+   验证工具必须与产品代码共享同一套信任配置，而 doctor 与服务是两个进程。
+   `docs/usage.md` 里同一处失实说法也已改。
+
+22. **`GLOBAL` 分组在 rule 模式下切了不生效，而这个故障不报任何错**
+   （Phase 8 实测发现）。`setup.mjs` 按「可出口节点数」挑 selector，而本机
+   `GLOBAL` 与 `Proxy` **都是 69 个** —— 按名字 tiebreak 会选中 `GLOBAL`。
+   但内核 `mode` 是 `rule`，此时规则把流量导向 `Proxy` 这类分组，
+   `GLOBAL` **不参与选路**（实测它的 `now` 还停在 `DIRECT`）。
+
+   后果：切 `GLOBAL` 什么都不改变 → 所有 Worker 走本机直连 → **共用同一个
+   公网 IP**，而出口隔离正是本项目存在的理由。而控制面通、切换返回 204、
+   探测也能拿到 IP —— 只有 `doctor --deep` 的隔离报告会发现它。
+
+   `setup.mjs` 已按 `mode` 把 `GLOBAL` 降级（只在没有别的候选时用它，并告警）。
+   **但这是个启发式，不是守卫**：一个名字不叫 `GLOBAL` 却同样不参与选路的
+   分组仍会被选中。真正的判据是「规则实际把流量导向哪个分组」，而那要解析
+   `/configs` 的 rules —— 眼下不做（→ Phase 10 做多内核择优时一并考虑）。
+   兜底手段是 `doctor --deep`：它按实测公网 IP 分组，共用出口一定会被报出来。
+
+23. **`service.mjs --open` 指向 Vite dev server（5173），不是网关端口**：
+   实测网关**不伺服** `dist/admin`（`GET /` 返回 404），只有 `/health`、
+   `/v1/*`、`/api/*` 三组路由。所以 `--open` 打开 5173，需要另开
+   `npm run dev`。Phase 9 若让网关自己伺服静态产物，`ADMIN_URL` 要跟着改 ——
+   那时是一处真实修改，不是遗漏（→ Phase 9）
+
+24. **doctor 报不了「Worker 是否就绪」**：见缺口 #12 的补注 —— 运行期冷却状态
+   住在服务进程里而进程外没有出口。doctor 的第 4 层只能报配置形态，
+   并已把这个限制明写在输出里（→ Phase 9 的管理 API）

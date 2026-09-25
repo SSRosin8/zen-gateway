@@ -4,9 +4,14 @@
 
 ```bash
 npm start            # 构建 → 后台启动 → 健康等待 → 打印 URL
+npm start -- --open  # 同上，并打开管理后台（需另开 npm run dev）
 npm stop
 npm run restart      # 同样会先构建
 npm run status       # 运行状态 / pid / 端口
+npm run open         # 只打开管理后台（服务没跑时报错，不开一个连不上的页面）
+npm run setup        # 一键探测本机 Clash Controller 并写进配置
+npm run doctor       # 分层诊断，只报第一个失败的层 + 下一步建议
+npm run doctor -- --deep    # 额外实测每个出口的公网 IP（会切 Clash 节点）
 npm run validate     # typecheck(server+admin+test) + 全部测试 + 双构建
 npm run discover:upstream   # 重验上游怪癖（需网络，不进 validate）
 npm run dev          # 管理后台 dev server（Vite，5173）
@@ -19,6 +24,17 @@ npm run dev          # 管理后台 dev server（Vite，5173）
 
 **`ZG_DATA_DIR`** 可以把 `data/` 挪到别处（测试与多实例用）。
 
+### 出问题先跑 `npm run doctor`
+
+它按**依赖顺序**分七层查（配置 → 服务 → 统计库 → Worker → Clash 控制面 →
+模型目录 → 出口实测），**只报第一个失败的层**。后面的层在它修好之前给不出
+有意义的答案 —— 平铺式的输出会同时报「上游不可达」「Worker 不就绪」
+「目录为空」三条，而它们其实是同一个根因（Clash 没开）的三个症状。
+
+`doctor` 是**只读**的：不生成配置、不跑数据库迁移（库以 `readOnly` 打开）、
+不改权限。唯一的例外是 `--deep` —— 桥接探测必须切 Clash 的 selector
+（那是进程外的全局状态），所以跑完之后选中节点是最后探测的那个，它会提前告知。
+
 ### 企业网络下必须设 `NODE_EXTRA_CA_CERTS`
 
 如果所在网络对 `opencode.ai` 做 TLS 中间人（内网 DNS 把它解析到内网地址、
@@ -29,22 +45,35 @@ npm run dev          # 管理后台 dev server（Vite，5173）
 NODE_EXTRA_CA_CERTS=/etc/ssl/certs/ca-certificates.crt npm start
 ```
 
-怎么判断是否需要它 —— **不能用 `curl` 判断**：`curl` 读系统 CA 库，所以
-它会正常返回 200，而网关同时是失败的。要么直接看日志（见下），要么用 Node 问：
+怎么判断是否需要它 —— **`npm run doctor` 的第 6 层会直接告诉你**，而且它查的是
+**服务进程**的环境变量而不是你当前 shell 的（两者可以不同：服务可能是带着
+变量启动的，而你手敲 doctor 时没带）。
+
+**不能用 `curl` 判断**：`curl` 读系统 CA 库，所以它会正常返回 200，而网关
+同时是失败的。要自己验就用 Node 问：
 
 ```bash
 node -e 'fetch("https://opencode.ai/zen/v1/models").then(r=>console.log(r.status)).catch(e=>console.log("需要设置:",e.cause?.message))'
 ```
 
-**症状很隐蔽**：网关照常启动、`/health` 返回 `ok: true`、`/v1/models` 返回
-**HTTP 200 加一个空列表** —— 空集合不是错误，所以整条健康链路全绿而功能为零，
-客户端只会说"没有可用模型"。日志里是这一行：
+**症状**：网关照常启动、`/health` 返回 `ok: true`，而 `/v1/models` 返回
+**HTTP 502 `upstream_unreachable`**。日志里是这一行：
 
 ```
 目录拉取失败(keyed): fetch failed ← unable to get local issuer certificate
 ```
 
 `←` 右边是 `err.cause`。`fetch failed` 是 undici 的顶层包装，真正的原因一律在右边。
+
+> **这里先前写的是「返回 HTTP 200 加一个空列表」，那是错的**（2026-09-25 实测）。
+> `routes/models.ts` 在从未成功拉到目录时返回 **502**，它的注释写明了理由：
+> 空列表会让 OpenCode 显示「没有可用模型」，而那与「网关拿不到目录」是两件事。
+>
+> 真正会给出 `200 + data:[]` 的是**另一种**情况：目录**拉到了**而免费集为空
+> （`freeSuffix` 配错，或上游把带后缀的模型全下架）。两者的下一步完全不同，
+> 所以 `doctor` 把它们分成两条不同的诊断，判据是响应里的
+> `zen_gateway_catalog.total`（有 total 而 free 为 0 = 后者）。
+
 
 ---
 
