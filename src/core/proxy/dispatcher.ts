@@ -1,6 +1,7 @@
 import { Agent, ProxyAgent, type Dispatcher } from "undici";
 import { socksDispatcher } from "fetch-socks";
 import type { Proxy } from "../../shared/schema.ts";
+import { DIRECT_EGRESS_ID } from "../../shared/schema.ts";
 import { credentialFingerprint } from "./credentialFingerprint.ts";
 
 /**
@@ -109,7 +110,8 @@ export class DispatcherPool {
   get(target: EgressTarget): Dispatcher {
     if (this.#closed) throw new DispatcherError("dispatcher 池已关闭", null);
 
-    const id = target.mode === "none" ? "__direct__" : target.proxy.id;
+    // 用共享常量而不是字面量 —— 这个 id 同时被 `IdSchema` 拒绝（纪律 #4）。
+    const id = target.mode === "none" ? DIRECT_EGRESS_ID : target.proxy.id;
     const key = this.#identityKey(target);
 
     const cached = this.#cache.get(id);

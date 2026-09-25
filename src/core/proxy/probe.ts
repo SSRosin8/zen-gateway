@@ -3,6 +3,7 @@ import { canonicalizeIp, isIpAddress } from "../../shared/ip.ts";
 import type { FailureKind } from "../failures.ts";
 import { classifyError, classifyStatus } from "../failures.ts";
 import { safeErrorMessage } from "../../shared/redact.ts";
+import { elapsedMs } from "../../shared/elapsed.ts";
 import type { SelectorLock } from "./selectorLock.ts";
 import type { ClashController } from "./clash/controller.ts";
 
@@ -172,7 +173,12 @@ export async function probeEgress(req: ProbeRequest): Promise<ProbeOutcome> {
       continue;
     }
 
-    return { ok: true, egressIp: ip, latencyMs: now() - started, via: service.url };
+    /*
+     * 走 `elapsedMs()` 而不是裸减法（第十轮审核）：`now` 是可注入的，
+     * 而 `probe_results.latency_ms` 是 STRICT 表的 INTEGER 列、
+     * `ProbeResultSchema` 要求 `.int().nonnegative()`。理由见那个函数。
+     */
+    return { ok: true, egressIp: ip, latencyMs: elapsedMs(now, started), via: service.url };
   }
 
   return lastFailure;

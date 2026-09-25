@@ -1,4 +1,5 @@
 import type { Config, Proxy } from "../../shared/schema.ts";
+import { DIRECT_EGRESS_ID } from "../../shared/schema.ts";
 import { ClashController } from "./clash/controller.ts";
 import { credentialFingerprint } from "./credentialFingerprint.ts";
 import { DispatcherPool, type TimeoutConfig } from "./dispatcher.ts";
@@ -292,11 +293,11 @@ export function applyProbeResult(proxy: Proxy, outcome: ProbeOutcome): Proxy {
 /**
  * 探测结果里的**合成 id**：本机直连出口（缺口 #28）。
  *
- * `probeProxy(config, null)` 把结果挂在这个 id 下 —— 它不是一个代理 id，
- * `config.proxies` 里永远不会有这一行。落盘时要认出它并写进
- * `gateway.directEgressIp`，否则那次探测的结果无处可存（先前就是被丢掉的）。
+ * 定义在 `shared/schema.ts` —— `IdSchema` 要拒绝它（否则一个同名代理会与
+ * 直连共用身份，出口隔离失效），而那边不能 import 本文件。这里只 re-export，
+ * 让既有调用点不必改 import 路径。
  */
-export const DIRECT_EGRESS_ID = "__direct__";
+export { DIRECT_EGRESS_ID };
 
 /**
  * 把一批探测结果并回配置 —— 代理与**本机直连**一起。

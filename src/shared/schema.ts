@@ -25,11 +25,42 @@ export const PortSchema = z.number().int().min(1024).max(65535);
  *
  * id 是本机自动生成或用户手填的短标识,没有任何理由包含这些字符。
  */
+/**
+ * 探测结果里表示**本机直连出口**的合成 id。
+ *
+ * `probeProxy(config, null)` 把结果挂在这个 id 下 —— 它不是一个代理 id，
+ * `config.proxies` 里永远不会有这一行（落盘时要认出它并写进
+ * `gateway.directEgressIp`，否则那次探测的结果无处可存，见缺口 #28）。
+ *
+ * **定义在 `shared/` 而不是 `core/proxy/egress.ts`**：`IdSchema` 要拒绝它
+ * （见下），而 `egress.ts` 依赖本文件 —— 反向 import 会成环。
+ * `dispatcher.ts` 先前写的是字面量 `"__direct__"`，那是第二份真相。
+ */
+export const DIRECT_EGRESS_ID = "__direct__";
+
 export const IdSchema = z
   .string()
   .min(1)
   .max(128)
-  .regex(/^[A-Za-z0-9._:\-]+$/, { message: "id 只允许字母、数字与 . _ : - " });
+  .regex(/^[A-Za-z0-9._:\-]+$/, { message: "id 只允许字母、数字与 . _ : - " })
+  /*
+   * **拒绝合成 id**（第十轮审核）。`__direct__` 同时是「本机直连出口」的键，
+   * 于是一个叫这个名字的代理会与直连共用一个身份，两处失效：
+   *
+   * - `applyProbeResults` 把一次测量同时写进 `proxies[i].egressIp` 与
+   *   `gateway.directEgressIp`；
+   * - `POST /api/probe` 按 `proxyId` 建 Map，两条探测结果只剩一条 ——
+   *   另一次测量静默消失；
+   * - `DispatcherPool.get()` 也用它做缓存 id，两条出口共用一个 dispatcher
+   *   → **出口隔离失效**，而那是这个项目存在的理由。
+   *
+   * 概率低（`setup.mjs` 生成的 id 带 `controller_` 前缀），但代价与
+   * 「隔离误报」同级，而拒绝它只要一行。构造期抛错 —— 服务起不来远好于
+   * 静默共用出口。
+   */
+  .refine((id) => id !== DIRECT_EGRESS_ID, {
+    message: `"${DIRECT_EGRESS_ID}" 是保留 id（表示本机直连出口），不能用作代理或 Worker 的 id`,
+  });
 
 /**
  * 凭证字符串（Zen API key、代理口令、Controller secret）。

@@ -299,8 +299,8 @@ export type AdminError = z.infer<typeof AdminErrorSchema>;
  * 所以凭证一律用这个包装类型，**清空必须显式说出来**。
  */
 export const SecretPatchSchema = z.union([
-  z.object({ set: z.string().max(512) }),
-  z.object({ clear: z.literal(true) }),
+  z.strictObject({ set: z.string().max(512) }),
+  z.strictObject({ clear: z.literal(true) }),
 ]);
 export type SecretPatch = z.infer<typeof SecretPatchSchema>;
 
@@ -311,7 +311,7 @@ export type SecretPatch = z.infer<typeof SecretPatchSchema>;
  * 而那会丢掉调度器里累积的冷却状态（`#retired` 表按 id 索引），
  * 于是「改个名字」会顺带抹掉上游明确要求的 15 分钟等待。要换 id 就显式删建。
  */
-export const WorkerPatchSchema = z.object({
+export const WorkerPatchSchema = z.strictObject({
   name: z.string().max(200).optional(),
   enabled: z.boolean().optional(),
   /** null = 改为本机直连。缺席 = 不动。两者不同，所以用 nullable + optional。 */
@@ -329,7 +329,7 @@ export type WorkerPatch = z.infer<typeof WorkerPatchSchema>;
  * 已有配置文件，但**管理面不提供创建它的入口**：界面不该引导用户去做一件
  * 已知不能用的事。
  */
-export const WorkerCreateSchema = z.object({
+export const WorkerCreateSchema = z.strictObject({
   id: z
     .string()
     .min(1)
@@ -343,7 +343,7 @@ export const WorkerCreateSchema = z.object({
 export type WorkerCreate = z.infer<typeof WorkerCreateSchema>;
 
 /** 网关设置的可改字段。`port` 不在这里 —— 改它要重启，属于 Gateway 页（下一批）。 */
-export const GatewayPatchSchema = z.object({
+export const GatewayPatchSchema = z.strictObject({
   maxAttempts: z.number().int().min(1).max(10).optional(),
   headersTimeoutMs: z.number().int().min(1_000).max(600_000).optional(),
   bodyTimeoutMs: z.number().int().min(1_000).max(3_600_000).optional(),
@@ -351,7 +351,7 @@ export const GatewayPatchSchema = z.object({
 });
 
 /** 模型规则的可改字段。对应 Models 页（下一批做 UI，端点先立起来）。 */
-export const ModelRulesPatchSchema = z.object({
+export const ModelRulesPatchSchema = z.strictObject({
   freeSuffix: z.string().min(1).max(32).optional(),
   extraFreeIds: z.array(z.string().min(1).max(128)).max(256).optional(),
   catalogTtlMs: z
@@ -373,12 +373,29 @@ export const ModelRulesPatchSchema = z.object({
  * `workers` 的三种操作分开表达（不是一个数组覆盖）：数组覆盖要求前端
  * 回传完整列表，而前端**拿不到 apiKey 的原值** —— 它只有 `present`，
  * 于是任何覆盖式写入都会抹掉所有 key。这是那条「投影窄于存储」的第二个后果。
+ *
+ * ## 补丁侧一律 `strictObject`（第十轮审核）
+ *
+ * `schema.ts` 每一层都是 `strictObject`，理由是「手工编辑是预期用法，拼错
+ * 字段名必须立刻报错」。而这里先前用的是 `z.object`，于是**拼错的字段被
+ * 静默丢弃**：`maxAttempt`（少个 s）、`freeSuffixes`、`workers.deletes`、
+ * worker patch 里的 `enable` 实测全部"成功"，产出一个空 patch →
+ * `applyConfigPatch` 返回 `changed: false` → 响应 `{"ok":true,"changed":false}`。
+ *
+ * 后果比手工编辑更糟：用户看到成功、刷新后值没变，而这正是 `patch.ts` 那条
+ * 「不静默跳过 —— 静默跳过会让『我明明改了』变成一个查不出的问题」要防的
+ * 情形，只是发生在更外一层。`workers.create` 是唯一能报错的，纯属巧合
+ * （它有必填字段）。
+ *
+ * **响应侧的投影 schema 刻意保持 `z.object`**：那些对象由 `admin/project.ts`
+ * 构造，多一个字段是我们自己的 bug 而不是用户输入的问题，而 strict 会让
+ * 「加一个诊断字段」变成一次破坏性改动。
  */
-export const ConfigPatchSchema = z.object({
+export const ConfigPatchSchema = z.strictObject({
   gateway: GatewayPatchSchema.optional(),
   models: ModelRulesPatchSchema.optional(),
   workers: z
-    .object({
+    .strictObject({
       create: z.array(WorkerCreateSchema).max(64).optional(),
       /** 按 id 定位；id 不存在则整个请求失败（`not_found`），不静默跳过。 */
       update: z.record(z.string(), WorkerPatchSchema).optional(),
