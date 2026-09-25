@@ -185,7 +185,12 @@ export class BatchProbeRunner {
   }
 
   async #run(proxyIds: Array<string | null>): Promise<void> {
-    const config = this.#deps.configOf();
+    /*
+     * `let` 而不是 `const` —— 第 0 段可能把 `activeBridgeId` 写回配置，
+     * 而 230/257 行的筛选与真实探测**必须用写回之后的那份**：
+     * 沿用旧引用会让"已切到健康内核"只体现在日志里，而探测照旧打死内核。
+     */
+    let config = this.#deps.configOf();
 
     /* ---- 第 0 段：锁定单内核（Phase 10） ---- */
     if (this.#deps.probeBridges !== undefined && config.clash.enabled) {
@@ -199,11 +204,39 @@ export class BatchProbeRunner {
        *
        * 探不到任何可用内核时**不中止** —— 直连代理仍然能探。
        * 中止会让"Clash 挂了"变成"批量探测完全不可用"，而那不成立。
+       *
+       * ## 择优结果必须写回，否则这一段只是一条日志
+       *
+       * `pickBridge`（`pool.ts`）是转发与探测**实际**取端口的地方，而它是纯
+       * 配置推导 —— 它从不知道内核是否活着，auto 模式下优先用
+       * `activeBridgeId`（"最近一个健康内核"）。先前这里只把 `locked.reason`
+       * 打进日志、丢掉 `bridgeId`，于是两者给出相反的答案：日志正确地说
+       * "自动切换到 live kernel"，而随后每次 `resolveProxy` 仍拿到死内核的
+       * 端口，全部桥接代理传输失败。**"锁定"这个词在那个版本里没有所指。**
+       *
+       * 写回 `activeBridgeId` 同时解决两件事：这一批的后续探测走健康内核，
+       * 且 `pickBridge` 的 `remembered` 终于真的是"最近一个健康的那个"。
        */
       try {
         const health = await this.#deps.probeBridges();
         const locked = lockedBridgeFor(config.clash, health);
         this.#deps.log?.(locked.reason);
+
+        if (locked.bridgeId !== null && locked.bridgeId !== config.clash.activeBridgeId) {
+          /*
+           * 只在**真的换了**时写盘 —— `config.json` 是唯一一份凭证存储，
+           * 每次批测都原子写一遍它不是免费的（这也是 `SelectionOutcome.changed`
+           * 存在的理由）。这里用 id 比较而不是读 `changed`：`lockedBridgeFor`
+           * 不透传那个字段，而"选出来的与当前记的不同"本身就是同一个判据。
+           */
+          const next = {
+            ...config,
+            clash: { ...config.clash, activeBridgeId: locked.bridgeId },
+          };
+          await this.#deps.applyConfig(next);
+          // 重取而不是用 `next`：`applyConfig` 之后进程内的真相是它换进去的那个引用。
+          config = this.#deps.configOf();
+        }
       } catch (err) {
         // 探活本身失败不该让批测停下 —— 它只是少了一个保证。
         this.#deps.log?.(`内核探活失败，批测继续（未锁定）: ${safeErrorMessage(err)}`);

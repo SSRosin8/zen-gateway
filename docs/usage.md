@@ -13,7 +13,7 @@ npm run setup        # 一键探测本机 Clash Controller 并写进配置
 npm run setup -- --dry-run  # 只打印将要做的改动，不落盘 —— 头一次跑建议先用它
 npm run doctor       # 分层诊断，只报第一个失败的层 + 下一步建议
 npm run doctor -- --deep    # 额外实测每个出口的公网 IP（会切 Clash 节点）
-npm run validate     # typecheck(server+admin+test) + 全部测试 + 双构建
+npm run validate     # typecheck(server+admin+test) → 双构建 → 全部测试（build 必须在 test 前）
 npm run discover:upstream   # 重验上游怪癖（需网络，不进 validate）
 npm run dev          # 管理后台 dev server（Vite，5173）
 ```
@@ -46,8 +46,9 @@ Worker 时）顶部多一个分步向导。
 | 用量 | 请求 vs 尝试、缓存命中、用量覆盖、网关拒绝 |
 
 「某个 Worker 为什么没在被用」这条先前**无法回答** —— `config.json` 知道
-「配了什么」，调度器知道「现在能不能用」，而进程外没有地方同时持有这两半
-（`npm run doctor` 只能报配置形态，并在输出里明写了这个限制）。
+「配了什么」，调度器知道「现在能不能用」，而进程外没有地方同时持有这两半。
+现在 `GET /api/overview` 把两半接起来了，`npm run doctor` 的第 4 层也去问它
+（拿不到那个端点时才降级成只报配置形态）。
 
 **URL 承载全部视图状态**：页面、标签、搜索词、筛选、页码都在 hash 里
 （`#proxy?tab=isolation&q=hk&page=2`），刷新与分享还原同一视图。
@@ -398,8 +399,9 @@ curl -s -H "authorization: Bearer <relayToken>" http://127.0.0.1:9877/v1/models 
 > 剩余冷却、连续失败数、最近失败类别，可按「冷却中」筛选。数据来自
 > `GET /api/overview`（读调度器的 `runtimeWorkers()`）。
 > `npm run status` 仍然只报进程信息（pid／版本／运行时长／URL）—— 它是进程级的，
-> 拿不到服务进程里的运行期状态。`npm run doctor` 的第 4 层同理，只报配置形态，
-> 并把这个限制明写在输出里。不看后台时可从响应头 `x-zen-gateway-route` 与
+> 拿不到服务进程里的运行期状态。`npm run doctor` 的第 4 层**会去问** `GET /api/overview`，
+> 所以它报就绪态与剩余冷却（全员冷却报 fail、部分冷却报 warn）；只在拿不到那个
+> 端点时降级成只报配置形态。不看后台时可从响应头 `x-zen-gateway-route` 与
 > `x-zen-gateway-worker` 推断（见下文「排查」）。
 
 一个实际现象：**任何非 OpenCode 客户端**（curl、别的网关）打进来都会拿 403

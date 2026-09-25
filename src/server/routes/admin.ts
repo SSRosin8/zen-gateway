@@ -20,6 +20,7 @@ import { catalogIdentityOf, slotOf, type ModelCatalog } from "../../core/models/
 import { safeErrorMessage } from "../../shared/redact.ts";
 import { dayKey } from "../../store/db/stats.ts";
 import { applyConfigPatch } from "../admin/patch.ts";
+import { BodyTooLargeError, readBoundedBody } from "../boundedBody.ts";
 import {
   clashView,
   displayFingerprint,
@@ -258,26 +259,20 @@ export function createAdminRoutes(deps: AdminDeps): Hono {
    * 「合并后配置非法」(422)与「磁盘写不动」(500)的下一步完全不同。
    */
   app.patch("/config", async (c) => {
-    /*
-     * 先看 content-length 再读体。
-     *
-     * 只在读完之后检查长度的话,一个声称 2 GB 的请求已经被读进内存了 ——
-     * 上限就没起到作用。两处都要:头可以撒谎(或缺席),所以读完还要再量一次。
-     */
-    const declared = Number(c.req.header("content-length") ?? "0");
-    if (Number.isFinite(declared) && declared > MAX_ADMIN_BODY_BYTES) {
-      return adminError(c, "invalid_request", "请求体超过上限(1 MiB)");
-    }
-
-    let raw: ArrayBuffer;
+    let raw: Uint8Array;
     try {
-      raw = await c.req.arrayBuffer();
+      /*
+       * **有界读取**。先前是「查 content-length + 读完再量」，而
+       * `transfer-encoding: chunked` 根本不给那个头，于是整条检查被绕过
+       * （第十轮审核实测）。现在边读边数，理由见 `server/boundedBody.ts`。
+       */
+      raw = await readBoundedBody(c.req.raw, MAX_ADMIN_BODY_BYTES);
     } catch (err) {
+      if (err instanceof BodyTooLargeError) {
+        return adminError(c, "invalid_request", "请求体超过上限(1 MiB)");
+      }
       deps.log?.(`管理面读请求体失败: ${safeErrorMessage(err)}`);
       return adminError(c, "invalid_request", "无法读取请求体");
-    }
-    if (raw.byteLength > MAX_ADMIN_BODY_BYTES) {
-      return adminError(c, "invalid_request", "请求体超过上限(1 MiB)");
     }
 
     let parsed: unknown;
@@ -643,16 +638,31 @@ export function createAdminRoutes(deps: AdminDeps): Hono {
    * 返回原状态，不抛异常 —— 事件来自轮询与点击两个源，可以乱序到达）。
    */
   app.post("/batch-probe", async (c) => {
-    if (deps.batch === undefined) {
-      return adminError(c, "internal_error", "批量探测不可用(统计库未就绪)");
-    }
-
+    /*
+     * 体积闸门排在**业务可用性检查之前**。
+     *
+     * 反过来的话，一个 8 MiB 的请求在 runner 未就绪时会先被完整读进内存
+     * 再返回 500 —— 体积闸门存在的理由恰恰是"不要读那么多"，
+     * 而它是否生效不该取决于另一个组件的状态。
+     *
+     * 这条**先前完全没有上限** —— `MAX_ADMIN_BODY_BYTES` 是本文件的常量，
+     * 而两个写端点里只有 `PATCH /config` 用它：上限写在了调用点而不是闸门上
+     * （第十轮审核实测 8 MiB 的 body 被照常接受）。
+     */
     let action: string;
     try {
-      const body = (await c.req.json()) as { action?: unknown };
+      const raw = await readBoundedBody(c.req.raw, MAX_ADMIN_BODY_BYTES);
+      const body = JSON.parse(new TextDecoder().decode(raw)) as { action?: unknown };
       action = String(body.action ?? "");
-    } catch {
+    } catch (err) {
+      if (err instanceof BodyTooLargeError) {
+        return adminError(c, "invalid_request", "请求体超过上限(1 MiB)");
+      }
       return adminError(c, "invalid_request", "请求体不是合法 JSON");
+    }
+
+    if (deps.batch === undefined) {
+      return adminError(c, "internal_error", "批量探测不可用(统计库未就绪)");
     }
 
     switch (action) {

@@ -191,19 +191,49 @@ export class WorkerPool {
   }
 
   /**
-   * 记一次成功 —— 清零计数**并解除冷却**。
+   * 记一次成功 —— 清零计数，并在**这次尝试确实晚于冷却**时解除冷却。
    *
-   * 只用于**真正的成功**。一次成功的请求证明这个 Worker 现在能用,
-   * 所以解除冷却是对的(上游已经用行为否定了先前那次失败的判断)。
+   * ## 为什么要看发起时刻（第十轮审核实测）
+   *
+   * 「一次成功证明它现在能用」只在这次尝试**发出于冷却生效之后**才成立。
+   * 而 `record()` 的调用顺序由**上游响应到达顺序**决定，不由发起顺序决定：
+   *
+   * ```
+   * 请求A 发出 ──── 上游慢 300ms ──→ 200 成功   ← 记账在后
+   * 请求B 发出 → 立刻 429 Retry-After: 900      ← 记账在前
+   * ```
+   *
+   * 先前这里无条件 `cooldownUntil: 0`，于是请求 A 那次成功（它在冷却生效
+   * **之前**就已发出，对"现在能不能用"零信息）把上游明确要求的 900 秒清成 0。
+   * 触发不需要巧合：429 通常是账号级的，而多轮对话客户端天然并发。
+   *
+   * 这是 `markNotBlamed` 那条判据的推广。那里写的是「『不归咎于 Worker』
+   * 不等于『证明它现在能用』」；同一条再推一步就是 **「一次成功」不等于
+   * 「现在能用」—— 要看它是什么时候发出的**。
+   *
+   * `attemptStartedAt` 由调用方按 `now - latencyMs` 算出（`AttemptRecord`
+   * 已有 `latencyMs`，不必新增字段）。取不到时传 `now`，那退化成原来的行为
+   * —— 对「尝试发出时没有冷却」这个最常见的情形完全一致。
    *
    * 不可重试的 4xx **不要**用这个,用 `markNotBlamed()` —— 见那里的说明。
    */
-  markSuccess(workerId: string): void {
-    this.#update(workerId, () => ({
-      cooldownUntil: 0,
-      consecutiveFails: 0,
-      lastFailure: null,
-    }));
+  markSuccess(workerId: string, attemptStartedAt: number): void {
+    this.#update(workerId, (current) => {
+      /*
+       * 这次尝试发出时冷却已经结束（或本来就没有冷却）→ 它对"现在能用"
+       * 确实有信息，清掉冷却。否则只清计数 —— 与 `markNotBlamed` 同一处置。
+       *
+       * 用 `>=` 而不是 `>`：`cooldownUntil` 恰好等于发起时刻意味着冷却刚到期，
+       * 那次尝试是在冷却之后发出的。
+       */
+      const startedAfterCooldown =
+        Number.isFinite(attemptStartedAt) && attemptStartedAt >= current.cooldownUntil;
+      return {
+        ...(startedAfterCooldown ? { cooldownUntil: 0 } : {}),
+        consecutiveFails: 0,
+        lastFailure: null,
+      };
+    });
   }
 
   /**

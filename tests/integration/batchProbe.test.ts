@@ -491,3 +491,175 @@ describe("执行器", () => {
     expect(current.proxies.find((x) => x.id === "p2")!.egressIp).toBe("198.51.100.22");
   }, 30_000);
 });
+
+/* ================================================================== *
+ * 第 0 段：内核择优的结果必须写回配置（第十轮审核）
+ * ================================================================== */
+
+describe("批测前的内核锁定真的改变后续行为", () => {
+  /*
+   * 先前这一段只把 `locked.reason` 打进日志、**丢掉 `bridgeId`**，于是
+   * 「锁定」这个词没有所指：日志正确地说"自动切换到 live kernel"，而随后
+   * 每次 `resolveProxy` 仍从 `pickBridge` 拿到死内核的端口。
+   *
+   * `pickBridge` 是转发与探测实际取端口的地方，它是**纯配置推导** ——
+   * 从不知道内核是否活着，auto 模式下优先用 `activeBridgeId`。所以判据只能是
+   * 「`activeBridgeId` 被写回了」，而不是「日志里有那句话」：
+   * 后者在缺陷版本里也成立。
+   *
+   * 这一整段先前**零测试覆盖** —— 没有任何用例传 `probeBridges`，
+   * 所以缺陷才能活下来。
+   */
+
+  /** 造一份两内核的桥接配置：`activeBridgeId` 指向后面会被判为死的那个。 */
+  function bridgeConfig(activeBridgeId: string): Config {
+    return ConfigSchema.parse({
+      version: CONFIG_VERSION,
+      gateway: { relayToken: "batch-bridge-token-not-real", port: 19877 },
+      workers: [{ id: "w1", kind: "authenticated", apiKey: KEY, proxyId: "p1" }],
+      proxies: [
+        {
+          id: "p1", name: "直连", type: "http", host: "127.0.0.1", port: echoPort,
+          source: "manual", direct: true, bridgeable: false, egressIp: null,
+        },
+      ],
+      clash: {
+        enabled: true,
+        selectionMode: "auto",
+        activeBridgeId,
+        bridges: [
+          {
+            id: "b-dead", name: "死内核", enabled: true, priority: 10,
+            apiBase: "http://127.0.0.1:1", apiSecret: "",
+            localProxyPort: 17897, selectorGroup: "Proxy",
+          },
+          {
+            id: "b-live", name: "活内核", enabled: true, priority: 20,
+            apiBase: "http://127.0.0.1:2", apiSecret: "",
+            localProxyPort: 7897, selectorGroup: "Proxy",
+          },
+        ],
+      },
+    });
+  }
+
+  function runnerWithBridges(config: Config, health: Array<Record<string, unknown>>) {
+    let current = config;
+    const logs: string[] = [];
+    const egress = new EgressService({
+      timeouts: { headersTimeoutMs: 5000, bodyTimeoutMs: 5000 },
+      services: [{ url: `http://127.0.0.1:${echoPort}/`, extract: (t) => t.trim() }],
+      probeTimeoutMs: 3000,
+    });
+    const runner = new BatchProbeRunner({
+      configOf: () => current,
+      applyConfig: async (next) => {
+        current = next;
+      },
+      egress,
+      store,
+      log: (m) => logs.push(m),
+      probeBridges: async () => health as never,
+    });
+    return { runner, getConfig: () => current, logs };
+  }
+
+  it("**当前内核死掉时 `activeBridgeId` 被写回**成活着的那个", async () => {
+    const { runner, getConfig, logs } = runnerWithBridges(bridgeConfig("b-dead"), [
+      { bridgeId: "b-dead", alive: false, version: null, usableNodes: 0, reason: "连不上" },
+      { bridgeId: "b-live", alive: true, version: "v1.19.31", usableNodes: 12, reason: null },
+    ]);
+
+    runner.start();
+    await waitDone(runner);
+
+    // 这是全部要点：配置真的变了，于是 pickBridge 下次给的是活内核的端口。
+    expect(getConfig().clash.activeBridgeId).toBe("b-live");
+    // 日志仍然要说清 —— 但它**不是**判据（缺陷版本里日志也对）。
+    expect(logs.some((m) => m.includes("b-live"))).toBe(true);
+  }, 30_000);
+
+  it("当前内核活着时**不写盘** —— config.json 是唯一一份凭证存储", async () => {
+    /*
+     * 与上一条配对：少了它，一个"每次批测都无条件写 activeBridgeId"的实现
+     * 也能让上一条通过，而那会让每次批测都原子写一遍凭证文件。
+     */
+    let applied = 0;
+    let current = bridgeConfig("b-live");
+    const egress = new EgressService({
+      timeouts: { headersTimeoutMs: 5000, bodyTimeoutMs: 5000 },
+      services: [{ url: `http://127.0.0.1:${echoPort}/`, extract: (t) => t.trim() }],
+      probeTimeoutMs: 3000,
+    });
+    const runner = new BatchProbeRunner({
+      configOf: () => current,
+      applyConfig: async (next) => {
+        applied += 1;
+        current = next;
+      },
+      egress,
+      store,
+      probeBridges: async () =>
+        [
+          { bridgeId: "b-dead", alive: false, version: null, usableNodes: 0, reason: "连不上" },
+          { bridgeId: "b-live", alive: true, version: "v1.19.31", usableNodes: 12, reason: null },
+        ] as never,
+    });
+
+    runner.start();
+    await waitDone(runner);
+
+    expect(current.clash.activeBridgeId).toBe("b-live");
+    /*
+     * 探测结果本身要写一次（p1 拿到实测 IP），所以 applied 不是 0；
+     * 判据是**没有为内核选择额外写一次**。
+     */
+    expect(applied).toBe(1);
+    // 探测真的跑到了 —— echo 按调用序号发 IP，所以这里不钉具体值。
+    expect(current.proxies[0]!.egressIp).toMatch(/^198\.51\.100\.\d+$/);
+  }, 30_000);
+
+  it("一个内核都活不了时不中止 —— 直连代理仍要被探到", async () => {
+    const { runner, getConfig } = runnerWithBridges(bridgeConfig("b-dead"), [
+      { bridgeId: "b-dead", alive: false, version: null, usableNodes: 0, reason: "连不上" },
+      { bridgeId: "b-live", alive: false, version: null, usableNodes: 0, reason: "连不上" },
+    ]);
+
+    runner.start();
+    await waitDone(runner);
+
+    expect(runner.snapshot().state).toBe("done");
+    // 「Clash 挂了」不该变成「批量探测完全不可用」。
+    expect(getConfig().proxies[0]!.egressIp).toMatch(/^198\.51\.100\.\d+$/);
+  }, 30_000);
+
+  it("探活本身抛错时批测继续", async () => {
+    let current = bridgeConfig("b-dead");
+    const egress = new EgressService({
+      timeouts: { headersTimeoutMs: 5000, bodyTimeoutMs: 5000 },
+      services: [{ url: `http://127.0.0.1:${echoPort}/`, extract: (t) => t.trim() }],
+      probeTimeoutMs: 3000,
+    });
+    const logs: string[] = [];
+    const runner = new BatchProbeRunner({
+      configOf: () => current,
+      applyConfig: async (next) => {
+        current = next;
+      },
+      egress,
+      store,
+      log: (m) => logs.push(m),
+      probeBridges: async () => {
+        throw new Error("controller 探活炸了");
+      },
+    });
+
+    runner.start();
+    await waitDone(runner);
+
+    expect(runner.snapshot().state).toBe("done");
+    expect(logs.some((m) => m.includes("批测继续"))).toBe(true);
+    // 探活失败时不该乱动 activeBridgeId。
+    expect(current.clash.activeBridgeId).toBe("b-dead");
+  }, 30_000);
+});

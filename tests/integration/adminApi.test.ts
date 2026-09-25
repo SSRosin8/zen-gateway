@@ -738,6 +738,72 @@ describe("写入失败分类", () => {
     expect((res["error"] as { message: string }).message).toContain("上限");
   });
 
+  it("**`POST /batch-probe` 也有上限** —— 上限属于闸门，不属于某个调用点", async () => {
+    /*
+     * 第十轮审核实测：`MAX_ADMIN_BODY_BYTES` 是本文件的常量，而两个写端点里
+     * 只有 `PATCH /config` 用它 —— `/batch-probe` 直接 `c.req.json()`，
+     * 8 MiB 的体被照常接受。也就是说"管理 JSON 有上限"这条约束
+     * **只覆盖了一半的写端点**，而文件头把它写成已兑现。
+     */
+    const { app } = makeApp(makeConfig());
+    const body = { action: "start", padding: "x".repeat(2 * 1024 * 1024) };
+    expect(JSON.stringify(body).length).toBeGreaterThan(1024 * 1024);
+
+    const res = await app.request(
+      "http://127.0.0.1/api/batch-probe",
+      { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body) },
+      { remoteAddress: "127.0.0.1" } as never,
+    );
+
+    /*
+     * 400 而不是 500：体积闸门排在 `deps.batch === undefined` 那个业务检查
+     * **之前**。反过来的话，一个 8 MiB 的请求在 runner 未就绪时会先被完整
+     * 读进内存再返回 500 —— 而闸门存在的理由正是"不要读那么多"。
+     */
+    expect(res.status).toBe(400);
+    const json = (await res.json()) as { error?: { message?: string } };
+    expect(json.error?.message).toContain("上限");
+  });
+
+  it("**chunked 编码绕不过上限** —— `content-length` 可以缺席", async () => {
+    /*
+     * 先前的实现先查 `content-length`、再读完量一次。第一道对
+     * `transfer-encoding: chunked` 无效（那个头根本不给），第二道在
+     * 体已进内存之后。这里用流式请求体复现"没有 content-length"的形态：
+     * 判据是网关**读入的字节数**，而不是它最终是否返回 400。
+     */
+    const { app } = makeApp(makeConfig());
+    const CHUNK = 256 * 1024;
+    const TOTAL = 16 * 1024 * 1024;
+    let produced = 0;
+    const body = new ReadableStream<Uint8Array>({
+      pull(controller) {
+        if (produced >= TOTAL) {
+          controller.close();
+          return;
+        }
+        produced += CHUNK;
+        controller.enqueue(new Uint8Array(CHUNK).fill(0x61));
+      },
+    });
+
+    const res = await app.request(
+      "http://127.0.0.1/api/config",
+      {
+        method: "PATCH",
+        headers: { "content-type": "application/json" },
+        body,
+        // @ts-expect-error duplex 是流式请求体必需的，TS 的 RequestInit 还没有它
+        duplex: "half",
+      },
+      { remoteAddress: "127.0.0.1" } as never,
+    );
+
+    expect(res.status).toBe(400);
+    // 上限 1 MiB，客户端想发 16 MiB —— 读入量必须停在上限附近。
+    expect(produced / 1048576).toBeLessThan(1 + 2);
+  }, 30_000);
+
   it("非 JSON 体被拒,且不回显体内容", async () => {
     const { app } = makeApp(makeConfig());
     const res = await app.request(

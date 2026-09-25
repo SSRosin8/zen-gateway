@@ -615,3 +615,124 @@ describe("health", () => {
     expect(body.pid).toBe(process.pid);
   });
 });
+
+/* ================================================================== *
+ * 请求体上限（第十轮审核）
+ * ================================================================== */
+
+describe("请求体上限真的限制读入，不是读完再量", () => {
+  /*
+   * 先前是 `await c.req.arrayBuffer()` 然后 `if (byteLength > 上限)`。
+   * 那个顺序下整个体已经在内存里了 —— 上限只限制"转发多少"，
+   * 不限制"占用多少"。第十轮审核实测：64 MiB 的闸门下发 200 MiB，
+   * 网关照旧读入 200 MiB 才返回 413。
+   *
+   * 而这两条拒绝路径（`body_too_large` / `body_unreadable`）此前
+   * **零测试覆盖** —— `grep` 确认它们在 tests/ 下一次都没出现过，
+   * 所以"闸门装在错误的位置"这件事也没人发现。
+   *
+   * ## 判据是「网关读了多少字节」，不是堆增长
+   *
+   * 堆增长的阈值天生要靠猜，且被 GC 时机左右（纪律 #1：能用行为断言
+   * 就别用性能断言）。这里用一个**自己计数的流**：网关取消读取之后
+   * 我们的 `pull` 不再被调用，于是"生产了多少字节"就是"网关读了多少"。
+   */
+
+  /** 造一个按需生产 1 MiB 块的请求体，并记录实际被拉取的字节数。 */
+  function countingBody(totalBytes: number): { body: ReadableStream<Uint8Array>; pulled: () => number } {
+    const CHUNK = 1024 * 1024;
+    let produced = 0;
+    const stream = new ReadableStream<Uint8Array>({
+      pull(controller) {
+        if (produced >= totalBytes) {
+          controller.close();
+          return;
+        }
+        const size = Math.min(CHUNK, totalBytes - produced);
+        produced += size;
+        // 内容是合法 JSON 的填充字符，形状不影响这条闸门（它在解析之前）。
+        controller.enqueue(new Uint8Array(size).fill(0x61));
+      },
+    });
+    return { body: stream, pulled: () => produced };
+  }
+
+  it("**超限时提前取消**：网关读入的字节数远小于客户端要发的量", async () => {
+    const { body, pulled } = countingBody(300 * 1024 * 1024);
+
+    const res = await app().request("/v1/chat/completions", {
+      method: "POST",
+      headers: { authorization: `Bearer ${TOKEN}`, "content-type": "application/json" },
+      body,
+      // @ts-expect-error duplex 是流式请求体必需的，TS 的 RequestInit 还没有它
+      duplex: "half",
+    });
+
+    expect(res.status).toBe(413);
+
+    /*
+     * 这是全部要点。上限 64 MiB，客户端想发 300 MiB。
+     * 缺陷版本下这里是 300 MiB（全读完）；修好后应在上限附近就停。
+     * 留一块余量（+8 MiB）给"最后一块跨过上限"与内部缓冲。
+     */
+    const readMiB = pulled() / 1048576;
+    expect(readMiB).toBeLessThan(64 + 8);
+    // 而且不是零 —— 它真的读了、真的是被上限拦下的。
+    expect(readMiB).toBeGreaterThan(1);
+  }, 60_000);
+
+  it("上限之内的请求照常通过 —— 闸门不是把一切都挡掉", async () => {
+    /*
+     * 与上一条配对：少了它，一个"无条件 413"的实现也能让上一条通过。
+     * 用一个真实的小体，断言它走到了业务逻辑（模型不在免费集 → 403），
+     * 而不是停在 413。
+     */
+    const res = await app().request("/v1/chat/completions", relay({ model: "gpt-4o" }));
+    expect(res.status).not.toBe(413);
+  });
+
+  it("读体中途出错记 `body_unreadable` 并返回 400", async () => {
+    /*
+     * 这条路径先前也零覆盖。造一个读到一半就 error 的流。
+     */
+    let pulls = 0;
+    const body = new ReadableStream<Uint8Array>({
+      pull(controller) {
+        pulls += 1;
+        if (pulls === 1) {
+          controller.enqueue(new Uint8Array(1024).fill(0x61));
+          return;
+        }
+        controller.error(new Error("客户端连接中断"));
+      },
+    });
+
+    const res = await app().request("/v1/chat/completions", {
+      method: "POST",
+      headers: { authorization: `Bearer ${TOKEN}`, "content-type": "application/json" },
+      body,
+      // @ts-expect-error 同上
+      duplex: "half",
+    });
+
+    // 400 而不是 500：读不到客户端的体是请求的问题，不是网关内部错误。
+    expect(res.status).toBe(400);
+    const json = (await res.json()) as { error?: { message?: string } };
+    expect(json.error?.message).toContain("无法读取请求体");
+  }, 30_000);
+
+  it("空体仍然是 400 `body_empty`，与超限区分开", async () => {
+    /*
+     * 有界读取对 `body === null` 返回空数组，所以"空体"这条既有出口
+     * 必须仍然可达 —— 改动不能把它变成 413 或 500。
+     */
+    const res = await app().request("/v1/chat/completions", {
+      method: "POST",
+      headers: { authorization: `Bearer ${TOKEN}`, "content-type": "application/json" },
+    });
+
+    expect(res.status).toBe(400);
+    const json = (await res.json()) as { error?: { message?: string } };
+    expect(json.error?.message).toContain("请求体为空");
+  });
+});

@@ -277,13 +277,64 @@ describe("markFailure", () => {
 });
 
 describe("markSuccess", () => {
-  it("清掉冷却与失败计数", () => {
+  it("清掉冷却与失败计数（尝试发出于冷却之后）", () => {
     const cfg = config([{ id: "w1" }]);
     const pool = new WorkerPool(cfg);
-    pool.markFailure({ workerId: "w1", kind: "rate_limit", retryAfter: "900", config: cfg, now: NOW, jitter: 0 });
-    pool.markSuccess("w1");
+    const until = pool.markFailure({ workerId: "w1", kind: "rate_limit", retryAfter: "900", config: cfg, now: NOW, jitter: 0 })!;
+    // 发起时刻晚于冷却结束 —— 这次成功确实说明"现在能用"。
+    pool.markSuccess("w1", until + 1);
     expect(pool.isReady("w1", NOW)).toBe(true);
     expect(pool.get("w1")).toMatchObject({ consecutiveFails: 0, lastFailure: null });
+  });
+
+  it("**发出于冷却生效之前的成功不清冷却** —— 它对「现在能用」零信息", () => {
+    /*
+     * 第十轮审核实测的严重缺陷。记账顺序由**上游响应到达顺序**决定：
+     *
+     *   请求A 发出 ── 上游慢 300ms ──→ 200 成功   ← 记账在后
+     *   请求B 发出 → 立刻 429 Retry-After: 900    ← 记账在前
+     *
+     * 先前无条件 `cooldownUntil: 0`，于是请求 A 那次成功把上游明确要求的
+     * 900 秒清成 0。而 429 通常是账号级的，多轮对话客户端天然并发 ——
+     * 「一个 in-flight 请求恰好在 429 之前发出」是限流场景的常态。
+     */
+    const cfg = config([{ id: "w1" }]);
+    const pool = new WorkerPool(cfg);
+    const until = pool.markFailure({ workerId: "w1", kind: "rate_limit", retryAfter: "900", config: cfg, now: NOW, jitter: 0 })!;
+
+    // 这次成功在 NOW - 300 就发出了 —— 早于冷却生效（NOW）。
+    pool.markSuccess("w1", NOW - 300);
+
+    // 冷却必须还在：上游说的 900 秒不该被一次更早发出的请求推翻。
+    expect(pool.isReady("w1", NOW)).toBe(false);
+    expect(pool.get("w1")!.cooldownUntil).toBe(until);
+    // 但计数照样清零 —— 那部分与 markNotBlamed 同处置。
+    expect(pool.get("w1")).toMatchObject({ consecutiveFails: 0, lastFailure: null });
+  });
+
+  it("恰好等于冷却结束时刻算「之后」", () => {
+    /*
+     * 边界：`cooldownUntil` 等于发起时刻意味着冷却刚到期，那次尝试是在
+     * 冷却之后发出的。用 `>` 而不是 `>=` 会让这一刻的成功白白不清冷却。
+     */
+    const cfg = config([{ id: "w1" }]);
+    const pool = new WorkerPool(cfg);
+    const until = pool.markFailure({ workerId: "w1", kind: "rate_limit", retryAfter: "900", config: cfg, now: NOW, jitter: 0 })!;
+    pool.markSuccess("w1", until);
+    expect(pool.get("w1")!.cooldownUntil).toBe(0);
+  });
+
+  it("没有冷却时照常清零 —— 最常见的情形不受影响", () => {
+    /*
+     * 与上面几条配对：绝大多数成功发生在没有冷却的 Worker 上（`cooldownUntil`
+     * 为 0），任何发起时刻都 >= 0，所以行为与改动前完全一致。
+     * 少了这条，一个「永不清冷却」的实现也能让"不清"那条通过。
+     */
+    const cfg = config([{ id: "w1" }]);
+    const pool = new WorkerPool(cfg);
+    pool.markFailure({ workerId: "w1", kind: "transport", retryAfter: null, config: cfg, now: NOW, jitter: 0 });
+    pool.markSuccess("w1", NOW + 10_000);
+    expect(pool.get("w1")!.cooldownUntil).toBe(0);
   });
 
   it("成功后下一次失败从基准值重新起跳", () => {
@@ -296,7 +347,8 @@ describe("markSuccess", () => {
     for (let i = 0; i < 4; i += 1) {
       pool.markFailure({ workerId: "w1", kind: "transport", retryAfter: null, config: cfg, now: NOW, jitter: 0 });
     }
-    pool.markSuccess("w1");
+    // 发起时刻取到远晚于第 4 次退避之后 —— 这条验的是计数清零，不是冷却边界。
+    pool.markSuccess("w1", NOW + 1_000_000);
     expect(
       pool.markFailure({ workerId: "w1", kind: "transport", retryAfter: null, config: cfg, now: NOW, jitter: 0 }),
     ).toBe(NOW + cfg.routing.cooldown.transportBaseMs);
@@ -304,7 +356,21 @@ describe("markSuccess", () => {
 
   it("不存在的 Worker 不抛错", () => {
     const pool = new WorkerPool(config([{ id: "w1" }]));
-    expect(() => pool.markSuccess("nope")).not.toThrow();
+    expect(() => pool.markSuccess("nope", NOW)).not.toThrow();
+  });
+
+  it("非有限的发起时刻退回「清冷却」—— 保守方向是不要卡住一个能用的 Worker", () => {
+    /*
+     * `latencyMs` 若为 NaN，`now - latencyMs` 也是 NaN。两个方向都要选一个：
+     * 不清 → 一个其实能用的 Worker 被冷却卡住；清 → 极端情况下提前解除。
+     * 选后者与 `record` 里 `Number.isFinite` 的退回一致（那里退回 `now`），
+     * 且这条路径要求 `latencyMs` 本身已经坏掉，而它由 `elapsedMs()` 产出。
+     */
+    const cfg = config([{ id: "w1" }]);
+    const pool = new WorkerPool(cfg);
+    pool.markFailure({ workerId: "w1", kind: "rate_limit", retryAfter: "900", config: cfg, now: NOW, jitter: 0 });
+    pool.markSuccess("w1", Number.NaN);
+    expect(pool.get("w1")!.cooldownUntil).not.toBeNaN();
   });
 });
 

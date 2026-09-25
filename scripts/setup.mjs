@@ -55,10 +55,28 @@ import { safeErrorMessage } from "../src/shared/redact.ts";
 import { isGroupType } from "../src/shared/clashNodeTypes.ts";
 import { dataDirOf } from "./lib/instance.mjs";
 import { detail, heading, line, nextStep } from "./lib/report.mjs";
+import { checkArgs } from "./lib/args.mjs";
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
 const DATA_DIR = dataDirOf(ROOT);
 const ROOT_ARG = process.env.ZG_DATA_DIR ? undefined : ROOT;
+
+/*
+ * 参数校验放在**任何副作用之前** —— 这个脚本会写 `data/config.json`，
+ * 也就是唯一一份凭证存储。未识别的参数先前被静默忽略并照常执行完整导入，
+ * 所以 `npm run setup -- --help` 的后果是一次真实写入而不是一段用法说明。
+ * 理由写在 `lib/args.mjs`。
+ */
+checkArgs({
+  command: "npm run setup",
+  summary: "zen-gateway 自动配置：探测本机 Clash Controller → 导入节点 → 建 Worker。",
+  flags: [
+    { flag: "--dry-run", help: "只报会做什么，不写盘" },
+    { flag: "--api", takesValue: true, help: "显式指定 Controller 地址（跳过端口探测）" },
+    { flag: "--secret", takesValue: true, help: "Controller 的 secret" },
+  ],
+});
+
 const DRY_RUN = process.argv.includes("--dry-run");
 
 /**

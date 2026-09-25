@@ -262,10 +262,19 @@ export function createApp(deps?: AppDeps): Hono {
  * `ALL`、处理器登记为具体方法,据此可以核对每条处理器路径是否被某条中间件
  * 覆盖。构造期抛错 —— 服务起不来远好于静默敞开。
  *
- * 这条断言本身也要能失败:见 `tests/integration/relay.test.ts` 里对它做的
- * 变异测试（把守卫改回通配挂载后,它必须抛错）。
+ * **导出仅为可测。** 这里先前写着「见 `tests/integration/relay.test.ts` 里对它
+ * 做的变异测试」,而第十轮审核实测**那个测试不存在** —— 在本函数首行插一句
+ * `return` 之后全量测试依然全绿。唯一碰到它的是 `auditRound4.test.ts` 对一个
+ * **正确**的 app 断言 `.not.toThrow()`,那只能发现误报,永远发现不了
+ * 「断言被阉掉」。**一条指向不存在的测试的注释比没有注释更糟**:它让下一个人
+ * 以为这里有守卫。
+ *
+ * 这与隔壁 `assertAdminRoutesLoopbackOnly` 是同一个洞 —— 第八轮在那条上查出
+ * 并修好了,而没有把同一手法应用到这条（纪律 #4 的注释版:正确的修法就在
+ * 邻居函数里）。现在测试会喂一个故意装错的 app 进来,见
+ * `tests/unit/middleware.test.ts`。
  */
-function assertEveryRouteGuarded(app: Hono): void {
+export function assertEveryRouteGuarded(app: Hono): void {
   /*
    * `/health` 故意免鉴权:service.mjs 的健康等待与 doctor 都靠它,
    * 而它只回报 ok/version/uptime/pid,不含任何配置或凭证。
