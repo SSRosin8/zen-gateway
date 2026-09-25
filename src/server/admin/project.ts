@@ -139,7 +139,6 @@ export function workerViews(
  * 用户永远看到「出口未隔离」而实际在用的那几个是隔离的。
  */
 export function isolationEntries(
-  config: Config,
   views: readonly WorkerView[],
 ): Array<{ workerId: string; proxyId: string | null; egressIp: string | null }> {
   return views

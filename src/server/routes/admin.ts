@@ -11,6 +11,8 @@ import {
   SubscriptionRefreshSchema,
   type Overview,
   type StatsView,
+  AdminErrorSchema,
+  type AdminErrorType,
 } from "../../shared/contract.ts";
 import { poolHealth } from "../../shared/contract.ts";
 import { buildIsolationReport } from "../../core/proxy/probe.ts";
@@ -117,11 +119,7 @@ export type AdminDeps = {
   readonly log?: (message: string) => void;
 };
 
-function adminError(
-  c: Context,
-  type: "invalid_request" | "invalid_config" | "write_failed" | "not_found" | "internal_error",
-  message: string,
-) {
+function adminError(c: Context, type: AdminErrorType, message: string) {
   const status = {
     invalid_request: 400,
     invalid_config: 422,
@@ -129,7 +127,14 @@ function adminError(
     not_found: 404,
     internal_error: 500,
   }[type] as 400 | 404 | 422 | 500;
-  return c.json({ error: { type, message } }, status);
+  /*
+   * 过一遍 `AdminErrorSchema` 而不是手工拼装。
+   *
+   * 那个 schema 先前**零生产引用** —— 它描述的形状与这里手写的对象各存一份，
+   * 于是「改了枚举而忘了改 handler」不会有任何症状（第十轮审核查出）。
+   * 经它构造则是构造期抛错，与其余管理端点一致。
+   */
+  return c.json(AdminErrorSchema.parse({ error: { type, message } }), status);
 }
 
 export function createAdminRoutes(deps: AdminDeps): Hono {
@@ -160,7 +165,7 @@ export function createAdminRoutes(deps: AdminDeps): Hono {
     const config = deps.configOf();
     const views = workerViews(config, deps.runtimeWorkers());
     const counts = poolCounts(views);
-    const report = buildIsolationReport(isolationEntries(config, views));
+    const report = buildIsolationReport(isolationEntries(views));
 
     /*
      * 目录**只读缓存,绝不发请求**。
@@ -572,7 +577,7 @@ export function createAdminRoutes(deps: AdminDeps): Hono {
   app.get("/proxies", (c) => {
     const config = deps.configOf();
     const views = workerViews(config, deps.runtimeWorkers());
-    const report = buildIsolationReport(isolationEntries(config, views));
+    const report = buildIsolationReport(isolationEntries(views));
 
     return c.json(
       ProxyListSchema.parse({

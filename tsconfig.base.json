@@ -8,6 +8,12 @@
     "noUncheckedIndexedAccess": true,
     "noImplicitOverride": true,
     "noFallthroughCasesInSwitch": true,
+    // 死 import 与死局部变量是**死信息**：它们暗示某个能力存在。
+    // 实测 `ProxyPage.tsx` 导入了三个从未使用的 React hook，于是读者会以为
+    // 那个组件持有本地状态 —— 而「状态全在 URL 里」正是它的设计前提。
+    // `validate` 是唯一的关卡，不该有这个盲区。
+    "noUnusedLocals": true,
+    "noUnusedParameters": true,
     "exactOptionalPropertyTypes": true,
     "verbatimModuleSyntax": true,
     "isolatedModules": true,

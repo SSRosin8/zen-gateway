@@ -274,6 +274,14 @@ export const AdminErrorSchema = z.object({
   }),
 });
 export type AdminError = z.infer<typeof AdminErrorSchema>;
+/**
+ * 错误类型的联合 —— 供 `adminError()` 的形参用。
+ *
+ * 先前 `routes/admin.ts` 手写了一份同样的五项联合，而这里的 `z.enum` 是
+ * 同一事实的另一份副本（纪律 #4）。从 schema 推导让「加一种错误类型」
+ * 只需要改一处，而漏改的方向是 typecheck 失败而不是运行期分叉。
+ */
+export type AdminErrorType = AdminError["error"]["type"];
 
 /* ------------------------------------------------------------------ *
  * 写入方向（Phase 9）

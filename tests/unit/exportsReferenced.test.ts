@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { readFileSync, readdirSync } from "node:fs";
-import { join, relative } from "node:path";
+import { join } from "node:path";
 
 /*
  * 导出成员必须有引用 —— 登记了三轮、一直没建的那道关卡（缺口 #12）。
