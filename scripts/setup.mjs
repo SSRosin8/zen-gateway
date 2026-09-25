@@ -243,7 +243,35 @@ async function readController(ctrl) {
     });
   }
 
-  return { mixedPort, mode, selectors, nodes };
+  /*
+   * 规则的目标分组 —— `GLOBAL` 陷阱的**直接证据**（缺口 #22）。
+   *
+   * 拿不到就给 null，`pickSelector` 会退回按名字降级那个启发式。
+   * 旧内核可能没有 `/rules`，而那不该让整个 setup 失败。
+   */
+  let routed = null;
+  try {
+    const rulesRes = await ask(ctrl.apiBase, "rules", secret, 5000);
+    if (rulesRes.ok) {
+      const rulesBody = await rulesRes.json();
+      const rules = rulesBody?.rules;
+      if (Array.isArray(rules)) {
+        const targets = new Map();
+        let fallback = null;
+        for (const r of rules) {
+          const proxy = typeof r?.proxy === "string" ? r.proxy : "";
+          if (proxy === "") continue;
+          targets.set(proxy, (targets.get(proxy) ?? 0) + 1);
+          if (typeof r?.type === "string" && r.type.toLowerCase() === "match") fallback = proxy;
+        }
+        routed = { targets, fallback };
+      }
+    }
+  } catch {
+    /* 退回启发式 */
+  }
+
+  return { mixedPort, mode, selectors, nodes, routed };
 }
 
 /**
@@ -266,29 +294,52 @@ async function readController(ctrl) {
  * 只是每个 Worker 拿到的是**同一个** IP。只有 `doctor --deep` 的隔离报告
  * 会发现它,而那需要用户想到去跑。
  *
- * 所以 rule 模式下把 `GLOBAL` 降级:只在没有别的候选时才用它,并且要说明。
- * `global` 模式下相反 —— 那时 `GLOBAL` 才是真正生效的那个。
+ * ## 判据从"名字"升级成"规则实际导向哪里"（缺口 #22，第九轮）
+ *
+ * 先前按**名字**把 `GLOBAL` 降级 —— 那是个启发式，登记时就写明了它的漏洞：
+ * 一个名字不叫 GLOBAL 却同样不参与选路的分组仍会被选中。
+ *
+ * 现在读 `/rules`（`routedGroups()`）：那里有每条规则的目标分组与兜底
+ * (`MATCH`) 规则。实测本机 556 条规则 → `Proxy` 382 条、`DIRECT` 173 条，
+ * 而 `GLOBAL` 出现在**零条**规则里 —— 这就是"它不参与选路"的直接证据，
+ * 不再依赖它叫什么名字。
+ *
+ * 拿不到 `/rules` 时退回按名字降级（旧内核可能没有这个端点）——
+ * **降级而不是失败**：那个启发式对最常见的形态仍然有效。
+ *
+ * `global` 模式下相反 —— 那时 `GLOBAL` 才是真正生效的那个，不降级。
  *
  * (本项目已经踩过一次同构的坑:vite 代理硬编码 9876 把请求转给了**另一个
  * 进程**,"看起来在工作但数据来自错误后端"。这一条是它在出口侧的形态。)
  */
-function pickSelector(selectors, nodes, mode) {
+function pickSelector(selectors, nodes, mode, routed) {
   const nodeNames = new Set(nodes.map((n) => n.name));
   const ruleMode = mode !== "global";
+
+  /*
+   * 优先级三档（小者优先）：
+   *   0 = 规则的兜底目标（`MATCH` 指向它）—— 最强证据
+   *   1 = 出现在某条规则里
+   *   2 = 规则里完全没出现 —— rule 模式下它切了不生效
+   *
+   * 拿不到 `/rules` 时全部记 1（无信息），于是排序退回"按名字降级 + 可用节点数"。
+   */
+  const rank = (name) => {
+    if (!ruleMode) return name === "GLOBAL" ? 0 : 1;
+    if (routed === null) return name === "GLOBAL" ? 2 : 1;
+    if (routed.fallback === name) return 0;
+    return routed.targets.has(name) ? 1 : 2;
+  };
 
   const scored = selectors
     .map((s) => ({
       selector: s,
       usable: s.options.filter((o) => nodeNames.has(o)).length,
-      // rule 模式下 GLOBAL 切了不生效 —— 排最后。
-      deprioritized: ruleMode && s.name === "GLOBAL",
+      rank: rank(s.name),
     }))
     .filter((x) => x.usable > 0)
     .sort(
-      (a, b) =>
-        Number(a.deprioritized) - Number(b.deprioritized) ||
-        b.usable - a.usable ||
-        a.selector.name.localeCompare(b.selector.name),
+      (a, b) => a.rank - b.rank || b.usable - a.usable || a.selector.name.localeCompare(b.selector.name),
     );
   return scored[0] ?? null;
 }
@@ -432,7 +483,7 @@ async function main() {
       continue;
     }
 
-    const picked = pickSelector(info.selectors, info.nodes, info.mode);
+    const picked = pickSelector(info.selectors, info.nodes, info.mode, info.routed);
     if (picked === null) {
       line("fail", `${ctrl.apiBase}:没有找到含可出口节点的 Selector 分组`);
       detail(`分组 ${info.selectors.length} 个,节点 ${info.nodes.length} 个,但两者无交集。`);

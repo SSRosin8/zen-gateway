@@ -473,7 +473,14 @@ auto 模式注释里那个"健康"**没有任何东西去测量**，实际行为
 3. ~~**用量只进日志，没有聚合**~~ / ~~**尚无 HTTP 端点**~~ —— **均已解决**。
    Phase 7 给了 `store/db/stats.ts`，Phase 9 批次 1 给了 `GET /api/stats`
    （默认带 `sinceDay`，见缺口 #14）。Usage **页面**在批次 2
-4. **探测目标与转发目标不同域**（见上文出口隔离节）
+4. ~~**探测目标与转发目标不同域**~~ —— **第九轮已给出检测手段**（不是消除成因）。
+   成因仍在：探测打 IP 回显服务、转发打 `opencode.ai`，rule 模式下两者可能命中
+   不同的规则分支，那时实测出口与实际转发出口无关。**能做的是把它从"静默"变成
+   "可核对"**：`ClashController.routedGroups()` 读 `/rules`，doctor 第 5 层据此
+   在两种形态下报警 —— 选中的分组不在任何规则里（切了不生效），
+   或它承载规则但**不是兜底(MATCH)目标**（转发与探测可能分道）。
+   实测本机两者都落到 MATCH → `Proxy`，所以今天一致；`--deep` 按实测 IP 分组
+   仍是最终核对手段（本机三个 Worker 三个互不相同的公网 IP）
 5. **调度与目录状态：已有查看入口，但 `Scheduler.snapshot()` 仍无读者**。
    Phase 9 批次 1 起 `GET /api/overview` 读 `ModelCatalog.status()`
    （`routes/admin.ts`）与 `Scheduler.runtimeWorkers()`，Workers 页渲染就绪态与
@@ -485,11 +492,13 @@ auto 模式注释里那个"健康"**没有任何东西去测量**，实际行为
    三账号一致"（`upstream-quirks.md` §7），而那是**上游的**性质，单测无论怎么写都只是
    在断言自造的 fixture。复核办法是拿多个账号各拉一次目录比对免费子集。
    本地能守的是它不成立时的处置（多一个 → 上游 400 自限；少一个 → 触发刷新），那已有用例
-7. **目录响应只限条目数，不限体积**：`MAX_CATALOG_ENTRIES` 的闸门在 `parseCatalog` 里，
-   也就是 `upstream.json()` 已经把整个体读进内存之后 —— 实测一个单条目、40 MiB 的
-   响应被照常采纳。不构成当前风险（本机自用、baseUrl 由 schema 限 http/https、
-   调用频率受 TTL 与失败退避约束），注释已把范围收窄到它真正守住的那件事。
-   若 Phase 7+ 把 baseUrl 做成更开放的配置项，要在 `json()` **之前**加体积闸门
+7. ~~**目录响应只限条目数，不限体积**~~ —— **第九轮已补** `MAX_CATALOG_BYTES`（8 MiB）。
+   先前 `MAX_CATALOG_ENTRIES` 的闸门在 `parseCatalog` 里，也就是 `upstream.json()`
+   已经把整个体读进内存之后 —— 实测一个单条目、40 MiB 的响应被照常采纳。
+   现在 `readBoundedText()` 边读边计数，超限即 `reader.cancel()`，然后才 `JSON.parse`。
+   **不看 `content-length`**：那个头可以撒谎，chunked 也不给。
+   与条目数上限是两层，各挡不同的东西：条目数挡"一万个模型"，体积挡
+   "一个模型但它的 description 有 40 MiB"
 8. ~~**`assertEveryRouteGuarded` 只检查"有没有守卫"，不检查"是哪个"**~~ ——
    **Phase 9 批次 1 已补** `assertAdminRoutesLoopbackOnly`：`/api/*` 下每条路由都必须被
    **回环闸门**覆盖。判据用中间件的**身份**（`loopbackOnly()` 带一个 Symbol 标记）
@@ -499,9 +508,16 @@ auto 模式注释里那个"健康"**没有任何东西去测量**，实际行为
    与 relay 的 64 MiB 刻意不同：后者为多模态留的，管理面没有那个需求）。
    `content-length` 与实读长度**两处都查** —— 头可以撒谎或缺席，
    而只在读完之后检查等于上限没起作用
-10. **`models.defaultSurfaces` / `surfaceOverrides` 声明了但不设防** —— 语义仍未定，
-   但 `surfacesFor()` 在 Phase 9 批次 2 **有了第一个生产调用点**（Models 页显示
-   每个模型声明支持哪些面），**只作展示、不参与放行判定**。
+10. ~~**`models.defaultSurfaces` / `surfaceOverrides` 声明了但不设防**~~ ——
+   **第九轮定案：它是后台展示用的提示，不是放行闸门**。这个字段"语义未定"登记了
+   三个阶段，现在按已有的测量定下来，而不是再推一次：
+   上游**不按模型区分面**（实测三个面对同一个免费模型都通），所以"这个模型支持
+   哪些面"在上游那边不存在；而默认值 `["chat","responses"]` 当闸门会让默认配置下
+   **所有** `/v1/messages` 请求被拒 —— 那个面 Phase 6 刚验证可用。
+   真正的放行判定在 `ProtocolSurface.streaming`（协议面接口的能力位）。
+   守这个定案的是 `freeModels.test.ts` 里的关卡：**转发路径（`routes/relay.ts` 与
+   四个 `protocols/*.ts`）不得提到这三个符号中的任何一个** —— 写在注释里必然漂，
+   而下一个人看到 `surfacesFor()` 就在手边会很自然地在转发路径上加一句"不支持这个面"
 
    **但不能顺手"补上"**：默认值是 `["chat", "responses"]`，若按它放行，
    默认配置下**所有**模型的 `/v1/messages` 请求都会被拒 —— 而那个面刚刚验证可用。
@@ -612,21 +628,32 @@ auto 模式注释里那个"健康"**没有任何东西去测量**，实际行为
    验证工具必须与产品代码共享同一套信任配置，而 doctor 与服务是两个进程。
    `docs/usage.md` 里同一处失实说法也已改。
 
-22. **`GLOBAL` 分组在 rule 模式下切了不生效，而这个故障不报任何错**
-   （Phase 8 实测发现）。`setup.mjs` 按「可出口节点数」挑 selector，而本机
+22. ~~**`GLOBAL` 分组在 rule 模式下切了不生效，而这个故障不报任何错**~~ ——
+   **第九轮已从启发式升级成实证判据**。
+
+   成因（Phase 8 实测发现）：`setup.mjs` 按「可出口节点数」挑 selector，而本机
    `GLOBAL` 与 `Proxy` **都是 69 个** —— 按名字 tiebreak 会选中 `GLOBAL`。
    但内核 `mode` 是 `rule`，此时规则把流量导向 `Proxy` 这类分组，
    `GLOBAL` **不参与选路**（实测它的 `now` 还停在 `DIRECT`）。
-
    后果：切 `GLOBAL` 什么都不改变 → 所有 Worker 走本机直连 → **共用同一个
    公网 IP**，而出口隔离正是本项目存在的理由。而控制面通、切换返回 204、
-   探测也能拿到 IP —— 只有 `doctor --deep` 的隔离报告会发现它。
+   探测也能拿到 IP —— 先前只有 `doctor --deep` 的隔离报告会发现它。
 
-   `setup.mjs` 已按 `mode` 把 `GLOBAL` 降级（只在没有别的候选时用它，并告警）。
-   **但这是个启发式，不是守卫**：一个名字不叫 `GLOBAL` 却同样不参与选路的
-   分组仍会被选中。真正的判据是「规则实际把流量导向哪个分组」，而那要解析
-   `/configs` 的 rules —— 眼下不做（→ Phase 10 做多内核择优时一并考虑）。
-   兜底手段是 `doctor --deep`：它按实测公网 IP 分组，共用出口一定会被报出来。
+   先前的处置是**按名字**把 `GLOBAL` 降级，登记时就写明了它的漏洞：一个名字不叫
+   `GLOBAL` 却同样不参与选路的分组仍会被选中。现在读 `/rules`
+   （`ClashController.routedGroups()`），判据变成「规则实际把流量导向哪个分组」：
+
+   - `setup.mjs` 的 `pickSelector` 按三档排序（小者优先）：
+     **0 = 规则的兜底(`MATCH`)目标**（转发到上游命中的就是这条）、
+     1 = 出现在某条规则里、2 = 规则里完全没出现。拿不到 `/rules` 时
+     全部记 1，排序退回原来那个按名字的启发式 —— **降级而不是失败**（旧内核没这个端点）
+   - doctor 第 5 层对两种形态报警，且把这一层的**状态**升到 warn（不只是详情多几行）
+
+   实测本机 556 条规则：`Proxy` 382 条、`DIRECT` 173 条、`REJECT` 1 条，
+   `GLOBAL` **零条**，兜底 `MATCH` → `Proxy`。三档各有一个变异逼出来的用例，
+   兜底那档尤其必要：两个分组都在规则里、只有一个是 MATCH 目标时，
+   少了它就退化成按节点数决胜而选错。
+   最终核对手段仍是 `doctor --deep`（按实测公网 IP 分组）。
 
 23. **网关不伺服静态产物,这是设计事实而不是缺口**：实测 `GET /` 返回 404，
    只有 `/health`、`/v1/*`、`/api/*` 三组路由。于是 `service.mjs --open` 指向

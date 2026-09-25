@@ -572,10 +572,59 @@ async function layerClashControl() {
   const selectedHealthy = health.find((h) => h.bridgeId === selection.bridgeId);
   const degraded = selectedHealthy?.alive !== true || selectedHealthy.usableNodes === 0;
 
+  /*
+   * 选中的分组**真的参与选路吗**（缺口 #22/#4 的判据）。
+   *
+   * `mode: rule` 下规则决定流量走哪个分组。一个从不出现在任何规则里的分组
+   * （`GLOBAL` 就是典型）切了什么都不改变 —— 所有 Worker 走本机直连、
+   * 共用一个公网 IP，而控制面、切换请求、探测全都正常。
+   *
+   * 实测本机：556 条规则里 `Proxy` 382 条、`DIRECT` 173 条、
+   * `GLOBAL` **零条**，MATCH 指向 `Proxy`。
+   */
+  const routingWarnings = [];
+  const selectedBridge = bridges.find((b) => b.id === selection.bridgeId);
+  if (selectedBridge !== undefined) {
+    try {
+      const controller = new ClashController(selectedBridge);
+      /*
+       * 读不到 mode 时按 `rule` 处理 —— 那是内核默认值，也是**保守**的一侧：
+       * rule 模式下才做这项检查，误判成 rule 最坏只是多一条可核对的警告，
+       * 而误判成 global 会漏掉真正的故障。
+       */
+      const mode = (await readClashMode(selectedBridge)) ?? "rule";
+      if (mode !== "global") {
+        const routed = await controller.routedGroups();
+        const group = selectedBridge.selectorGroup;
+        if (!routed.targets.has(group)) {
+          routingWarnings.push(
+            `⚠️ 分组「${group}」**不出现在任何路由规则里** —— rule 模式下切它不会改变任何流量。`,
+            `   规则实际导向:${[...routed.targets].map(([k, v]) => `${k}(${v} 条)`).join("、")}` +
+              `${routed.fallback === null ? "" : `;兜底(MATCH)→ ${routed.fallback}`}`,
+            `   后果:所有 Worker 走本机直连、共用同一个公网 IP,而出口隔离是本项目存在的理由。`,
+          );
+        } else if (routed.fallback !== null && routed.fallback !== group) {
+          /*
+           * 分组出现在规则里但**不是兜底目标** —— 这正是缺口 #4 的形态:
+           * 探测打 IP 回显服务、转发打上游 host，两者可能命中不同规则分支。
+           * 不是错误（那个分组确实承载一部分流量），但要说清。
+           */
+          routingWarnings.push(
+            `! 分组「${group}」承载 ${routed.targets.get(group)} 条规则，而兜底(MATCH)指向「${routed.fallback}」。`,
+            `   转发到上游与探测打 IP 回显服务可能命中**不同的规则分支** ——`,
+            `   那时实测出口与实际转发出口无关。用 --deep 按实测 IP 分组是唯一可靠的核对。`,
+          );
+        }
+      }
+    } catch {
+      // 拿不到 /rules（旧内核没有这个端点）—— 不报，这一项只是加分。
+    }
+  }
+
   return {
-    status: degraded || ok.length < results.length ? "warn" : "pass",
+    status: degraded || routingWarnings.length > 0 || ok.length < results.length ? "warn" : "pass",
     text: `${ok.length}/${results.length} 个 Clash 内核可连通 · 当前走 ${selection.bridgeId}`,
-    detail: [...lines, "", ...healthLines, "", `择优：${selection.reason}`].join("\n"),
+    detail: [...lines, "", ...healthLines, "", `择优：${selection.reason}`, ...routingWarnings].join("\n"),
     ...(degraded
       ? {
           nextStep:
@@ -806,6 +855,21 @@ function ensureSlash(base) {
   u.hash = "";
   if (!u.pathname.endsWith("/")) u.pathname = `${u.pathname}/`;
   return u.href;
+}
+
+/** 从 Controller 的 `/configs` 读选路模式。读不到返回 null。 */
+async function readClashMode(bridge) {
+  try {
+    const res = await fetch(new URL("configs", ensureSlash(bridge.apiBase)).href, {
+      ...(bridge.apiSecret === "" ? {} : { headers: { authorization: `Bearer ${bridge.apiSecret}` } }),
+      signal: AbortSignal.timeout(3000),
+    });
+    if (!res.ok) return null;
+    const body = await res.json();
+    return typeof body?.mode === "string" ? body.mode.toLowerCase() : null;
+  } catch {
+    return null;
+  }
 }
 
 /** 从 Controller 的 `/configs` 读混合端口。读不到返回 null(不当作不一致)。 */

@@ -465,8 +465,17 @@ curl -s -H "Authorization: Bearer <apiSecret>" \
 > （实测 0dcloud v2.0.30）把 secret 放在加密 IPC 里、外部拿不到 ——
 > 那种内核无法被本网关驱动，即使它的数据面端口是通的：切换节点必须走控制面。
 
-**`selectorGroup` 不要用 `GLOBAL`。** 切 `GLOBAL` 会改掉那个 Clash 实例上
-**所有**流量的出站，包括浏览器和其他程序。建一个专用 selector 分组只放要隔离的节点。
+**`selectorGroup` 不要用 `GLOBAL`。** 两种模式下它都不是你想要的，而**理由相反**：
+
+- `mode: global` 时切它会改掉那个 Clash 实例上**所有**流量的出站，包括浏览器和其他程序；
+- `mode: rule`（默认，也是本机的情形）时切它**什么都不改变** —— 规则把流量导向
+  `Proxy` 这类分组，`GLOBAL` 不参与选路（实测本机 556 条规则里它出现在**零条**）。
+  于是所有 Worker 走本机直连、共用同一个公网 IP，而控制面通、切换返回 204、
+  探测也拿得到 IP —— 这个故障不报任何错。
+
+建一个专用 selector 分组只放要隔离的节点。`npm run setup` 会读 `/rules` 自动挑
+**规则实际导向**的那个（兜底 `MATCH` 目标优先），`npm run doctor` 在选中的分组
+不参与选路时报警；最终核对用 `npm run doctor -- --deep`，它按实测公网 IP 分组。
 
 **只把活着的内核写进 `bridges` 并 `enabled`。** `auto` 模式在
 `activeBridgeId` 不可用时会按 priority 回落到另一个，于是流量去一个没人
