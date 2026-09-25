@@ -1,5 +1,5 @@
 import type { Overview, WorkerView } from "../../shared/contract.ts";
-import { Mono, Panel } from "../components/Panel.tsx";
+import { Mono, Panel, Strong } from "../components/Panel.tsx";
 import { StatusIndicator } from "../components/StatusIndicator.tsx";
 import { DataTable, TableFilters, type Column } from "../components/DataTable.tsx";
 import { workerStatus } from "./OverviewPage.tsx";
@@ -137,17 +137,17 @@ export function WorkersPage({
       <Panel title="说明">
         <ul className="space-y-2 text-text-muted">
           <li>
-            **「已启用」不等于「在候选池里」** —— 后者还要求 API key 非空。
+            <Strong>「已启用」不等于「在候选池里」</Strong> —— 后者还要求 API key 非空。
             免 key 的匿名通道已被上游关闭（403 <Mono>FreeTierError</Mono>），
             所以没有 key 的 Worker 发出去必定失败，调度器直接过滤掉它。
           </li>
           <li>
-            **冷却是分级的**：限流尊重上游的 <Mono>Retry-After</Mono>（默认 15 分钟）、
+            <Strong>冷却是分级的</Strong>：限流尊重上游的 <Mono>Retry-After</Mono>（默认 15 分钟）、
             鉴权失败固定 60 秒短退避、传输失败指数退避。
-            <Mono>bad_request</Mono> **不冷却** —— 一次坏请求不该打掉所有健康 Worker。
+            <Mono>bad_request</Mono> <Strong>不冷却</Strong> —— 一次坏请求不该打掉所有健康 Worker。
           </li>
           <li>
-            **冷却只延长不缩短**：并发失败乱序到达时，一次传输失败的 2 秒
+            <Strong>冷却只延长不缩短</Strong>：并发失败乱序到达时，一次传输失败的 2 秒
             不能覆盖 429 的 15 分钟。
           </li>
         </ul>

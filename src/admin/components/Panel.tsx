@@ -71,8 +71,20 @@ export function Metric({
  * `accent-fg` 1.92），所以 `accent-fill` 只能用在这种「只承载主文案的紧凑
  * 元素」上，**绝不能做整行背景**（行内的时间/延迟/备注会不可读）。
  *
- * 每页 ≤1 个主操作（交互规则）。禁用态降透明度并给 `cursor-not-allowed`,
- * 同时**保留文字对比度** —— 一个读不清的禁用按钮无法告诉用户它为什么禁用。
+ * 每页 ≤1 个主操作（交互规则）。
+ *
+ * ## 禁用态:降**底色**的饱和度，不降整体透明度
+ *
+ * 目标是「看得出不能点，但读得清为什么」—— 一个读不清的禁用按钮
+ * 无法告诉用户它在等什么（这里的禁用文案正是「进行中…」「探测中…」）。
+ *
+ * 先前用 `disabled:opacity-60`，而那**同时**淡化底色与文字:实测文字对比度
+ * 从 5.90 掉到 **2.51**（浅色）/ 2.91（深色），远低于 4.5 —— 也就是说
+ * 注释写着「保留文字对比度」，而实现恰好把它破坏掉了（第八轮审核实测）。
+ *
+ * 现在改成:底色换成一个更淡的实色（`accent-fill/40` 那种效果由
+ * `disabled:bg-border-strong` 给出），文字保持 `text-text` 不透明。
+ * 「不可点」由 `cursor-not-allowed` 与明显变淡的底色表达。
  */
 export function PrimaryButton({
   onClick,
@@ -88,8 +100,13 @@ export function PrimaryButton({
       type="button"
       onClick={onClick}
       disabled={disabled}
-      /* 触摸目标 ≥44px（移动端无障碍要求）。 */
-      className="min-h-[44px] rounded-sm bg-accent-fill px-4 font-medium text-on-accent-fill disabled:cursor-not-allowed disabled:opacity-60"
+      /*
+       * 触摸目标 ≥44px（移动端无障碍要求）。
+       *
+       * 禁用态换底色而不是降透明度 —— 见上文。实测 `text` 压在 `border-strong`
+       * 上是 11.80（浅）/ 7.94（深），而原先的 `opacity-60` 只有 2.51 / 2.91。
+       */
+      className="min-h-[44px] rounded-sm bg-accent-fill px-4 font-medium text-on-accent-fill disabled:cursor-not-allowed disabled:bg-border-strong disabled:text-text"
     >
       {children}
     </button>
@@ -99,8 +116,13 @@ export function PrimaryButton({
 /**
  * 表格行的状态标记 —— **3px 左边框实色，不用背景色块**。
  *
- * 实测理由：警告色在必要的 25% alpha 下相对 `surface-accent` 只有 1.006
- * 对比度 —— 肉眼与无状态行无差别，等于没画。左边框用实色，可靠。
+ * 实测理由（2026-09-25 第八轮重测）：警告色在必要的 25% alpha 下相对
+ * `surface-accent` 只有 **1.41**（浅色）/ **1.76**（深色）对比度 ——
+ * 肉眼与无状态行几乎无差别，等于没画。换成实色左边框是 **5.29 / 7.96**，可靠。
+ *
+ * > 这里先前写的是「1.006」。第八轮按各种口径都算不出那个数(最接近的组合是
+ * > 另一种前景/底色配对),所以那是一个抄错位置的数字 —— **结论没变,依据修正**。
+ * > 教训按纪律 #6:注释里的实测数字要能被重算出来,否则它只是看起来像证据。
  */
 export function RowMark({ tone }: { tone: "success" | "warn" | "error" | "neutral" }) {
   const color = {
@@ -120,4 +142,25 @@ export function RowMark({ tone }: { tone: "success" | "warn" | "error" | "neutra
  */
 export function Mono({ children }: { children: ReactNode }) {
   return <span className="font-mono">{children}</span>;
+}
+
+/**
+ * 强调。
+ *
+ * ## 为什么需要一个组件而不是写 `**...**`
+ *
+ * JSX 不渲染 markdown,所以文案里的 `**同一时刻只允许一批**` 会**原样**带着
+ * 星号显示给用户。第八轮审核实测:六个页面全中,共十余处,而且集中在
+ * 最要紧的那些警告上（GLOBAL 分组陷阱、mixed-port 陷阱、免 key 通道已关闭、
+ * 「只能用真实 CLI」）—— 也就是说最需要被看清的句子显示得最糟。
+ *
+ * 成因是这些文案都从文档/注释里搬过来的,那里 `**` 是对的。既有测试用
+ * `/不要写/`、`/GLOBAL/` 这类正则匹配,**正好跳过了星号**,所以没人发现。
+ *
+ * 用 `font-medium` 而不是 `<strong>` 的默认粗体:正文 14px 下
+ * `font-bold` 在这套字体里偏重,会让一段话里出现视觉断层。
+ * 语义上仍用 `<strong>` —— 屏幕阅读器该知道这是强调。
+ */
+export function Strong({ children }: { children: ReactNode }) {
+  return <strong className="font-medium">{children}</strong>;
 }

@@ -1,5 +1,5 @@
 import type { Overview } from "../../shared/contract.ts";
-import { Mono, Panel } from "../components/Panel.tsx";
+import { Mono, Panel, Strong } from "../components/Panel.tsx";
 import { StatusIndicator } from "../components/StatusIndicator.tsx";
 
 /**
@@ -77,7 +77,7 @@ export function GatewayPage({ data }: { data: Overview }) {
           {snippet}
         </pre>
         <p className="mt-3 text-text-muted">
-          **不要写 <Mono>models</Mono> 块** —— 内置 provider 自带模型表，
+          <Strong>不要写 <Mono>models</Mono> 块</Strong> —— 内置 provider 自带模型表，
           手写一份会随上游目录变化而过期。
         </p>
       </Panel>
@@ -140,12 +140,12 @@ export function GatewayPage({ data }: { data: Overview }) {
               </tbody>
             </table>
             <p className="mt-3 text-text-muted">
-              **代理端口必须与内核实际的 <Mono>mixed-port</Mono> 一致** ——
+              <Strong>代理端口必须与内核实际的 <Mono>mixed-port</Mono> 一致</Strong> ——
               不一致时桥接会连到一个没人监听的端口：所有桥接代理传输失败，
               而控制面明明是通的。<Mono>npm run doctor</Mono> 的第 5 层会核对它。
             </p>
             <p className="mt-2 text-text-muted">
-              **分组不要用 <Mono>GLOBAL</Mono>** —— rule 模式下它不参与选路，
+              <Strong>分组不要用 <Mono>GLOBAL</Mono></Strong> —— rule 模式下它不参与选路，
               切它什么都不改变，于是所有 Worker 共用一个公网 IP 而不报任何错。
             </p>
           </>

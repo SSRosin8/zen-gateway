@@ -122,6 +122,28 @@ export type LoadResult = {
   config: Config;
   /** true 表示文件原先不存在，已生成默认配置（含新 Relay Token）。 */
   created: boolean;
+  /**
+   * 权限与期望值不符的项。
+   *
+   * 仅在 `readOnly` 模式下可能非空 —— 正常模式会当场改掉（见 `ensurePermissions`），
+   * 所以那时这里恒为空数组。诊断工具用它**报告**而不是修。
+   */
+  permissionIssues: readonly string[];
+};
+
+export type LoadOptions = {
+  /**
+   * 只读加载:**不修权限**、文件不存在时**不生成**。
+   *
+   * 给 `doctor.mjs` 用。它的头部承诺「绝不写任何东西」,而默认路径会
+   * `chmod` 配置文件与 `data/` 目录 —— 于是「跑一下 doctor 看看」本身
+   * 成了一次变更,且把该**报告**的问题悄悄修掉了（第八轮审核实测:
+   * 755/644 的 data/ 与 config.json 跑完 doctor 变成 700/600）。
+   *
+   * 不在 doctor 里自己写一遍读取+校验:那会是第二份并行真相（纪律 #4）,
+   * 而两份对「这份配置合不合法」给出不同答案正是最难查的一类分叉。
+   */
+  readOnly?: boolean;
 };
 
 /**
@@ -129,8 +151,10 @@ export type LoadResult = {
  *
  * 只有「文件不存在」会自动创建。文件存在但读不动、解析不了、校验不过时
  * 一律抛错 —— 那种情况下自动覆盖会把用户的配置连同凭证一起丢掉。
+ *
+ * `{ readOnly: true }` 时两个副作用都关掉，见 `LoadOptions`。
  */
-export async function loadConfig(root?: string): Promise<LoadResult> {
+export async function loadConfig(root?: string, options: LoadOptions = {}): Promise<LoadResult> {
   const file = configPath(root);
 
   let text: string;
@@ -138,9 +162,13 @@ export async function loadConfig(root?: string): Promise<LoadResult> {
     text = await readFile(file, "utf8");
   } catch (err) {
     if ((err as NodeJS.ErrnoException).code === "ENOENT") {
+      if (options.readOnly === true) {
+        // 只读模式不生成 —— 生成会带一个新 Relay Token，那是状态变更。
+        throw new ConfigError(`${file} 不存在`, "unreadable");
+      }
       const config = defaultConfig();
       await saveConfig(config, root);
-      return { config, created: true };
+      return { config, created: true, permissionIssues: [] };
     }
     if ((err as NodeJS.ErrnoException).code === "EACCES") {
       throw new ConfigError(`无权读取 ${file}`, "permission");
@@ -181,10 +209,47 @@ export async function loadConfig(root?: string): Promise<LoadResult> {
     );
   }
 
-  // 文件可能是别的工具或手工创建的,权限不一定对。
+  /*
+   * 文件可能是别的工具或手工创建的,权限不一定对。
+   *
+   * 只读模式**只查不改**:诊断工具该报告它,而不是悄悄修掉然后说一切正常。
+   */
+  if (options.readOnly === true) {
+    return { config: parsed.data, created: false, permissionIssues: await checkPermissions(file) };
+  }
   await ensurePermissions(file);
 
-  return { config: parsed.data, created: false };
+  return { config: parsed.data, created: false, permissionIssues: [] };
+}
+
+/**
+ * 查权限但不改 —— `ensurePermissions` 的只读孪生。
+ *
+ * 两者刻意共用同一对常量（`FILE_MODE` / `DIR_MODE`）:期望值只有一份,
+ * 否则「服务修到 600 而诊断按 644 判定」这种分叉会让两边各说一套。
+ */
+async function checkPermissions(file: string): Promise<string[]> {
+  const issues: string[] = [];
+  try {
+    const st = await stat(file);
+    const mode = st.mode & 0o777;
+    if (mode !== FILE_MODE) {
+      issues.push(`${file} 权限 ${mode.toString(8)}，应为 ${FILE_MODE.toString(8)}`);
+    }
+  } catch {
+    /* 读不到就交给上面的错误分类 */
+  }
+  try {
+    const dir = dirname(file);
+    const st = await stat(dir);
+    const mode = st.mode & 0o777;
+    if (mode !== DIR_MODE) {
+      issues.push(`${dir} 权限 ${mode.toString(8)}，应为 ${DIR_MODE.toString(8)}`);
+    }
+  } catch {
+    /* 同上 */
+  }
+  return issues;
 }
 
 /**

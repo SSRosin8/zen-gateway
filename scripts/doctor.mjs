@@ -118,13 +118,36 @@ async function layerConfig() {
   }
 
   try {
-    const { config } = await loadConfig(process.env.ZG_DATA_DIR ? undefined : ROOT);
+    /*
+     * `readOnly: true` —— doctor 不改权限。
+     *
+     * 默认路径会把 `config.json` chmod 到 0600、`data/` 到 0700。那对服务是对的
+     * （凭证不该赌一句警告会被看见），但对诊断工具是错的:它把该**报告**的问题
+     * 悄悄修掉了,于是「权限过松」这一项永远报不出来 —— 而且「跑一下 doctor
+     * 看看」本身成了一次变更。第八轮审核实测:755/644 跑完变 700/600。
+     */
+    const { config, permissionIssues } = await loadConfig(
+      process.env.ZG_DATA_DIR ? undefined : ROOT,
+      { readOnly: true },
+    );
     ctx.config = config;
-    return {
-      status: "pass",
-      text: "配置可加载",
-      detail: `端口 ${config.gateway.port} · Worker ${config.workers.length} 个 · 代理 ${config.proxies.length} 个 · Clash ${config.clash.enabled ? "已启用" : "未启用"}`,
-    };
+    const summary = `端口 ${config.gateway.port} · Worker ${config.workers.length} 个 · 代理 ${config.proxies.length} 个 · Clash ${config.clash.enabled ? "已启用" : "未启用"}`;
+
+    if (permissionIssues.length > 0) {
+      /*
+       * 权限过松是**真实问题**而不是提示:`data/` 可读意味着同机其他用户
+       * 能读到 runtime.db 与日志,而 config.json 整个文件都是凭证。
+       * 但它不阻断后面的层 —— 服务照样能跑,用户需要看到完整诊断。
+       */
+      return {
+        status: "warn",
+        text: "配置可加载，但权限过松",
+        detail: `${summary}\n${permissionIssues.join("\n")}`,
+        nextStep: `chmod 600 ${join(DATA_DIR, "config.json")} && chmod 700 ${DATA_DIR}\n（下次 npm start 也会自动纠正 —— doctor 刻意只报不改。）`,
+      };
+    }
+
+    return { status: "pass", text: "配置可加载", detail: summary };
   } catch (err) {
     if (err instanceof ConfigError) {
       /*
@@ -322,8 +345,10 @@ async function layerWorkers() {
     text: `${usable.length}/${workers.length} 个 Worker 可用`,
     detail:
       `其中 ${bound} 个绑定了出口代理,${usable.length - bound} 个走本机直连。\n` +
-      `⚠️ 「可用」只表示配置形态对(已启用且有 key);它是否**就绪**(不在冷却中)\n` +
-      `   眼下无法从外部查到 —— Scheduler 的运行期状态还没有查看入口(Phase 9)。`,
+      `⚠️ 「可用」只表示配置形态对(已启用且有 key)。是否**就绪**(不在冷却中)\n` +
+      `   doctor 查不到 —— 那是服务进程里的运行期状态。要看就绪态与剩余冷却:\n` +
+      `   管理后台的 Worker 页(npm run dev),或 curl :${ctx.config?.gateway.port ?? "<端口>"}/api/overview。\n` +
+      `   doctor 刻意不自己算一遍冷却:那会是第二份并行真相,且必然与调度器分叉。`,
   };
 }
 

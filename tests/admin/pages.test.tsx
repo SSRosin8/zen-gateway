@@ -1,6 +1,7 @@
 import { describe, expect, it, vi, afterEach } from "vitest";
 import { render, screen } from "@testing-library/react";
 import { ProxyPage } from "../../src/admin/pages/ProxyPage.tsx";
+import { OverviewPage } from "../../src/admin/pages/OverviewPage.tsx";
 import { ModelsPage } from "../../src/admin/pages/ModelsPage.tsx";
 import { UsagePage } from "../../src/admin/pages/UsagePage.tsx";
 import { GatewayPage } from "../../src/admin/pages/GatewayPage.tsx";
@@ -365,7 +366,21 @@ describe("用量页", () => {
       />,
     );
     expect(screen.getByText(/4 次响应我们没解析完整/)).toBeInTheDocument();
-    expect(screen.getByText(/不是.*上游没报/)).toBeInTheDocument();
+    /*
+     * 用**整段的 textContent** 匹配,而不是 `getByText(/不是.*上游没报/)`。
+     *
+     * 那句话里「不是」被 `<Strong>` 包着（强调它),于是文本被切成多个节点,
+     * 而 Testing Library 的默认匹配是逐节点的 —— 跨节点的正则匹配不到。
+     * 用户看到的字一个没变,变的只是 DOM 结构。
+     *
+     * 这也是第八轮审核发现「六个页面渲染出字面 `**`」时,既有测试全都没报警的
+     * 原因:它们用的正则（`/不要写/`、`/GLOBAL/`）恰好落在星号之间,
+     * 于是对「有没有星号」完全不敏感。
+     */
+    const banner = screen.getByText(/4 次响应我们没解析完整/).closest("section");
+    expect(banner?.textContent).toMatch(/不是[\s\S]*上游没报/);
+    // 同时钉住「不渲染字面 markdown」—— 那是这次真正要防的回归。
+    expect(banner?.textContent).not.toContain("**");
   });
 
   it("网关拒绝分原因列出,并说明 not_free 与 retired 处置不同", () => {
@@ -527,5 +542,71 @@ describe("首启向导", () => {
   it("说明免 key 通道已关 —— 否则用户会试着不填 key", () => {
     render(<Wizard data={fakeOverview()} />);
     expect(screen.getByText(/FreeTierError/)).toBeInTheDocument();
+  });
+});
+
+/* ================================================================== *
+ * 文案不渲染字面 markdown
+ * ================================================================== */
+
+describe("文案不渲染字面 markdown", () => {
+  /*
+   * 第八轮审核发现:六个页面共二十多处文案带着字面 `**` 显示给用户,
+   * 而且集中在**最要紧的那些警告**上 —— GLOBAL 分组陷阱、mixed-port 陷阱、
+   * 「免 key 通道已关闭」、「只能用真实 CLI」。也就是说最需要被看清的句子
+   * 显示得最糟。
+   *
+   * 成因是这些文案从文档/注释里搬过来的,那里 `**` 是对的;JSX 不渲染 markdown。
+   *
+   * **为什么既有测试一条都没报警**:它们用 `/不要写/`、`/GLOBAL/`、`/mixed-port/`
+   * 这类正则,匹配的片段恰好落在星号**之间** —— 于是对「有没有星号」
+   * 完全不敏感。这正是纪律 #1 那句「断言的粒度必须与缺陷的粒度一致」:
+   * 查「关键词在不在」挡不住「关键词周围多了两个星号」。
+   *
+   * 所以这里按**整页扫描**,而不是逐句断言 —— 逐句会重蹈覆辙(下一个新写的
+   * 句子仍然不在任何断言里),而扫整页对「哪一句」不作假设。
+   */
+  const pages: ReadonlyArray<[string, () => React.ReactElement]> = [
+    ["概览", () => <OverviewPage data={fakeOverview()} />],
+    ["网关", () => <GatewayPage data={fakeOverview()} />],
+    ["代理池", () => <ProxyPage data={proxyList([proxy()])} view={view} navigate={noop} />],
+    [
+      "代理池·隔离",
+      () => (
+        <ProxyPage
+          data={proxyList([proxy()])}
+          view={parseHash("#proxy?tab=isolation")}
+          navigate={noop}
+        />
+      ),
+    ],
+    ["Worker", () => <WorkersPage data={fakeOverview()} view={parseHash("#workers")} navigate={noop} />],
+    ["模型", () => <ModelsPage data={modelList()} view={parseHash("#models")} navigate={noop} />],
+    ["用量", () => <UsagePage data={stats()} days="30" onDays={noop} />],
+    ["向导", () => <Wizard data={fakeOverview()} />],
+  ];
+
+  for (const [name, mount] of pages) {
+    it(`${name}页不含字面 ** 或裸下划线强调`, () => {
+      const { container } = render(mount());
+      const text = container.textContent ?? "";
+      expect(text.length).toBeGreaterThan(0);
+      // `**` 是 markdown 强调;它出现在渲染文本里就说明有人把文档直接搬进了 JSX。
+      expect(text).not.toContain("**");
+    });
+  }
+
+  it("强调改用 <strong> —— 语义留着，样式不用粗体", () => {
+    /*
+     * 修法不是「把星号删掉」(那会丢掉强调),而是换成一个组件。
+     * 这条钉住它真的产出了 `<strong>`:否则下一个人会以为直接删星号就行。
+     */
+    const { container } = render(
+      <ProxyPage data={proxyList([proxy()])} view={view} navigate={noop} />,
+    );
+    const strongs = container.querySelectorAll("strong");
+    expect(strongs.length).toBeGreaterThan(0);
+    // 用 font-medium 而不是默认的 font-bold —— 14px 正文下粗体会造成视觉断层。
+    expect(strongs[0]!.className).toContain("font-medium");
   });
 });

@@ -209,3 +209,63 @@ describe("状态色色相分布", () => {
     expect(delta).toBeLessThan(30);
   });
 });
+
+/*
+ * 禁用态的文字对比度。
+ *
+ * ## 为什么这一节必须存在
+ *
+ * 上面那套笛卡尔积检查的是**原始 token 两两组合**，而禁用态是**合成出来的**
+ * 颜色:`disabled:opacity-60` 会把底色与文字一起往父表面混,于是一对
+ * 本来 5.90 的组合在屏幕上只剩 2.51 —— 而没有任何一条 token 断言能看见它,
+ * 因为参与运算的两个 token 都没变。
+ *
+ * 第八轮审核实测出这个洞:`PrimaryButton` 的注释写着「禁用态**保留文字
+ * 对比度** —— 一个读不清的禁用按钮无法告诉用户它为什么禁用」,而实现
+ * 用的正是 `opacity-60`,把那句话破坏得干干净净。三处按钮（主操作、
+ * 代理池的次操作、表格翻页）全中,而禁用态恰好是这些按钮**最要紧**的时刻:
+ * 文案是「进行中…」「探测中…」,正是用户想读的那一句。
+ *
+ * 所以现在的做法是**换实色**而不是降透明度,并在这里把结果钉住。
+ */
+describe("禁用态仍然可读", () => {
+  /** 禁用态用到的实色组合 —— 与 `Panel.tsx` / `DataTable.tsx` 的类名一致。 */
+  const DISABLED_PAIRS = [
+    // 主操作:底色换成 border-strong，文字保持 text。
+    { name: "主操作按钮", fg: "text", bg: "border-strong" },
+    // 描边按钮（次操作、翻页）:底色是表面，文字降到 text-muted。
+    { name: "描边按钮 on surface", fg: "text-muted", bg: "surface" },
+    { name: "描边按钮 on bg", fg: "text-muted", bg: "bg" },
+  ] as const;
+
+  for (const theme of ["light", "dark"] as const) {
+    const tokens: TokenMap = theme === "light" ? LIGHT : DARK;
+    for (const pair of DISABLED_PAIRS) {
+      it(`${theme} · ${pair.name} ≥4.5`, () => {
+        const fg = tokens[pair.fg];
+        const bg = tokens[pair.bg];
+        expect(fg, `缺 token ${pair.fg}`).toBeDefined();
+        expect(bg, `缺 token ${pair.bg}`).toBeDefined();
+        expect(contrastRatio(fg!, bg!)).toBeGreaterThanOrEqual(4.5);
+      });
+    }
+  }
+
+  it("不再用 opacity 表达禁用 —— 它会把文字一起淡掉", () => {
+    /*
+     * 直接扫源码。这条断言的对象不是颜色而是**手法**:只要有人再写
+     * `disabled:opacity-*`，合成后的对比度就脱离了上面所有 token 断言的视野。
+     */
+    const files = [
+      "../../src/admin/components/Panel.tsx",
+      "../../src/admin/components/DataTable.tsx",
+      "../../src/admin/pages/ProxyPage.tsx",
+    ];
+    for (const rel of files) {
+      const src = readFileSync(new URL(rel, import.meta.url), "utf8");
+      // 注释里提到这个类名是允许的（那里在解释为什么不用它）。
+      const code = stripComments(src);
+      expect(code, `${rel} 又用了 disabled:opacity`).not.toMatch(/disabled:opacity-/);
+    }
+  });
+});

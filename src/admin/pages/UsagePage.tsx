@@ -1,5 +1,5 @@
 import type { StatsView } from "../../shared/contract.ts";
-import { Metric, Mono, Panel } from "../components/Panel.tsx";
+import { Metric, Mono, Panel, Strong } from "../components/Panel.tsx";
 import { StatusIndicator } from "../components/StatusIndicator.tsx";
 
 /**
@@ -104,7 +104,7 @@ export function UsagePage({
           {data.sinceDay !== null && (
             <>
               {" "}
-              —— 默认带时间窗是**刻意的**：那个请求计数要全表扫（
+              —— 默认带时间窗是<Strong>刻意的</Strong>：那个请求计数要全表扫（
               <Mono>COUNT(DISTINCT request_id)</Mono>）且是同步调用，
               不限范围会阻塞事件循环。
             </>
@@ -119,7 +119,7 @@ export function UsagePage({
               label={`${data.rates.droppedUsageCount} 次响应我们没解析完整`}
             />
             <p className="mt-1 text-text-muted">
-              这是**我们自己**丢了用量（响应过大或中途断流），**不是**上游没报 ——
+              这是<Strong>我们自己</Strong>丢了用量（响应过大或中途断流），<Strong>不是</Strong>上游没报 ——
               两者的处置方向相反。非 0 说明要看我们的界定常量。
             </p>
           </div>
@@ -226,7 +226,7 @@ export function UsagePage({
         ) : (
           <>
             <p className="mb-3 text-text-muted">
-              这些请求**从未到达上游** —— 网关在本机就拒了。它们不计入上游尝试。
+              这些请求<Strong>从未到达上游</Strong> —— 网关在本机就拒了。它们不计入上游尝试。
             </p>
             <ul className="space-y-1">
               {Object.entries(data.rejections)
@@ -240,7 +240,7 @@ export function UsagePage({
             </ul>
             {data.rejections["not_free"] !== undefined && data.rejections["retired"] !== undefined && (
               <p className="mt-3 text-text-muted">
-                **「不是免费模型」与「已下架」的处置不同**：前者改客户端用的模型名，
+                <Strong>「不是免费模型」与「已下架」的处置不同</Strong>：前者改客户端用的模型名，
                 后者删 <Mono>extraFreeIds</Mono> 里那个条目。哪种多正是
                 「该改文档还是该改配置」的那个数字。
               </p>

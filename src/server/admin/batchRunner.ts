@@ -5,6 +5,7 @@ import type { BatchProbeStore } from "../../store/db/batchProbeStore.ts";
 import type { EgressService } from "../../core/proxy/egress.ts";
 import { applyProbeResult } from "../../core/proxy/egress.ts";
 import { resolveProxy } from "../../core/proxy/pool.ts";
+import { isUsable } from "../../core/routing/workerPool.ts";
 import { safeErrorMessage } from "../../shared/redact.ts";
 
 /**
@@ -98,8 +99,17 @@ export class BatchProbeRunner {
     if (this.#running !== null) return false;
 
     const config = this.#deps.configOf();
-    // 只探**在用的**出口 —— 探一个没人用的代理没有诊断价值。
-    const proxyIds = [...new Set(config.workers.filter((w) => w.enabled && w.apiKey.trim() !== "").map((w) => w.proxyId))];
+    /*
+     * 只探**在用的**出口 —— 探一个没人用的代理没有诊断价值。
+     *
+     * 判据用 `isUsable` 而不是手写一份 `enabled && apiKey.trim() !== ""`:
+     * `POST /api/probe` 用的就是它（`routes/admin.ts`）,两处必须同源。
+     * 这里先前是手写的第二份 —— 今天两者行为相同,但 `isUsable` 的判据
+     * （看 key 而不看 kind）是一个**记录在案的决定**,它变的时候手写那份不会跟着变。
+     * 分叉方向具体:批量探测会去探调度器永远不会用的节点,
+     * 而隔离报告正是拿两边的结果拼出来的。第八轮审核查出（纪律 #4）。
+     */
+    const proxyIds = [...new Set(config.workers.filter(isUsable).map((w) => w.proxyId))];
     if (proxyIds.length === 0) return false;
 
     this.#startedAt = this.#now();
@@ -204,6 +214,22 @@ export class BatchProbeRunner {
        */
       const result = await this.#deps.egress.probeProxy(config, proxyId);
       outcomes.set(result.proxyId, result.outcome);
+
+      /*
+       * 暂停检查要在 dispatch **之前**再做一次。
+       *
+       * 这一发是**真实完成的工作** —— 若在 `await probeProxy` 期间用户点了暂停,
+       * 此刻 state 已是 `paused`,而 reducer 对 `probed` 的处置是「暂停时不推进」
+       * （那条规则是对的:它挡的是前端在途轮询）。于是这一个计数会被永久丢掉 ——
+       * 探测跑了、IP 也写回了,只有 `mainDone` 少了 1,最终停在 19/20。
+       * 用户看到 95% 的「已结束」,会去找那个并不存在的失败节点,
+       * 而每点一次暂停就再丢一个。
+       *
+       * 所以:暂停期间**不推进进度条**（用户看到的语义不变）,但恢复之后
+       * 要把这一发补上。等到恢复再 dispatch 就同时满足这两条。
+       * 第八轮审核实测查出（3 个节点暂停一次 → 终态 `mainDone:2/3`）。
+       */
+      await this.#waitIfPaused();
       this.#dispatch({ type: "probed" });
     }
 

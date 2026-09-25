@@ -1,6 +1,6 @@
 import { poolHealth, type Overview, type PoolHealth, type WorkerView } from "../../shared/contract.ts";
 import { StatusIndicator, type StatusTone } from "../components/StatusIndicator.tsx";
-import { Metric, Mono, Panel, PrimaryButton, RowMark } from "../components/Panel.tsx";
+import { Metric, Mono, Panel, PrimaryButton, RowMark, Strong } from "../components/Panel.tsx";
 import { useProbe, type ProbeResult } from "../lib/api.ts";
 
 /**
@@ -115,7 +115,7 @@ function WorkerTable({ workers }: { workers: readonly WorkerView[] }) {
               data-worker={w.id}
             >
               <td className="pl-3">
-                {/* 行状态用 3px 左边框实色 —— 背景色块在 25% alpha 下只有 1.006 对比度。 */}
+                {/* 行状态用 3px 左边框实色 —— 背景色块在 25% alpha 下只有 1.41 对比度（见 RowMark）。 */}
                 <RowMark tone={status.tone} />
                 <Mono>{w.id}</Mono>
                 {w.name !== "" && <span className="ml-2 text-text-muted">{w.name}</span>}
@@ -190,7 +190,7 @@ function IsolationPanel({
       {sharedGroups.length > 0 && (
         <div className="mt-3">
           <p className="text-error">
-            以下 Worker 从**同一个**公网 IP 出去 —— 多账号同 IP 有被上游判定
+            以下 Worker 从<Strong>同一个</Strong>公网 IP 出去 —— 多账号同 IP 有被上游判定
             关联的风险：
           </p>
           <ul className="mt-2 space-y-1">

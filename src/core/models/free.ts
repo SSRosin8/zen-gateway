@@ -112,20 +112,21 @@ export function judgeFree(
 /**
  * 该模型在本网关上支持哪些协议面(读配置的覆写表,回落到默认)。
  *
- * ## ⚠️ 本函数**没有生产调用点**,而且不要顺手补一个
+ * ## 生产调用点:`admin/project.ts`(Models 页),**只作展示 —— 不要接成闸门**
  *
- * 它与 `models.defaultSurfaces` / `surfaceOverrides` 一起,是第四轮审核那个
- * `streaming` 字段的同形态:声明了、有单测、但全仓没有一处读它。
+ * Phase 9 批次 2 给了它第一个生产读者。但那条"不要顺手接上判定"的警告
+ * **依然成立**,而且现在更要紧了(已经有一个调用点,下一个人容易照着扩):
  *
- * 按纪律 #1 的四分类,这看起来该归"代码里有死信息"。但**先别改**:
  * `defaultSurfaces` 的默认值是 `["chat", "responses"]`,若把它当放行闸门接上,
  * 默认配置下**所有**模型的 `/v1/messages` 请求都会被拒 —— 而那个面 Phase 6
  * 刚验证可用。也就是说"补上这个判定"会立刻打坏一个能用的功能。
  *
- * 真正缺的是**语义定义**:这两张表是「放行闸门」还是「后台展示用的提示」?
+ * 真正缺的仍是**语义定义**:这两张表是「放行闸门」还是「后台展示用的提示」?
  * 上游并不按模型区分面(三个面对同一个免费模型都通),所以当闸门用缺乏依据。
- * 眼下按后者处理 —— 保留数据与函数,不参与判定,并在
- * `docs/architecture.md` 的缺口清单里记着(Phase 9 的 Models 页要用它)。
+ * 眼下按后者处理,`docs/architecture.md` 的缺口 #10 记着这个未定语义。
+ *
+ * > 本段先前写着"⚠️ 本函数没有生产调用点"。第八轮审核查出那已过期。
+ * > 手写的"有没有读者"标注必然漂 —— 见 `catalog.ts` 的 `status()` 同形态。
  */
 export function surfacesFor(modelId: string, rules: ModelRules): readonly string[] {
   return rules.surfaceOverrides[modelId] ?? rules.defaultSurfaces;

@@ -10,6 +10,7 @@ npm run restart      # 同样会先构建
 npm run status       # 运行状态 / pid / 端口
 npm run open         # 只打开管理后台（服务没跑时报错，不开一个连不上的页面）
 npm run setup        # 一键探测本机 Clash Controller 并写进配置
+npm run setup -- --dry-run  # 只打印将要做的改动，不落盘 —— 头一次跑建议先用它
 npm run doctor       # 分层诊断，只报第一个失败的层 + 下一步建议
 npm run doctor -- --deep    # 额外实测每个出口的公网 IP（会切 Clash 节点）
 npm run validate     # typecheck(server+admin+test) + 全部测试 + 双构建
@@ -61,6 +62,45 @@ Worker 时）顶部多一个分步向导。
 桥接探测要切 Clash selector（那是进程外的全局状态），两批并发会互相换掉对方
 的出口节点。进程被 `kill -9` 打断时，下次启动会把遗留状态标成
 「已结束（interrupted）」而不是静默清空。
+
+### 管理 API（后台自己用的那一套）
+
+后台没有秘密通道 —— 它调的就是下面这些，你也可以直接调（**仅回环**）。
+写脚本时**用这些端点而不要自己重新实现判定** ——「Worker 就不就绪」这种
+运行期状态只有服务进程知道，在外面重算一遍必然与调度器分叉（纪律 #4）。
+
+| 端点 | 作用 |
+|---|---|
+| `GET /api/ping` | 服务活着吗（不碰配置、不碰库） |
+| `GET /api/overview` | 聚合视图：Worker 运行期状态、目录槽位、出口隔离报告 |
+| `GET /api/stats?days=N｜all` | 用量聚合，默认 30 天（见下文「运行时数据库」） |
+| `GET /api/proxies` | 代理池，含 `usedBy` 与「为什么不可解析」 |
+| `GET /api/models` | 模型目录（含付费），带声明的协议面 |
+| `PATCH /api/config` | 改配置：先写盘再换进程内引用，全量过 schema |
+| `POST /api/probe` | **实测公网 IP 并写回配置** —— 见下面的警告 |
+| `GET｜POST /api/batch-probe` | 批量探测的进度／控制（`start`/`pause`/`resume`/`cancel`） |
+
+```bash
+# 例：谁在冷却中
+curl -s http://127.0.0.1:9877/api/overview |
+  node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>
+    console.table(JSON.parse(s).workers.map(w=>({id:w.id,ready:w.ready,cd:w.cooldownRemainingMs}))))'
+```
+
+> **`POST /api/probe` 是全项目唯一会写 `config.proxies[].egressIp` 的地方。**
+> 出口隔离报告（本项目存在的理由）在它跑过之前**没有数据来源** —— 概览页的
+> 隔离视图会显示「还不知道」而不是报错。看到空的隔离视图先想到这一条，
+> 别去怀疑分组逻辑。（这个缺口是 Phase 9 接后台时才暴露的：纯函数、探测、
+> 分组三层各自都对，缺的是把它们接起来的那根线。）
+>
+> 它会真的切 Clash selector 并发真实请求，所以**不要在转发正忙的时候调**。
+
+**凭证永远不出进程**：所有端点只回「有没有 + 8 位 sha256 指纹」。
+写入方向是**三态** —— `{"set":"..."}` 改、`{"clear":true}` 清、**字段缺席 = 不动**。
+所以改别的字段时不必回传 key（回传不了，你也拿不到原值）。
+
+**dev 下的一个坑**：Vite 只转发 `/health` 与 `/api`，**不转发 `/v1`**
+（见 `vite.config.ts`）。拿 `:5173` 测转发会得到 Vite 的 404 而不是网关的响应。
 
 ### 安全
 
@@ -282,11 +322,13 @@ curl -s -H "authorization: Bearer <relayToken>" http://127.0.0.1:9877/v1/models 
 `auth` 刻意用固定短退避而不是指数增长：配错的 key 应该**反复暴露**，
 而指数增长会让"key 配错了"逐渐变成"网关有点慢"。
 
-> **冷却状态目前没有查看入口。** `npm run status` 只报进程信息（pid／版本／
-> 运行时长／URL），不含 Worker 就绪数。调度器的 `snapshot()`（每个 Worker 的
-> 就绪态、剩余冷却、连续失败数、最近失败类别）已经实现且不含凭证，
-> 但要等 Phase 9 的管理 API 才有地方读它。眼下只能从响应头
-> `x-zen-gateway-route` 与 `x-zen-gateway-worker` 推断（见下文「排查」）。
+> **冷却状态在管理后台的 Worker 页看**（Phase 9 起）：每个 Worker 的就绪态、
+> 剩余冷却、连续失败数、最近失败类别，可按「冷却中」筛选。数据来自
+> `GET /api/overview`（读调度器的 `runtimeWorkers()`）。
+> `npm run status` 仍然只报进程信息（pid／版本／运行时长／URL）—— 它是进程级的，
+> 拿不到服务进程里的运行期状态。`npm run doctor` 的第 4 层同理，只报配置形态，
+> 并把这个限制明写在输出里。不看后台时可从响应头 `x-zen-gateway-route` 与
+> `x-zen-gateway-worker` 推断（见下文「排查」）。
 
 一个实际现象：**任何非 OpenCode 客户端**（curl、别的网关）打进来都会拿 403
 `FreeTierError`，而 403 归 `auth` —— 于是全部 Worker 被打进 60 秒冷却。
@@ -541,11 +583,14 @@ curl -s -H "Authorization: Bearer <apiSecret>" \
 两张亲和表只存 **sha256 摘要**，且 schema 的 `CHECK` 把这条从约定变成结构约束
 （长度 64 且只含小写十六进制）——原始会话标识与推理内容结构上进不去。
 
-### 现在还没有查看入口
+### 怎么看这些数据
 
-聚合查询已经实现（per-model token、Worker 计数、缓存命中率、usage 覆盖率、
-最近尝试），但**没有 HTTP 端点** —— 管理 API 的形状留给 Phase 9。
-眼下要看数据直接查库：
+**管理后台的「用量」页**（`npm run dev`）就是为这些聚合做的：per-model token、
+Worker 计数、缓存命中率、usage 覆盖率、网关拒绝。它读 `GET /api/stats`
+（默认只看最近 30 天 —— `COUNT(DISTINCT request_id)` 是全表扫且同步，
+见 `architecture.md` 缺口 #14；要全量传 `?days=all`）。
+
+要直接查库（服务没起来、或想看后台没显示的列）：
 
 ```bash
 # 不依赖外部 sqlite3 命令 —— 用 Node 内置的 node:sqlite（本项目的运行时要求）
