@@ -137,7 +137,7 @@ export const UpstreamUrlSchema = z
 /**
  * Relay Token —— 客户端访问 /v1/* 所需。
  *
- * 首启自动生成，没有「空表示不校验」这种形态：旧项目默认空值等于
+ * 首启自动生成，没有「空表示不校验」这种形态：默认空值等于
  * 本机任何进程都能白用网关，而这是个默认行为，不是用户的选择。
  */
 export const RelayTokenSchema = z.string().min(16).max(256).regex(/^[A-Za-z0-9_-]+$/, {
@@ -275,7 +275,7 @@ export const ModelRulesSchema = z.strictObject({
    * 无 `-free` 后缀但实际零费率的模型。
    *
    * 这是**出厂默认值**，不是代码里的硬编码判定 —— 用户可改，Phase 6 的
-   * 定时刷新会按真实目录纠正它。旧项目把等价的名单写死在代码常量里
+   * 定时刷新会按真实目录纠正它。把等价的名单写死在代码常量里
    * （`SPECIAL_FREE_MODEL_IDS`），目录一变就必须改代码发版。
    *
    * 2026-09-22 以**上游权威目录**核实：`GET https://opencode.ai/zen/v1/models`
@@ -287,7 +287,7 @@ export const ModelRulesSchema = z.strictObject({
    * 32 个零费率，与在架目录比对后发现 **23 个零费率项已下架**（`glm-5-free`、
    * `kimi-k2.5-free`、`minimax-m3-free`、`grok-code` …）。本文件先前的默认值
    * 里就混进了 `grok-code` —— 它在 Zen 自己的目录和定价页里都不存在，
-   * 与旧项目硬编码 `union-alpha` 是同一类错误，只是来源换成了第三方聚合站。
+   * 与把某个模型 id 硬编码进代码是同一类错误，只是来源换成了第三方聚合站。
    *
    * 注意 `jev-1.13`（无后缀）**不免费**：定价页是输入 $0.042 / 输出免费，
    * 只有 `jev-1.13-free` 才免费。它不能进这份名单。

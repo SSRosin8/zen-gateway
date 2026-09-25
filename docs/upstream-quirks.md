@@ -10,7 +10,7 @@
 ## Phase 4 的范围比规划设想的窄，原因是实测出来的
 
 规划里 Phase 4 是「经真实出口向 Zen 递进发请求，**逐字段**定位被拒原因」，
-用来重新发现旧项目记录过的那些怪癖（拒收 `client_metadata`、tools 上限、
+用来逐字段定位这些已知怪癖（拒收 `client_metadata`、tools 上限、
 思考模型需重放 `reasoning_content`、effort-tier 别名拆分）。
 
 **那件事现在做不到，而且不是工程问题。** 见下面「闸门短路在请求体校验之前」。
@@ -44,13 +44,13 @@
 （anomalyco/opencode#49621）：*"We've been tightening our logic to fight abuse.
 You cannot use the free tier in other harnesses."*
 
-### 旧项目的匿名通道已关
+### 匿名通道（字面量 `Bearer public`）已关
 
-旧项目（`opencode-manager`）的「匿名 Worker」**不是不带 key**，而是发字面量
+这里说的「匿名」**不是不带 key**，而是发字面量
 `Bearer public` —— `src/proxy/upstream.ts:97` 的 `effectiveApiKey()`：
 `kind === "anonymous_zen"` 时把 apiKey 替换成字符串 `"public"`。
 
-它**曾经真的能用**：旧项目最后一次提交是 2026-09-17，而闸门在 09-16 前后
+它**曾经真的能用**：已知的成功使用早于 2026-09-16 前后的闸门收紧，
 收紧 —— 成功使用就在这条线之前（同一时间窗里 `union-alpha` 也从目录消失了）。
 
 按真实形态复测（含 `synthesizeCliHeaders=true` 时的整套 CLI 身份头：
@@ -229,7 +229,7 @@ You cannot use the free tier in other harnesses."*
 
 不变量 #4 要保的正是这件事，而这里破坏它的不是客户端的坏请求，是网关自己少发了一个头。
 
-**独立印证**：旧项目 `src/relay/headers.ts` 在发 `anthropic-version` 时同样顺带把
+**这个要求不是本项目的特例**：任何驱动 Zen Messages 面的客户端都要顺带把
 Bearer key 镜像成 `x-api-key`。两处从不同入口撞到同一个要求。
 
 `anthropic-version` 本身实测**对结果没有影响**（带与不带状态码相同），但协议要求它，

@@ -7,7 +7,7 @@ import { fakeOverview } from "./App.test.tsx";
 /*
  * Overview 页的组件契约（规划的「Phase 9 组件测试契约」）。
  *
- * 用 Testing Library 表达，不做 HTML 字符串断言 —— 旧项目的 8446 行 UX 测试
+ * 用 Testing Library 表达，不做 HTML 字符串断言 —— 字符串断言
  * 正是字符串断言，无法迁移，其**契约意图**在这里重新表达。
  */
 

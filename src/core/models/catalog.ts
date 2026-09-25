@@ -26,7 +26,7 @@ import { safeErrorMessage } from "../../shared/redact.ts";
  * 不回落到 models.dev，也不读 OpenCode 的本地缓存（`~/.cache/opencode/
  * models.json` 就是 models.dev 的快照）。实测同日 models.dev 报 105 个模型／
  * 32 个零费率，与在架目录比对后有 **23 个零费率项已下架**，另有 3 个在架模型
- * 它完全没收录。信第三方聚合站与旧项目硬编码 `union-alpha` 是同一类错误。
+ * 它完全没收录。信第三方聚合站与把某个模型 id 硬编码进代码是同一类错误。
  *
  * ## 两个身份槽位,而依据是**免费子集**一致,不是整份目录一致
  *

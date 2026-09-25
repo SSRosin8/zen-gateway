@@ -7,7 +7,7 @@ import type { ModelRules } from "../../shared/schema.ts";
  *
  * 免费 = （后缀命中 `freeSuffix` **或** 在 `extraFreeIds` 名单里）**∩ 在架目录**。
  *
- * 旧项目把等价名单写成代码常量(`SPECIAL_FREE_MODEL_IDS`),目录一变就要
+ * 把等价名单写成代码常量的话,目录一变就要
  * 改代码发版,而它硬编码的 `union-alpha` 已从上游目录消失。这里全部读配置。
  *
  * ## 交集这一步(Phase 6 补上的)

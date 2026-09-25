@@ -1,3 +1,4 @@
+import { readFileSync } from "node:fs";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { createServer, type Server } from "node:http";
 import { mkdtemp, readFile, rm } from "node:fs/promises";
@@ -1547,5 +1548,104 @@ describe("订阅刷新", () => {
     const { app } = makeApp(withSubscription(), { address: "203.0.113.9" });
     const { status } = await refresh(app, "sub1");
     expect(status).toBe(403);
+  });
+});
+
+/* ================================================================== *
+ * 凭证清单自己也要有关卡（第十轮审核）
+ * ================================================================== */
+
+describe("`allSecretValues` 与 schema 的凭证字段不脱节", () => {
+  /*
+   * `allSecretValues` 的注释说它「从 `Config` 的实际结构推导」，而实际上
+   * 它是**逐字段手写枚举**（`relayToken` / `w.apiKey` / `b.apiSecret` /
+   * `p.password` / 订阅 URL）—— 也就是它自己就是那条纪律要避免的手写名单，
+   * 只是搬到了 `src/` 下。
+   *
+   * 第十轮审核的变异：同时把 clash secret 从名单里删掉、并让 `clashView`
+   * 真的泄漏它的明文前 8 位 → **62 条全绿**。那正是它声称防住的形态
+   * （名单脱节 + 同一字段泄漏），而唯一的守卫（上面那条 `allSecretValues`
+   * 断言）的输入就是那份名单本身 —— **关卡的判据来自被检查的对象**。
+   *
+   * 所以这里加一层：`SecretSchema` / `RelayTokenSchema` 的使用点是可枚举的
+   * 唯一真相，每个字段名都必须在 `allSecretValues` 的实现里出现。
+   */
+
+  const schemaSrc = readFileSync(
+    new URL("../../src/shared/schema.ts", import.meta.url),
+    "utf8",
+  );
+  const projectSrc = readFileSync(
+    new URL("../../src/server/admin/project.ts", import.meta.url),
+    "utf8",
+  );
+
+  it("schema 里每个凭证字段都在清单的实现里被读到", () => {
+    /*
+     * 抓形如 `  password: SecretSchema.optional(),` 的字段名。
+     * `RelayTokenSchema` 一并算进来 —— 它也是凭证，只是类型更窄。
+     */
+    const fields = [
+      ...schemaSrc.matchAll(/^\s*(\w+):\s*(?:SecretSchema|RelayTokenSchema)\b/gm),
+    ].map((m) => m[1]!);
+
+    /*
+     * 关卡自己不能是空的：正则改坏、schema 改写法都会让下面在零个字段上通过。
+     * 本机实测 4 个（password / apiSecret / apiKey / relayToken）。
+     */
+    expect(fields.length).toBeGreaterThanOrEqual(4);
+
+    const missing: string[] = [];
+    let checked = 0;
+    for (const field of fields) {
+      // 判据是「这个字段名出现在 allSecretValues 所在文件里」——
+      // 它是那份名单的唯一实现，而名单必须读到每个凭证字段。
+      if (!projectSrc.includes(field)) missing.push(field);
+      // 算在判定之后（放循环开头的话 `continue` 也能让计数对上而检查没做）。
+      checked += 1;
+    }
+
+    expect(checked).toBe(fields.length);
+    expect(
+      missing,
+      "这些凭证字段没有进 allSecretValues —— 它们的值会被送进浏览器而无人发现",
+    ).toEqual([]);
+  });
+
+  it("**真实配置下四类凭证都被收进清单** —— 不是靠正则空转通过的", () => {
+    /*
+     * 与上一条配对。上面查的是"字段名出现在文件里"（源码级），这条查
+     * 运行期：造一份四类凭证都有的配置，断言每一个值都真的在清单里。
+     * 少了它，一个 `return []` 的实现也能让上面那条通过。
+     */
+    const config = ConfigSchema.parse({
+      version: CONFIG_VERSION,
+      gateway: { relayToken: "R".repeat(24) },
+      workers: [{ id: "w1", kind: "authenticated", apiKey: "K".repeat(24), proxyId: "p1" }],
+      proxies: [
+        {
+          id: "p1", name: "代理", type: "http", host: "127.0.0.1", port: 1080,
+          username: "user", password: "P".repeat(24),
+          source: "manual", direct: true, bridgeable: false, egressIp: null,
+        },
+      ],
+      subscriptions: [{ id: "s1", name: "订阅", url: "https://example.com/sub?token=" + "T".repeat(24) }],
+      clash: {
+        enabled: true,
+        selectionMode: "manual",
+        activeBridgeId: "b1",
+        bridges: [
+          {
+            id: "b1", name: "内核", apiBase: "http://127.0.0.1:9097",
+            apiSecret: "S".repeat(24), localProxyPort: 7897, selectorGroup: "Proxy",
+          },
+        ],
+      },
+    });
+
+    const secrets = allSecretValues(config);
+    for (const expected of ["R".repeat(24), "K".repeat(24), "P".repeat(24), "S".repeat(24), "T".repeat(24)]) {
+      expect(secrets, `清单漏了 ${expected[0]}...`).toContain(expected);
+    }
   });
 });

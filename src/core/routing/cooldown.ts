@@ -5,7 +5,7 @@ import { parseRetryAfter, shouldCooldown, type FailureKind } from "../failures.t
  * 分级冷却 —— 纯函数,时钟由调用方注入。
  *
  * 「冷却多久」完全由失败类别决定,不同类别的处置差异很大,把它们混成一条
- * 统一退避是旧项目的做法,后果是:一个配错的 key 与一次上游限流得到同样的
+ * 统一退避的后果是:一个配错的 key 与一次上游限流得到同样的
  * 15 分钟,于是**配置错误看起来像限流**,用户等了 15 分钟发现还是不行。
  *
  * ## 为什么本文件不做「等待」
@@ -21,7 +21,7 @@ import { parseRetryAfter, shouldCooldown, type FailureKind } from "../failures.t
  *
  * 两个 Worker 因同一次上游故障同时失败时,不加抖动它们会在同一毫秒一起
  * 恢复,于是下一波请求把同一个仍未恢复的上游再打一遍。比例式而非固定
- * 毫秒数(旧项目是 `Math.random() * 1000`):固定值对 2 秒的退避是 ±50%,
+ * 毫秒数(比如 `Math.random() * 1000`):固定值对 2 秒的退避是 ±50%,
  * 对 120 秒的退避等于没有。
  */
 const JITTER_RATIO = 0.25;
@@ -104,7 +104,7 @@ export function cooldownMs(input: CooldownInput): number | null {
       /*
        * 鉴权失败用**固定**短退避,不做指数递增。
        *
-       * 这是与旧项目(`markAuthFailed` 按次数翻倍)刻意不同的判断:auth 失败
+       * 这是刻意不按次数翻倍的判断(那是最自然的写法):auth 失败
        * 几乎总是**配置错误**(key 粘错、被吊销、额度耗尽),而配置错误只有被
        * 用户看见才会修好。指数递增会让「key 配错了」随时间逐渐变成
        * 「网关有点慢」—— 正好抹掉这条短退避存在的理由。

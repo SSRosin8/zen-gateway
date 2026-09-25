@@ -6,6 +6,7 @@ import {
   OverviewSchema,
   SubscriptionRefreshSchema,
   type Overview,
+  type ProbeResult,
   type SubscriptionRefresh,
 } from "../../shared/contract.ts";
 import { pollIntervalMs } from "../../shared/batchProbe.ts";
@@ -25,7 +26,7 @@ import { pollIntervalMs } from "../../shared/batchProbe.ts";
  * ## 为什么不用 react-query / swr
  *
  * 这一页只有两个请求（overview 轮询、probe 手动触发），而一个缓存库要带来
- * 它自己的一套生命周期概念。旧项目记在案的痛点之一就是「为了行数而拆」，
+ * 它自己的一套生命周期概念。「为一个小需求引入框架」与「为了行数而拆文件」是同一类错误 —— 都让形式指标成了判据，
  * 这里是它的近亲：为了一个 30 行的需求引入一个框架。
  */
 
@@ -124,14 +125,19 @@ export function useOverview(intervalMs = 3000): {
   return { state, refresh };
 }
 
-export type ProbeResult = {
-  proxyId: string;
-  ok: boolean;
-  egressIp?: string;
-  latencyMs?: number;
-  failureKind?: string;
-  reason?: string;
-};
+/*
+ * `ProbeResult` 从 `contract.ts` re-export，**不在这里手写第二份**。
+ *
+ * 先前这里有一份全 optional 的手写类型，于是契约文件头承诺的
+ * 「任何一端改字段，另两端 typecheck 失败」在这条端点上不成立 ——
+ * 实测把契约里的 `egressIp` 改名成 `ip` 后，admin 侧 typecheck 零报错、
+ * 测试全绿，真实后果是页面渲染 `undefined`（第十轮审核）。
+ *
+ * 契约那份是个 union（成功支有 `egressIp`/`latencyMs`/`via`，失败支有
+ * `failureKind`/`reason`），比手写的"全部可选"精确：它让
+ * `r.ok ? r.egressIp : r.reason` 这种分支访问被类型系统检查。
+ */
+export type { ProbeResult };
 
 /**
  * 触发一次出口探测。

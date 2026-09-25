@@ -6,7 +6,7 @@ import { StatusIndicator } from "../../src/admin/components/StatusIndicator.tsx"
  * 契约:状态永不只靠颜色表达。
  *
  * 断言的是可访问的输出(文字节点、aria 属性),不是 HTML 字符串 ——
- * 旧项目的 UX 测试是 HTML 字符串断言,一改样式就全红,意图随之流失。
+ * 把 UX 测试写成 HTML 字符串断言的话,一改样式就全红,意图随之流失。
  */
 describe("StatusIndicator", () => {
   it("同时渲染图标与文字标签", () => {

@@ -203,8 +203,10 @@ export function clashView(config: Config): {
  * 而用户会把它们当成一句话读（「3 个 Worker，2 个就绪」后面跟着一张
  * 三行的表）。从同一份 `views` 推导，两者结构上不可能矛盾。
  *
- * 这也顺带回答了 Phase 8 登记的那个问题（`counts()` 无生产读者）：
- * 它仍然没有读者，而那是对的 —— 这里需要的是**与列表同源**的计数。
+ * 这也顺带回答了 Phase 8 登记的那个问题（为什么不用 `counts()`）：
+ * 这里需要的是**与列表同源**的计数。至于它当前有没有别的读者 ——
+ * 那件事的唯一真相是调用点本身，由 `exportsReferenced.test.ts` 的关卡看着，
+ * 不在注释里存一份会漂的副本（缺口 #12 的结论）。
  */
 export function poolCounts(views: readonly WorkerView[]): { ready: number; total: number } {
   const inPool = views.filter((v) => v.inPool);

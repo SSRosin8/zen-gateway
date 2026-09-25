@@ -219,6 +219,56 @@ describe("containsStaleReasoning", () => {
      */
     expect(STALE_PATTERN_WINDOW).toBeGreaterThanOrEqual(58);
   });
+
+  it("**窗口真的覆盖每一条模式** —— 不是与一个手写数字比", () => {
+    /*
+     * 上一条把 58 写在了断言里，而窗口先前也是手写的 80 —— 同一事实的
+     * 两份副本，于是往模式表加一条更长的措辞时**两边都不会变**，
+     * 跨块扫描静默开始漏（第十轮审核实测：加一条最长 162 的模式后，
+     * 切点 81 与 161 处漏检，而全部测试仍绿）。
+     *
+     * 现在窗口由 `longestPossibleMatch` 从模式表推导。这条断言据此逐条核对：
+     * 对每个模式构造一个"恰好最长"的匹配串，断言它不长于窗口。
+     * 判据来自模式表本身，加模式时自动跟上。
+     */
+    const longest = [
+      // /not issued to this caller/i —— 纯字面量。
+      "not issued to this caller",
+      // /invalid.{0,24}signature/i —— 7 + 24 + 9。
+      `invalid${"x".repeat(24)}signature`,
+      // /signature.{0,24}(invalid|required|missing)/i —— 9 + 24 + 8。
+      `signature${"x".repeat(24)}required`,
+      // /reasoning.{0,40}signature/i —— 9 + 40 + 9，本表最长。
+      `reasoning${"x".repeat(40)}signature`,
+    ];
+
+    for (const sample of longest) {
+      // 每个样本都真的能被识别 —— 否则下面的长度比较毫无意义。
+      expect(containsStaleReasoning(sample), `这个样本本身匹配不上: ${sample}`).toBe(true);
+      expect(
+        sample.length,
+        `窗口 ${STALE_PATTERN_WINDOW} 短于这条模式的最长匹配 ${sample.length}`,
+      ).toBeLessThanOrEqual(STALE_PATTERN_WINDOW);
+    }
+
+    // 最长那条恰好等于窗口 —— 钉住推导没有无谓放大（80 那个值就是放大了 22）。
+    expect(Math.max(...longest.map((x) => x.length))).toBe(STALE_PATTERN_WINDOW);
+  });
+
+  it("模式表加一条更长的措辞时，窗口**自动跟上**", () => {
+    /*
+     * 这条验推导本身。`longestPossibleMatch` 不导出（它是实现细节），
+     * 所以用一条等价的手算：窗口必须等于"各条模式最长匹配"的最大值。
+     * 少了它，一个 `= 58` 的手写常量也能让上面几条通过。
+     */
+    const byHand = [
+      "not issued to this caller".length,
+      "invalid".length + 24 + "signature".length,
+      "signature".length + 24 + "required".length,
+      "reasoning".length + 40 + "signature".length,
+    ];
+    expect(STALE_PATTERN_WINDOW).toBe(Math.max(...byHand));
+  });
 });
 
 describe("AffinityMap:会话绑定", () => {
