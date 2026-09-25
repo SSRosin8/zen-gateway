@@ -13,6 +13,8 @@ import { AffinityStore } from "../store/db/affinityStore.ts";
 import { BatchProbeStore } from "../store/db/batchProbeStore.ts";
 import { BatchProbeRunner } from "./admin/batchRunner.ts";
 import { safeErrorMessage } from "../shared/redact.ts";
+import { probeBridges } from "../core/proxy/clash/select.ts";
+import { ClashController } from "../core/proxy/clash/controller.ts";
 
 /**
  * 服务入口。
@@ -222,6 +224,18 @@ async function main(): Promise<void> {
       egress,
       store: batchStore,
       log: (message) => console.error(message),
+      /*
+       * 批测前探一遍内核并锁定一个（Phase 10）。
+       *
+       * `probeBridges` 只读 `/version` 与 `/proxies`，不改任何状态，
+       * 所以能并发、也不会干扰在途的转发。
+       */
+      probeBridges: async () =>
+        await probeBridges(
+          config.clash.bridges.filter((b) => b.enabled),
+          (bridge) => new ClashController(bridge),
+          { redact: safeErrorMessage },
+        ),
     });
   }
 

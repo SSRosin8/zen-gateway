@@ -571,8 +571,19 @@ async function main() {
      *
      * `selectionMode` 完全不动:它默认 `auto`,而用户若改成 `manual` 并选了
      * 一个内核,那是个明确的决定。
+     *
+     * **但绝不指向一个停用的内核。** 第八轮审核实测查出:更新分支刻意保留
+     * `enabled: false`（用户可能故意停用了某个内核），而这里若把
+     * `activeBridgeId` 指过去,`pickBridge` 在 manual 模式下只在**已启用**的
+     * 内核里找（`pool.ts`）→ 返回 null → 每个桥接代理都失败,
+     * 而 setup 打的是 ✓ 并说「出口已配好」。
+     * 本机正是这个形态:0dcloud 那个内核因为控制面进不去而被停用。
      */
-    if (next.clash.activeBridgeId === null) next.clash.activeBridgeId = bridgeId;
+    if (next.clash.activeBridgeId === null) {
+      const candidate = next.clash.bridges.find((b) => b.id === bridgeId);
+      if (candidate?.enabled === true) next.clash.activeBridgeId = bridgeId;
+      else nextStep(`内核 ${bridgeId} 处于停用状态,未设为当前内核 —— 启用它之后再跑一次。`);
+    }
   }
 
   line(
