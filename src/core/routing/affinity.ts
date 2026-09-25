@@ -210,9 +210,10 @@ export function extractBlobHashes(body: unknown): string[] {
  * 把这种拒绝塞在流里面。只看状态码会整条漏掉,于是失效的指纹一直把会话
  * 钉在错的 Worker 上 —— 每一轮都失败,而且失败原因看起来来自上游。
  *
- * 模式来自旧项目实测到的上游措辞。这是**外部系统的属性**,不是我们的判断,
+ * 模式来自实测到的上游措辞。这是**外部系统的属性**,不是我们的判断,
  * 所以宁可宽一点:误判的代价是解绑一次会话(下一轮重挑 Worker),
- * 漏判的代价是会话永久卡死。
+ * 漏判的代价是会话永久卡死。也因此这张表**预期会增长** —— 下面那个窗口
+ * 必须从它推导，不能手写。
  */
 const STALE_REASONING_PATTERNS = [
   /not issued to this caller/i,
@@ -221,8 +222,73 @@ const STALE_REASONING_PATTERNS = [
   /reasoning.{0,40}signature/i,
 ];
 
-/** 这些模式里最长的可能匹配长度 —— 跨块扫描时的重叠窗口据此取。 */
-export const STALE_PATTERN_WINDOW = 80;
+/**
+ * 跨块扫描的重叠窗口 —— **从模式表推导**，不是手写常量（第十轮审核）。
+ *
+ * 先前这里写着 `= 80`，注释说它是"这些模式里最长的可能匹配长度"。
+ * 今天推导值是 58（`/reasoning.{0,40}signature/` = 9+40+9），80 够用。
+ * 但上面那张表预期会增长，而**窗口不会跟着变** —— 那时跨块扫描开始漏，
+ * 症状是 `tap.ts` 自己写的那句：「偶尔不生效，取决于上游的分块位置，
+ * 极难复现」。实测：往表里加一条最长可能匹配 162 的模式后，
+ * 窗口仍是 80，切点 81 与 161 处漏检。
+ *
+ * 守它的断言先前写的是 `>= 58` —— 而 58 也是手写的，是同一事实的第三份副本，
+ * 于是窗口与断言会一起停在旧值上，谁都不会红（纪律 #4）。
+ *
+ * ## 推导办法
+ *
+ * 每条模式的最长可能匹配 = 各字面量段长度之和 + 各 `{0,n}` 的 n。
+ * 交替分支（`(invalid|required|missing)`）取最长的那一支。
+ * 这不是一个通用的正则长度计算器 —— 它只覆盖本表用到的三种构造，
+ * 而 `assertSupportedPattern` 会对没见过的构造抛错，
+ * **让"加了个新形态而窗口没跟上"变成启动期失败而不是静默漏检**。
+ */
+function longestPossibleMatch(pattern: RegExp): number {
+  const src = pattern.source;
+  let total = 0;
+  let i = 0;
+
+  while (i < src.length) {
+    // `.{0,n}` —— 通配区间，取上界 n。
+    const quant = /^\.\{0,(\d+)\}/.exec(src.slice(i));
+    if (quant !== null) {
+      total += Number(quant[1]);
+      i += quant[0].length;
+      continue;
+    }
+
+    // `(a|b|c)` —— 交替，取最长的一支。
+    if (src[i] === "(") {
+      const close = src.indexOf(")", i);
+      if (close === -1) throw new Error(`STALE_REASONING_PATTERNS 含未闭合的分组: ${src}`);
+      const alts = src.slice(i + 1, close).split("|");
+      total += Math.max(...alts.map((a) => a.length));
+      i = close + 1;
+      continue;
+    }
+
+    /*
+     * 其余一律当**字面量一个字符**。本表目前只有字母、空格与 `.`，
+     * 而任何正则元字符（`*`、`+`、`?`、`[`、`\\`）都会让这个假设失效 ——
+     * 所以显式拒绝它们，而不是悄悄算出一个偏小的窗口。
+     */
+    const ch = src[i]!;
+    if (/[*+?[\]\\{}^$|]/.test(ch)) {
+      throw new Error(
+        `STALE_REASONING_PATTERNS 用了 longestPossibleMatch 不认识的构造 \`${ch}\`（${src}）——` +
+          `请扩展那个函数，否则重叠窗口会偏小而跨块扫描静默漏检。`,
+      );
+    }
+    total += 1;
+    i += 1;
+  }
+
+  return total;
+}
+
+export const STALE_PATTERN_WINDOW = Math.max(
+  ...STALE_REASONING_PATTERNS.map(longestPossibleMatch),
+);
 
 export function containsStaleReasoning(text: string): boolean {
   if (text === "") return false;

@@ -347,7 +347,18 @@ export class Scheduler {
     };
   }
 
-  /** 丢掉过期与指向已删除 Worker 的亲和条目。由管理面或定期任务调用。 */
+  /**
+   * 丢掉过期与指向已删除 Worker 的亲和条目。
+   *
+   * ⚠️ **仍无生产调用点**，理由见 `AffinityMap.prune`（不接上是有意的）。
+   * 这里先前写着「由管理面或定期任务调用」—— 那是个**假的调用点声明**：
+   * 全仓只有单测调它（第十轮审核实测）。而同一个事实在邻居文件里写对了，
+   * 也就是同一事实两份副本、一份失实（纪律 #4）。
+   *
+   * 「有没有读者」这件事的唯一真相是调用点本身，而
+   * `tests/unit/exportsReferenced.test.ts` 已经把它做成了关卡 ——
+   * 手写标注只该说明**为什么不接**，不该声称它被接了。
+   */
   prune(config: Config, now: number): void {
     this.#ensureSynced(config);
     this.#affinity.prune(now, config.routing.affinityTtlMs, (id) => this.#pool.has(id));

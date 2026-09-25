@@ -5,7 +5,7 @@
  * ## 这个脚本的范围比规划设想的窄,原因是实测出来的
  *
  * 规划里 Phase 4 是「经真实出口向 Zen 递进发请求,**逐字段**定位被拒原因」,
- * 用来重新发现旧项目记录过的那些怪癖(拒收 `client_metadata`、tools 上限、
+ * 用来逐字段定位这些已知怪癖(拒收 `client_metadata`、tools 上限、
  * 思考模型需重放 `reasoning_content`、effort-tier 别名拆分)。
  *
  * **那件事现在做不到**,而且不是工程问题:免费额度闸门**短路在请求体校验之前**。
@@ -311,30 +311,28 @@ async function anonProbes(sets) {
       ? null
       : `期望 application/json,实收 ${o.contentType}`);
 
-  console.log("\n── 旧项目的匿名通道(历史核实) ──");
+  console.log("\n── 匿名通道(字面量 `Bearer public`) ──");
 
   /*
-   * **旧项目的「匿名 Worker」不是不带 key,而是发字面量 `Bearer public`。**
+   * **这里说的「匿名」不是不带 key,而是发字面量 `Bearer public`。**
    *
-   * 见 `opencode-manager/src/proxy/upstream.ts:97` 的 `effectiveApiKey()`:
-   * `kind === "anonymous_zen"` 时把 apiKey 换成字符串 `"public"`。
-   * 我先前所有探针都没测过这个值 —— 于是当用户说「旧项目实际上只要有匿名
-   * 或登录 worker 就能直接用」时,我无法解释,因为我测的是「不带 authorization 头」,
-   * 那根本不是旧项目发出的请求。
+   * 这个区分决定了探针该发什么:免 key 与 `Bearer public` 命中上游的**不同
+   * 分支**(免 key 在 `/responses`/`/messages` 上是 500,见 §9)。
+   * 只测「不带 authorization 头」永远测不到这条通道 —— 那是另一种请求,
+   * 而两者的结论不能互相推广。
    *
-   * 用户的记忆是真的:旧项目最后一次提交是 2026-09-17(为 `union-alpha` 加
-   * Messages 面),而闸门在 09-16 前后收紧 —— 他的成功使用就在这条线之前。
-   * `union-alpha` 如今也已从目录消失,两件事在同一个时间窗。
+   * 已知的成功使用早于 2026-09-16 前后的闸门收紧,同一时间窗里
+   * `union-alpha` 也从目录消失。
    *
    * 这条探针常驻的意义:它是「这条通道是否重新打开」的唯一监测点。
-   * 若它哪天变绿,匿名 Worker 这条范围被砍掉的能力就值得重新评估。
+   * 若它哪天变绿,免 key 的匿名 Worker 就值得重新评估。
    */
   const legacyPublic = await probe({
     path: "/chat/completions",
     body: { model: freeModel, messages: msgs },
     key: "public",
   });
-  check("`Bearer public`(旧项目匿名通道)→ 403,通道已关", legacyPublic, (o) =>
+  check("`Bearer public`(匿名通道)→ 403,通道已关", legacyPublic, (o) =>
     eq("状态码", o.status, 403) ?? eq("错误类型", errorType(o), "FreeTierError"));
 
   return { freeModel, paidModel };

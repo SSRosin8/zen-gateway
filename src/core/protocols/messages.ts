@@ -27,7 +27,7 @@ import { readUsage, type TokenUsage } from "../models/usage.ts";
  * 完全指不到真实原因(少了一个头)。不变量 #4 要保的正是这件事,
  * 而这里破坏它的不是客户端的坏请求,是我们自己少发了一个头。
  *
- * 独立印证:旧项目的 `relay/headers.ts` 在发 `anthropic-version` 时同样
+ * 独立印证:**这个要求不是本项目的特例**：任何驱动 Zen Messages 面的客户端都同样
  * **顺带把 Bearer key 镜像成 `x-api-key`**。两处从不同入口撞到同一个要求。
  *
  * ## 为什么这件事非得由**面**来做

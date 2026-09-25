@@ -117,7 +117,7 @@ describe("readUsage —— 字段名归一化", () => {
 
   it("数字字符串认,布尔**不**认", () => {
     /*
-     * 旧项目那版用 `typeof v === "number" ? v : Number(v)`,于是
+     * 朴素写法 `typeof v === "number" ? v : Number(v)` 下,
      * `true` 被 `Number()` 变成 1 —— 一个布尔字段被算成 1 个 token。
      * 数字字符串要认:上游若哪天改成字符串,强行丢弃会让统计静默归零。
      */
@@ -285,7 +285,7 @@ describe("createUsageCollector —— 流式增量收集", () => {
      * 本文件最要紧的一条。`message_start` 在流的**开头**带 input_tokens,
      * `message_delta` 在**末尾**带 output_tokens。
      *
-     * 所以"只留尾部窗口"会丢掉 input(旧项目的做法需要为此写第二个解析器),
+     * 所以"只留尾部窗口"会丢掉 input(那样就得为此写第二个解析器),
      * 而"只扫开头预算"会丢掉 output(那正是 tap.ts 的扫描预算的做法)。
      * 增量逐事件解析 + 逐字段取大同时覆盖两端。
      */

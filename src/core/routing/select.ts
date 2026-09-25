@@ -8,7 +8,7 @@ import { AffinityMap, digestOf, normalizeSessionKey } from "./affinity.ts";
  *
  * ## 为什么返回一条链而不是单个 Worker
  *
- * 旧项目的 `pick()` 每次只给一个 Worker,重试链要换人就再调一次 pick ——
+ * 一个「每次只给一个 Worker」的选择函数下,重试链要换人就再调一次它 ——
  * 于是"这次请求会依次试哪些 Worker"这个问题在代码里没有答案,只能靠读
  * 那个 432 行 class 的隐式状态推。返回一条链之后,`retry.ts` 只需按序走,
  * 而"为什么是这个顺序"完全由本文件回答。

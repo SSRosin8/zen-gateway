@@ -79,7 +79,7 @@ export function defaultConfig(): Config {
  * 「加字段」不升版本（schema 的默认值兜住），「改语义或改形状」才升版本，
  * 届时在这里逐档递进。
  *
- * 本项目是全新实现，不从任何旧项目导入配置 —— 缺 version 字段就是配置坏了，
+ * 不做任何配置迁移或猜测补全 —— 缺 version 字段就是配置坏了，
  * 不是「来自某个更早的格式」。
  */
 function checkVersion(raw: Record<string, unknown>): Record<string, unknown> {

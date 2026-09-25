@@ -22,7 +22,7 @@ import { parseHash } from "../../src/admin/lib/router.ts";
  * 其余 5 页 + 向导的组件契约。
  *
  * 与 Overview 那组同一条规则:用 Testing Library 表达意图，不做 HTML 字符串
- * 断言。旧项目的 8446 行 UX 测试正是字符串断言，无法迁移。
+ * 断言 —— 字符串断言一改样式就全红，意图随之流失。
  */
 
 afterEach(() => {

@@ -108,6 +108,6 @@ description: Use when changing anything under src/admin/ — pages, components, 
   切片"三个数组操作，每张表 4-6 列、几十行。引入它会让一个 30 行的需求
   变成一套 column helper 概念。
 - **不用 react-router**：需要的全部功能是"读写 hash + 订阅变化"，60 行。
-- **不用 react-query/swr**：两个请求。旧项目记在案的痛点之一是"为了行数
+- **不用 react-query/swr**：两个请求。「为一个小需求引入框架」与"为了行数
   而拆"，为一个小需求引入框架是它的近亲。
 - **不做 i18n**：只维护中文。

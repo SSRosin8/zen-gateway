@@ -44,7 +44,7 @@ describe("首次启动", () => {
 
   it("自动生成 Relay Token,不是空值", async () => {
     const { config } = await loadConfig(root);
-    // 旧项目默认空 token 等于本机任何进程都能白用网关,而那是默认行为而非用户选择。
+    // 默认空 token 等于本机任何进程都能白用网关,而那会是默认行为而非用户选择。
     expect(config.gateway.relayToken.length).toBeGreaterThanOrEqual(16);
     expect(config.gateway.relayToken).toMatch(/^[A-Za-z0-9_-]+$/);
   });
@@ -113,7 +113,7 @@ describe("损坏与非法配置", () => {
   });
 
   it("缺 version 时报错,不猜测格式", async () => {
-    // 本项目不从任何旧项目导入配置 —— 缺 version 就是配置坏了。
+    // 不做任何配置迁移 —— 缺 version 就是配置坏了。
     await writeRaw(JSON.stringify({ gateway: { relayToken: generateRelayToken() } }));
     const err = (await loadConfig(root).catch((e: unknown) => e)) as ConfigError;
     expect(err.kind).toBe("invalid");

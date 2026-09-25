@@ -23,7 +23,7 @@ const PROJECT = resolve(import.meta.dirname, "..", "..");
  * 仍硬编码着 `9876`,而本机 `gateway.port` 是 9877。
  *
  * 症状比"端口写错"隐蔽得多:dev server 照常起、页面照常开,只是 `/health`
- * 与 `/api` 被转发到**另一个进程** —— 本机恰好有旧项目 opencode-manager
+ * 与 `/api` 被转发到**另一个进程** —— 本机恰好另有服务
  * 监听 9876,于是 admin 拿到的是那个服务的响应。一个"看起来在工作但数据来自
  * 错误后端"的故障,不报任何错。
  *

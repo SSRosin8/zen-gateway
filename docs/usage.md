@@ -282,7 +282,7 @@ opencode run --model opencode/mimo-v2.6-flash-free "Reply with exactly: OK"
 {
   "version": 1,
   "gateway": {
-    "port": 9876,                 // 默认值；本机实际用 9877（9876 被旧项目占着）
+    "port": 9876,                 // 默认值；用 npm run status 打印的那个，别照抄
     "baseUrl": "https://opencode.ai/zen/v1",
     "relayToken": "<首启自动生成的 43 字符>",
     "headersTimeoutMs": 60000,    // 等首字节，可以严格
@@ -321,7 +321,7 @@ opencode run --model opencode/mimo-v2.6-flash-free "Reply with exactly: OK"
 - **引用完整性在加载时校验**：`workers[].proxyId` 指向不存在的代理会直接拒绝启动。
   这不是洁癖 —— 静默退回本机直连意味着该 Worker 与其他 Worker 共用出口，
   而出口隔离是这个项目存在的理由。
-- **缺 `version` 即视为配置损坏**，不做旧项目配置迁移。
+- **缺 `version` 即视为配置损坏**，不做任何配置迁移或猜测补全。
 - **损坏的配置绝不自动覆盖**（会连凭证一起丢）。报错只给字节位置，不回显内容。
 - `routing.strategy` 按 Worker 的 `kind` 排序，三个取值产出三种不同顺序。
   但**实践中你大概看不出区别**：可排序的只有 `anonymous` 与 `authenticated`
@@ -492,7 +492,7 @@ curl -s -H "Authorization: Bearer <apiSecret>" \
 
 ```bash
 # 端口按你的 gateway.port —— 用 `npm run status` 打印的那个,别照抄 9876。
-# 本机曾同时跑着旧项目(9876)与本网关(9877),照抄会拿到**另一个进程**的
+# 端口写错会拿到**另一个进程**的
 # `{"ok":true}`,看起来一切正常而其实问错了人。
 curl -s "http://127.0.0.1:$(node -e 'import("./src/store/port.ts").then(m=>console.log(m.resolvePort()))')/health"
 

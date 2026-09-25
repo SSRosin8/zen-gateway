@@ -56,7 +56,7 @@
  * ## 跨事件合并只有一个函数，不按面分
  *
  * Anthropic 面的用量**拆在两个事件里**：`message_start` 带输入 token，
- * `message_delta` 带输出 token。旧项目为此写了第二个 SSE 解析器
+ * `message_delta` 带输出 token。最自然的做法是为此写第二个 SSE 解析器
  * （`parseAnthropicUsageFromSseBuffer`），但那是因为它在"扫整个缓冲区"
  * 那一层做合并。改成"逐事件解析 + 逐字段取大"之后，两类形态是同一套逻辑：
  * OpenAI 那种"只有末帧带完整 usage"的情况下，逐字段取大的结果**就是**末帧。
@@ -84,7 +84,7 @@ export type TokenUsage = {
  *
  * ## 只认十进制,且有上界
  *
- * - 不认布尔 —— 旧项目那版用 `typeof v === "number" ? v : Number(v)`,
+ * - 不认布尔 —— 朴素写法 `typeof v === "number" ? v : Number(v)` 下,
  *   于是 `true` 被算成 1 个 token。
  * - 认十进制字符串 —— JSON 里 token 数本该是数字,但上游若哪天改成字符串,
  *   强行丢弃会让统计静默归零。
