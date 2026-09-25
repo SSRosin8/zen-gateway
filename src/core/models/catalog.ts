@@ -1,4 +1,5 @@
 import type { Config } from "../../shared/schema.ts";
+import type { Response as UndiciResponse } from "undici";
 import { upstreamUrl } from "../upstream/url.ts";
 import { fetchUpstream, type UpstreamDeps } from "../upstream/fetch.ts";
 import { buildUpstreamHeaders } from "../upstream/headers.ts";
@@ -159,14 +160,64 @@ export type CatalogSnapshot = {
  * 实测一个单条目、40 MiB 的目录响应被照常采纳。
  *
  * 先前注释说它防的是"劫持、错配的 baseUrl、返回聚合列表的代理",而**劫持**
- * 恰好能以小条目数、大体积的形态出现。现在把范围说准:它防的是
+ * 恰好能以小条目数、大体积的形态出现。所以它防的准确范围是
  * **条目数爆炸导致的判定集污染**,不是 DoS。
  *
- * 眼下不加体积闸门:本机自用、目录端点、且调用频率受 TTL 与失败退避约束
- * (转发路径只读缓存)。真要加的话该在 `json()` **之前**读 `content-length`
- * 或改用有界读取 —— 那是 Phase 7 若把目录做成用户可配 baseUrl 时的事。
+ * **体积那一半由 `MAX_CATALOG_BYTES` 挡住（缺口 #7，第九轮补上）** ——
+ * 有界读取放在 `JSON.parse` 之前，所以"单条目 40 MiB"那种形态不再能进内存。
  */
 const MAX_CATALOG_ENTRIES = 4096;
+
+/**
+ * 目录响应的体积上限（缺口 #7）。
+ *
+ * 与条目数上限是**两层**，各自挡不同的东西：条目数挡"一万个模型"，
+ * 体积挡"一个模型但它的 description 有 40 MiB"。实测过后者能通过
+ * 条目数那一层。
+ *
+ * 8 MiB：当日真实目录约 42 条、几十 KB，三个数量级的余量。
+ */
+const MAX_CATALOG_BYTES = 8 * 1024 * 1024;
+
+/**
+ * 边读边计数地把响应读成文本。
+ *
+ * **不能只看 `content-length`**：那个头可以撒谎，chunked 编码也不给。
+ * 与 `subscription/fetch.ts` 同一个做法（那里的理由写得更细），
+ * 两处刻意不共用一个函数：这里拿的是 undici 的 Response，
+ * 那里是 WHATWG fetch 的，形态不同而各自只有十几行。
+ */
+async function readBoundedText(response: UndiciResponse, limit: number): Promise<string> {
+  /*
+   * `body === null` 只出现在无体状态（204/205/304）上 —— 那时没有字节可数，
+   * 返回空串即可：`JSON.parse("")` 会抛，调用点记一条「不是合法 JSON」并保留
+   * 旧缓存，正是该有的结局。
+   *
+   * 这里**不重复一遍体积检查**：无体响应没有体积可超，而一条永远不可能为真的
+   * 判断是测不出来的 —— 它只会让\"每条闸门都有能失败的测试\"这句话变得不成立。
+   */
+  if (response.body === null) return "";
+
+  const reader = response.body.getReader();
+  const chunks: Buffer[] = [];
+  let size = 0;
+  try {
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      if (value === undefined) continue;
+      size += value.byteLength;
+      if (size > limit) {
+        await reader.cancel().catch(() => {});
+        throw new Error(`目录响应超过 ${limit} 字节`);
+      }
+      chunks.push(Buffer.from(value));
+    }
+  } finally {
+    reader.releaseLock();
+  }
+  return Buffer.concat(chunks, size).toString("utf8");
+}
 
 /** 目录解析结果。`null` 表示这份响应不可采纳（见 MAX_CATALOG_ENTRIES）。 */
 export function parseCatalog(payload: unknown, slot: CatalogSlot, now: number): CatalogSnapshot | null {
@@ -445,9 +496,28 @@ export class ModelCatalog {
       return null;
     }
 
+    /*
+     * 先限**体积**，再解析（缺口 #7）。
+     *
+     * `MAX_CATALOG_ENTRIES` 的闸门在 `parseCatalog` 里，也就是 `json()` 已经
+     * 把整个体读进内存**之后** —— 实测一个单条目、40 MiB 的响应被照常采纳。
+     * 条目数限制挡不住体积：一个条目的字段可以任意大。
+     *
+     * 当前风险不高（baseUrl 由 schema 限 http/https、频率受 TTL 与失败退避
+     * 约束），但代价只是这几行，而"让 `baseUrl` 更开放"是个很自然的后续改动
+     * —— 那时这一层不存在的话，一次配置失误就能把进程内存吃光。
+     */
+    let text: string;
+    try {
+      text = await readBoundedText(upstream, MAX_CATALOG_BYTES);
+    } catch (err) {
+      this.#log?.(`目录响应过大或读取失败(${slot}): ${safeErrorMessage(err)}`);
+      return null;
+    }
+
     let payload: unknown;
     try {
-      payload = await upstream.json();
+      payload = JSON.parse(text);
     } catch (err) {
       this.#log?.(`目录响应不是合法 JSON(${slot}): ${safeErrorMessage(err)}`);
       return null;

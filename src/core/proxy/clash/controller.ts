@@ -216,6 +216,53 @@ export class ClashController {
     };
   }
 
+  /**
+   * 规则实际把流量导向哪些分组（缺口 #22 / #4 的判据）。
+   *
+   * ## 为什么需要它：`GLOBAL` 陷阱不能靠名字判断
+   *
+   * `mode: rule` 下 `GLOBAL` 分组**不参与选路**，切它什么都不改变 ——
+   * 而那个故障不报任何错（控制面通、切换返回 204、探测也能拿到 IP），
+   * 只有按实测公网 IP 分组才会发现所有 Worker 共用一个出口。
+   *
+   * `setup.mjs` 先前按**名字**把 `GLOBAL` 降级，而那是个启发式：
+   * 一个名字不叫 GLOBAL 却同样不参与选路的分组仍会被选中。
+   * 真正的判据是"规则实际导向哪个分组"，而 `/rules` 正好给出这个 ——
+   * 实测本机 556 条规则里 382 条指向 `Proxy`、173 条 `DIRECT`，
+   * 而 `GLOBAL` 出现在**零条**规则里。
+   *
+   * ## 兜底规则（`MATCH`）单独给出
+   *
+   * 它是"其余一切走哪里"，也就是转发到 `opencode.ai` 时最可能命中的那条
+   * （实测本机 MATCH → `Proxy`，且 hitCount 非零）。它比"出现次数最多"
+   * 更接近真相：一条 MATCH 覆盖所有未命中的域名。
+   */
+  async routedGroups(): Promise<{ targets: ReadonlyMap<string, number>; fallback: string | null }> {
+    const body = await this.#json("rules");
+    if (body === null || typeof body !== "object") {
+      throw new ControllerError("/rules 返回的不是对象", "bad_response");
+    }
+    const rules = (body as { rules?: unknown }).rules;
+    if (!Array.isArray(rules)) {
+      throw new ControllerError("/rules 的 rules 不是数组", "bad_response");
+    }
+
+    const targets = new Map<string, number>();
+    let fallback: string | null = null;
+    for (const entry of rules) {
+      if (entry === null || typeof entry !== "object") continue;
+      const rule = entry as { type?: unknown; proxy?: unknown };
+      const proxy = typeof rule.proxy === "string" ? rule.proxy : "";
+      if (proxy === "") continue;
+      targets.set(proxy, (targets.get(proxy) ?? 0) + 1);
+      // `MATCH` 是兜底规则 —— mihomo 报成 "Match"，原版 Clash 报 "MATCH"。
+      if (typeof rule.type === "string" && rule.type.toLowerCase() === "match") {
+        fallback = proxy;
+      }
+    }
+    return { targets, fallback };
+  }
+
   /** 枚举全部 selector 分组。 */
   async selectors(): Promise<SelectorGroup[]> {
     const body = await this.#json("proxies");

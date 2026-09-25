@@ -120,6 +120,22 @@ async function startFakeClash(opts: {
   socksPort?: number;
   selectors?: Record<string, string[]>;
   nodes?: string[];
+  /**
+   * `/rules` 的目标分组（缺口 #22 的判据）。
+   *
+   * `undefined` = 不提供 `/rules`（旧内核形态）→ setup 退回按名字降级。
+   * 给了就形如 `{ MATCH: "Proxy", Domain: ["DIRECT", "Proxy"] }` ——
+   * 这里简化成"兜底目标 + 其余出现过的目标"。
+   */
+  rules?: { fallback: string; others?: string[] };
+  /**
+   * `true` = `/configs` 返 404（读不到选路模式）。
+   *
+   * doctor 此时按 `rule` 处理，那是**保守**的一侧 —— 误判成 rule 最坏只是
+   * 多一条可核对的警告，误判成 global 会漏掉「切了不生效」的真故障。
+   * 而那条默认值只有在 `/configs` 不可读时才走到，所以要能造出这个形态。
+   */
+  noConfigs?: boolean;
 }): Promise<void> {
   const secret = opts.secret ?? "";
   const nodes = opts.nodes ?? ["节点A", "节点B"];
@@ -139,11 +155,28 @@ async function startFakeClash(opts: {
 
     if (url.pathname === "/version") return json({ version: "v1.19.31", meta: true });
     if (url.pathname === "/configs") {
+      if (opts.noConfigs === true) {
+        res.writeHead(404);
+        res.end();
+        return;
+      }
       const body: Record<string, unknown> = { mode: opts.mode ?? "rule" };
       if (opts.mixedPort !== null) body["mixed-port"] = opts.mixedPort ?? 7897;
       else body["mixed-port"] = 0;
       if (opts.socksPort !== undefined) body["socks-port"] = opts.socksPort;
       return json(body);
+    }
+    if (url.pathname === "/rules") {
+      if (opts.rules === undefined) {
+        res.writeHead(404);
+        res.end();
+        return;
+      }
+      const rules: Array<{ type: string; proxy: string }> = [];
+      for (const other of opts.rules.others ?? []) rules.push({ type: "Domain", proxy: other });
+      // mihomo 报 "Match"（首字母大写）—— 归一化在生产代码里。
+      rules.push({ type: "Match", proxy: opts.rules.fallback });
+      return json({ rules });
     }
     if (url.pathname === "/proxies") {
       const proxies: Record<string, unknown> = {};
@@ -559,6 +592,192 @@ describe("setup 对 GLOBAL 分组的处置", () => {
 
     expect(after.clash.bridges[0]!.selectorGroup).toBe("Proxy");
   });
+
+  it("**按规则的实际目标选分组** —— 名字启发式会选错的那个形态（缺口 #22）", async () => {
+    /*
+     * 先前的判据是**名字**：rule 模式下把叫 `GLOBAL` 的降级。
+     * 登记时就写明了它的漏洞：一个名字不叫 GLOBAL 却同样不参与选路的分组
+     * 仍会被选中。
+     *
+     * 这里构造正是那个形态：两个分组 `Airport`（节点多）与 `Proxy`（节点少），
+     * 都不叫 GLOBAL，而规则的兜底目标是 **`Proxy`**。
+     * 按名字＋节点数会选 `Airport`（69 > 2，且字母序也在前）——
+     * 而切它什么都不会改变，因为规则从不把流量导向它。
+     *
+     * 真实判据来自 `/rules`：实测本机 556 条规则里 `Proxy` 382 条、
+     * `GLOBAL` 零条，而 MATCH 指向 `Proxy`。
+     */
+    const many = Array.from({ length: 69 }, (_, i) => `节点${i}`);
+    await startFakeClash({
+      mode: "rule",
+      nodes: many,
+      selectors: { Airport: many, Proxy: many.slice(0, 2) },
+      // 规则只把流量导向 Proxy —— Airport 从不出现。
+      rules: { fallback: "Proxy", others: ["DIRECT"] },
+    });
+    await writeConfig();
+
+    const result = await run(SETUP, ["--api", fakeApi()]);
+
+    expect(result.code).toBe(0);
+    // 选了规则实际导向的那个，而不是节点更多、名字更靠前的那个。
+    expect(result.stdout).toContain("分组「Proxy」");
+    expect(result.stdout).not.toContain("分组「Airport」");
+  }, 40_000);
+
+  it("**兜底(MATCH)目标优先于只承载部分规则的分组** —— 转发到上游走的是兜底那条", async () => {
+    /*
+     * 上一条区分的是「在规则里」与「不在规则里」。这一条区分更细的一档：
+     * 两个分组**都**出现在规则里，只有一个是兜底（`MATCH`）目标。
+     *
+     * 为什么兜底更优先：转发到 `opencode.ai` 时命中的是兜底那条规则
+     * —— 一条 MATCH 覆盖所有没被前面规则匹配掉的域名。一个只承载
+     * 「某几个国内域名走它」的分组即使规则条数更多，也不是上游流量实际
+     * 走的那个。这正是缺口 #4（探测目标与转发目标不同域）的核心。
+     *
+     * 构造：`Partial` 节点更多（按节点数会选它）且承载一条规则，
+     * 而兜底指向节点更少的 `Fallback`。少了 rank 0 这一档，两者都是
+     * 「在规则里」，于是节点数决定胜负 —— 选错。
+     */
+    const many = Array.from({ length: 69 }, (_, i) => `节点${i}`);
+    await startFakeClash({
+      mode: "rule",
+      nodes: many,
+      selectors: { Partial: many, Fallback: many.slice(0, 2) },
+      // 两个分组都在规则里，但兜底是 Fallback。
+      rules: { fallback: "Fallback", others: ["Partial", "DIRECT"] },
+    });
+    await writeConfig();
+
+    const result = await run(SETUP, ["--api", fakeApi()]);
+
+    expect(result.code).toBe(0);
+    expect(result.stdout).toContain("分组「Fallback」");
+    expect(result.stdout).not.toContain("分组「Partial」");
+  }, 40_000);
+
+  it("**doctor 报出「选中的分组不参与选路」**（缺口 #22/#4）", async () => {
+    /*
+     * 这是那个"不报任何错"的故障：控制面通、切换返回 204、探测也能拿到 IP，
+     * 只是每个 Worker 拿到**同一个** IP。先前只有 `--deep` 的隔离报告会发现它，
+     * 而那需要用户想到去跑。
+     *
+     * 现在 doctor 第 5 层直接查 `/rules`：选中的分组若不出现在任何规则里，
+     * 就报 warn 并说清后果。实测本机 `GLOBAL` 正是零条规则。
+     */
+    const nodes = ["节点A", "节点B"];
+    await startFakeClash({
+      mode: "rule",
+      nodes,
+      selectors: { GLOBAL: nodes, Proxy: nodes },
+      // 规则只导向 Proxy —— GLOBAL 零条。
+      rules: { fallback: "Proxy", others: ["DIRECT"] },
+    });
+    // 配置**刻意**指向 GLOBAL（用户手改、或旧版 setup 选的）。
+    await writeConfig({
+      workers: [{ id: "w1", kind: "authenticated", apiKey: "fake-key-not-real", proxyId: "p1" }],
+      proxies: [
+        {
+          id: "p1", name: "桥接节点", type: "anytls", host: "127.0.0.1", port: 7897,
+          source: "controller", bridgeId: "b1", clashNodeName: "节点A",
+          direct: false, bridgeable: true, egressIp: null,
+        },
+      ],
+      clash: {
+        enabled: true,
+        selectionMode: "manual",
+        activeBridgeId: "b1",
+        bridges: [
+          {
+            id: "b1", name: "假内核", apiBase: fakeApi(), apiSecret: "",
+            localProxyPort: 7897, selectorGroup: "GLOBAL",
+          },
+        ],
+      },
+    });
+    await startServer();
+
+    const result = await run(DOCTOR);
+
+    expect(result.stdout).toContain("── 5. Clash 控制面 ──");
+    expect(result.stdout).toContain("不出现在任何路由规则里");
+    // 要说清后果 —— 否则用户不知道这条警告为什么要紧。
+    expect(result.stdout).toContain("共用同一个公网 IP");
+    /*
+     * 这一层的**状态**也必须升到 warn，不只是详情里多几行字。
+     *
+     * 状态决定行首标记（`!` 对 `✓`）与结尾汇总是否列出这一条。少了提升，
+     * doctor 会一边在第 5 层印出「共用同一个公网 IP」、一边把那一层标成
+     * 通过 —— 一条自相矛盾的输出比没有输出更糟。
+     *
+     * 断言查的是行首标记而不是结尾的「N 条告警」：这个形态下第 6 层
+     * （真上游目录）必然失败，doctor 就此 break，永远走不到结尾汇总。
+     */
+    expect(result.stdout).toMatch(/! 1\/1 个 Clash 内核可连通/);
+    expect(result.stdout).not.toMatch(/✓ 1\/1 个 Clash 内核可连通/);
+  }, 40_000);
+
+  it("读不到选路模式时**仍然检查**（默认按 rule，保守的那一侧）", async () => {
+    /*
+     * `/configs` 不可读时 doctor 把 mode 当 `rule` —— 那是内核默认值，
+     * 也是保守的一侧。默认成 `global` 会跳过整项检查，于是
+     * 「切了不生效」这个本来就不报错的故障彻底静默。
+     *
+     * 这条形态是那行默认值的**唯一**触发路径：其余用例的假内核都供着
+     * `/configs`，所以把 `?? "rule"` 改成 `?? "global"` 在它们眼里毫无差别。
+     */
+    const nodes = ["节点A", "节点B"];
+    await startFakeClash({
+      noConfigs: true,
+      nodes,
+      selectors: { GLOBAL: nodes, Proxy: nodes },
+      rules: { fallback: "Proxy", others: ["DIRECT"] },
+    });
+    await writeConfig({
+      workers: [{ id: "w1", kind: "authenticated", apiKey: "fake-key-not-real", proxyId: "p1" }],
+      proxies: [
+        {
+          id: "p1", name: "桥接节点", type: "anytls", host: "127.0.0.1", port: 7897,
+          source: "controller", bridgeId: "b1", clashNodeName: "节点A",
+          direct: false, bridgeable: true, egressIp: null,
+        },
+      ],
+      clash: {
+        enabled: true,
+        selectionMode: "manual",
+        activeBridgeId: "b1",
+        bridges: [
+          {
+            id: "b1", name: "假内核", apiBase: fakeApi(), apiSecret: "",
+            localProxyPort: 7897, selectorGroup: "GLOBAL",
+          },
+        ],
+      },
+    });
+    await startServer();
+
+    const result = await run(DOCTOR);
+
+    expect(result.stdout).toContain("不出现在任何路由规则里");
+    // 同上：查行首标记，不查结尾汇总（第 6 层会先失败并 break）。
+    expect(result.stdout).toMatch(/! 1\/1 个 Clash 内核可连通/);
+  }, 40_000);
+
+  it("拿不到 `/rules` 时退回按名字降级 —— 降级而不是失败", async () => {
+    /*
+     * 旧内核可能没有 `/rules` 端点。那时启发式对最常见的形态仍然有效
+     * （本机 GLOBAL 与 Proxy 节点数相同），所以退回它而不是放弃配置。
+     */
+    const nodes = ["节点A", "节点B"];
+    // 不给 rules → 假 Clash 对 /rules 返 404。
+    await startFakeClash({ mode: "rule", nodes, selectors: { GLOBAL: nodes, Proxy: nodes } });
+    await writeConfig();
+
+    const result = await run(SETUP, ["--api", fakeApi()]);
+
+    expect(result.code).toBe(0);
+    expect(result.stdout).toContain("分组「Proxy」");
+  }, 40_000);
 
   it("global 模式下 GLOBAL 不再被降级", async () => {
     await writeConfig();

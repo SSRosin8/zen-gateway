@@ -1,7 +1,11 @@
 import { describe, expect, it } from "vitest";
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
 import { judgeFree, surfacesFor } from "../../src/core/models/free.ts";
 import { upstreamUrl } from "../../src/core/upstream/url.ts";
 import { ModelRulesSchema } from "../../src/shared/schema.ts";
+
+const ROOT = new URL("../..", import.meta.url).pathname;
 
 /** 出厂默认规则。用 prefault({}) 让内层默认值真的生效（见 schema 的说明）。 */
 const defaults = ModelRulesSchema.parse({});
@@ -210,6 +214,53 @@ describe("协议面覆写", () => {
   it("覆写不影响其他模型", () => {
     const r = rules({ surfaceOverrides: { "big-pickle": ["messages"] } });
     expect(surfacesFor("other-free", r)).toEqual(r.defaultSurfaces);
+  });
+
+  /*
+   * 语义定案的关卡（缺口 #10）：`surfaces` 是**展示用的提示，不是放行闸门**。
+   *
+   * 定案依据是已有的测量（上游不按模型区分面）加一条后果（默认值
+   * `["chat","responses"]` 当闸门会拒掉所有 `/v1/messages`，而那个面是可用的）。
+   * 但"它没有被当闸门用"这个性质写在注释里必然漂 —— 下一个人看到
+   * `surfacesFor()` 就在手边，很自然会在转发路径上加一句"这个模型不支持这个面"。
+   *
+   * 所以守它的只能是调用点本身（纪律 #4）。转发路径 = 协议面实现与中继，
+   * 它们**不得**读这三个符号中的任何一个。
+   */
+  it("**转发路径不读 surfaces** —— 它是展示用的，接成闸门会拒掉可用的 /v1/messages", () => {
+    const relayPaths = [
+      "src/server/routes/relay.ts",
+      "src/core/protocols/chat.ts",
+      "src/core/protocols/responses.ts",
+      "src/core/protocols/messages.ts",
+      "src/core/protocols/registry.ts",
+    ];
+    const forbidden = ["surfacesFor", "defaultSurfaces", "surfaceOverrides"];
+
+    let scanned = 0;
+    const offenders: string[] = [];
+    for (const rel of relayPaths) {
+      const text = readFileSync(join(ROOT, rel), "utf8");
+      for (const symbol of forbidden) {
+        if (text.includes(symbol)) offenders.push(`${rel} 提到了 ${symbol}`);
+      }
+      // 算在读完之后 —— 放在循环开头的话 `continue` 也能让计数对上而检查没做。
+      scanned += 1;
+    }
+
+    // 关卡自己不能是空的：路径写错、文件改名都会让上面那个循环什么都没查。
+    expect(scanned).toBe(relayPaths.length);
+    expect(offenders).toEqual([]);
+  });
+
+  it("关卡扫的文件真的存在且非空 —— 否则上一条是在空字符串上通过的", () => {
+    /*
+     * `readFileSync` 对不存在的路径会抛，所以上一条不会静默空过。但文件被
+     * 改名后这里会先炸出明确的信号，而不是让那条断言在别的文件上空转。
+     */
+    for (const rel of ["src/server/routes/relay.ts", "src/core/protocols/chat.ts"]) {
+      expect(readFileSync(join(ROOT, rel), "utf8").length).toBeGreaterThan(500);
+    }
   });
 });
 

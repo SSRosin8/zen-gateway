@@ -262,9 +262,31 @@ export const ModelRulesSchema = z.strictObject({
    * 只有 `jev-1.13-free` 才免费。它不能进这份名单。
    */
   extraFreeIds: z.array(z.string().min(1).max(128)).max(256).default(["big-pickle"]),
-  /** 默认支持的协议面。 */
+  /**
+   * 默认声明支持的协议面。
+   *
+   * ## 语义已定：**后台展示用的提示，不是放行闸门**（缺口 #10，第九轮定案）
+   *
+   * 这个字段登记了三个阶段"语义未定"。现在按已有的测量定下来：
+   *
+   * - **上游不按模型区分面** —— 实测三个面（`chat`/`responses`/`messages`）
+   *   对同一个免费模型都通。所以"这个模型支持哪些面"在上游那边不存在，
+   *   拿它当闸门缺乏依据。
+   * - **接成闸门会立刻打坏一个能用的功能**：默认值是 `["chat","responses"]`，
+   *   按它放行则默认配置下**所有**模型的 `/v1/messages` 请求都被拒 ——
+   *   而那个面 Phase 6 刚验证可用。
+   *
+   * 所以它的唯一用途是 Models 页显示"本网关声明支持哪些面"，
+   * 由 `surfacesFor()` 读取。**流式能力那种真正的放行判定在
+   * `ProtocolSurface.streaming` 上**（那是协议面接口的能力位，
+   * 由 `relay.ts` 第 4 步统一执行）—— 两者不要混。
+   *
+   * 要真做成 per-model 闸门的话，前提是先有证据表明上游**确实**按模型区分面，
+   * 而那需要一个能区分「上游拒绝」与「网关拒绝」的探测（`discover:upstream`
+   * 那类脚本）。在那之前，把它接成闸门就是拿一个编出来的约束去拒真实请求。
+   */
   defaultSurfaces: z.array(ProtocolIdSchema).min(1).default(["chat", "responses"]),
-  /** 按模型覆写协议面。 */
+  /** 按模型覆写协议面。同样**只作展示** —— 见 `defaultSurfaces`。 */
   surfaceOverrides: z
     .record(z.string().min(1).max(128), z.array(ProtocolIdSchema))
     // 与其他集合一样设上限:配置文件是手工可编辑的,无界 record 会让

@@ -790,3 +790,47 @@ describe("refreshIfStale —— 后台刷新与失败退避", () => {
     }
   });
 });
+
+/* ================================================================== *
+ * 体积上限（缺口 #7）
+ * ================================================================== */
+
+describe("目录响应的体积上限", () => {
+  it("**单条目但体积巨大**的响应不被采纳 —— 条目数闸门挡不住它", async () => {
+    /*
+     * `MAX_CATALOG_ENTRIES` 的闸门在 `parseCatalog` 里，也就是把整个体读进内存
+     * **之后**。实测过：一个单条目、40 MiB 的响应能通过条目数那一层。
+     * 条目数与体积是两回事 —— 一个条目的字段可以任意大。
+     *
+     * 这里用 9 MiB（上限 8 MiB）的单条目响应，比 40 MiB 快得多而性质相同。
+     */
+    const huge = "x".repeat(9 * 1024 * 1024);
+    const body = JSON.stringify({ object: "list", data: [{ id: "m1", description: huge }] });
+    const oversized = new UndiciResponse(body, {
+      status: 200,
+      headers: { "content-type": "application/json" },
+    });
+
+    const cfg = workerConfig(["w1"]);
+    const id = catalogIdentityOf(cfg);
+    const cat = new ModelCatalog();
+    const f = fakeDeps([oversized]);
+
+    // 不采纳 —— 与"校验没过"同一个结局（返回 null，保留旧缓存）。
+    expect(await cat.ensure(id, cfg, f.upstreamOf)).toBeNull();
+    expect(cat.cached("keyed")).toBeNull();
+  });
+
+  it("正常大小的响应照常采纳 —— 上限不是把一切都挡掉", async () => {
+    /*
+     * 这条与上一条配对：少了它，一个"永远返回 null"的实现也能让上一条通过。
+     */
+    const cfg = workerConfig(["w1"]);
+    const id = catalogIdentityOf(cfg);
+    const cat = new ModelCatalog();
+    const f = fakeDeps([catalogResponse(["a", "b"])]);
+
+    const snapshot = await cat.ensure(id, cfg, f.upstreamOf);
+    expect(snapshot?.ids).toEqual(new Set(["a", "b"]));
+  });
+});
