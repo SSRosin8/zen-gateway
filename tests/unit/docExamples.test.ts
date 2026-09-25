@@ -60,13 +60,46 @@ function jsoncBlocks(markdown: string): string[] {
   return [...markdown.matchAll(/```jsonc\n([\s\S]*?)```/g)].map((m) => m[1]!);
 }
 
-/** 只取网关自己的 config 示例:以 `{` 开头且含顶层 `version` 或 `workers`。 */
-function gatewayConfigBlocks(blocks: string[]): string[] {
-  return blocks.filter((b) => {
-    const body = stripJsoncComments(b).trim();
-    if (!body.startsWith("{")) return false;
-    return /"version"\s*:/.test(body) || /"workers"\s*:/.test(body);
-  });
+/**
+ * 只取**网关自己的** config 示例 —— 不是 `opencode.json`（那是客户端配置）。
+ *
+ * ## 判据：顶层键落在 `ConfigSchema` 的已知键集合里
+ *
+ * 先前的判据是「以 `{` 开头且含顶层 `version` 或 `workers`」，于是
+ * `"subscriptions": [...]` 这种**片段示例**被静默跳过（第十轮审核查出：
+ * 那个片段写错了没有任何东西会红）。片段不以 `{` 开头，而文档里用片段
+ * 举例是很自然的写法 —— 下一个片段仍会被漏掉。
+ *
+ * 现在按键名判：片段自动补成 `{ ... }` 再看它的顶层键是否全在
+ * `ConfigSchema` 的已知键里。这个集合从 schema 推导（纪律 #4），
+ * 所以加字段时自动跟上。
+ */
+const CONFIG_KEYS = new Set(Object.keys(ConfigSchema.shape));
+
+function gatewayConfigBlocks(blocks: string[]): Array<{ body: string; wasFragment: boolean }> {
+  const out: Array<{ body: string; wasFragment: boolean }> = [];
+  for (const b of blocks) {
+    const raw = stripJsoncComments(b).trim();
+    const wasFragment = !raw.startsWith("{");
+    // 片段补成对象再判 —— `"subscriptions": [...]` → `{"subscriptions": [...]}`。
+    const body = wasFragment ? `{${raw.replace(/,\s*$/, "")}}` : raw;
+
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(body);
+    } catch {
+      continue; // 不是合法 JSON 的块（伪代码、片段的片段）不在本关卡范围内。
+    }
+    if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) continue;
+
+    const keys = Object.keys(parsed);
+    if (keys.length === 0) continue;
+    // 全部顶层键都是 Config 的键 —— 排除 `opencode.json`（`$schema`/`provider`）。
+    if (!keys.every((k) => CONFIG_KEYS.has(k))) continue;
+
+    out.push({ body, wasFragment });
+  }
+  return out;
 }
 
 describe("docs/usage.md 的配置示例", () => {
@@ -78,22 +111,27 @@ describe("docs/usage.md 的配置示例", () => {
      * 这条断言存在的理由:如果正则哪天匹配不到任何东西(文档改了围栏语言、
      * 示例被挪走),下面那条 `for...of` 会**零次循环然后通过**,
      * 于是整个关卡静默失效。空输入集是变异存活的第三类,必须显式排除。
+     *
+     * **下界必须贴着实际块数**（第十轮审核）：先前写 `>= 2` 而实际就是 2，
+     * 于是再漏一个也不会红 —— 一个"恰好等于实际值"的下界等于没有下界。
+     * 本机实测 3 个（主配置、出口绑定、subscriptions 片段）。
      */
-    expect(blocks.length).toBeGreaterThanOrEqual(2);
+    expect(blocks.length).toBeGreaterThanOrEqual(3);
+  });
+
+  it("**片段示例也在检查范围内** —— 不以 `{` 开头的那些先前被静默跳过", () => {
+    /*
+     * `"subscriptions": [...]` 这类片段先前过不了「以 `{` 开头」那道判据，
+     * 于是它写错了没有任何东西会红。片段是文档里很自然的写法，
+     * 所以判据改成按顶层键名判（从 `ConfigSchema.shape` 推导）。
+     */
+    expect(blocks.some((b) => b.wasFragment), "一个片段示例都没匹配到？判据可能又收窄了").toBe(true);
   });
 
   it("每个示例都能通过 ConfigSchema —— 用户照抄不会启动失败", () => {
     for (const [index, block] of blocks.entries()) {
-      const body = stripJsoncComments(block);
-
-      let parsed: unknown;
-      try {
-        parsed = JSON.parse(body);
-      } catch (err) {
-        throw new Error(
-          `第 ${index + 1} 个 jsonc 示例不是合法 JSON(去注释后):${(err as Error).message}`,
-        );
-      }
+      // `gatewayConfigBlocks` 已经把片段补成对象并确认它是合法 JSON。
+      const parsed: unknown = JSON.parse(block.body);
 
       // 示例是**片段**,缺的必填项用最小合法值补齐 ——
       // 要检查的是示例写下的那些字段,不是它有没有写全。
@@ -127,7 +165,7 @@ describe("docs/usage.md 的配置示例", () => {
      * \"示例内部自洽\"再断言一次 —— 第六轮查出的正是这一类。
      */
     for (const [index, block] of blocks.entries()) {
-      const cfg = JSON.parse(stripJsoncComments(block)) as {
+      const cfg = JSON.parse(block.body) as {
         workers?: Array<{ id: string; proxyId?: string | null }>;
         proxies?: Array<{ id: string; bridgeId?: string }>;
         clash?: { activeBridgeId?: string | null; bridges?: Array<{ id: string }> };
