@@ -1,6 +1,7 @@
 import { serve } from "@hono/node-server";
-import { createApp } from "./app.ts";
-import { loadConfig } from "../store/config.ts";
+import { buildHealth, createApp } from "./app.ts";
+import { loadConfig, saveConfig } from "../store/config.ts";
+import type { Config } from "../shared/schema.ts";
 import { resolvePort } from "../store/port.ts";
 import { EgressService } from "../core/proxy/egress.ts";
 import { ModelCatalog, catalogIdentityOf } from "../core/models/catalog.ts";
@@ -20,7 +21,8 @@ import { safeErrorMessage } from "../shared/redact.ts";
  */
 
 async function main(): Promise<void> {
-  let config;
+  // 显式标注:`applyConfig` 会重新赋值它,而推断出的类型必须是 Config 而非 any。
+  let config: Config;
   let created = false;
   try {
     const loaded = await loadConfig();
@@ -153,6 +155,46 @@ async function main(): Promise<void> {
 
   const catalog = new ModelCatalog({ log: (message) => console.error(message) });
 
+  /*
+   * 配置热更新的**唯一**写入点（Phase 9，缺口 #1 到期）。
+   *
+   * `configOf()` 从 Phase 3 起就是函数，但先前没有任何东西会改它指向的对象 ——
+   * 所以它返回的恒是启动时那份，「热更新只有形状没有入口」。
+   *
+   * ## 顺序刻意是「先写盘，再换引用」
+   *
+   * 反过来的话，一次写盘失败（磁盘满、权限）会留下**内存已生效而磁盘是旧值**
+   * 的状态：界面显示改动生效了，而下次重启退回旧值。「一半生效」比「没生效」
+   * 难查得多 —— 用户会怀疑是自己改错了别的地方。
+   *
+   * ## 必须换一个**新对象**
+   *
+   * `Scheduler.#syncedFrom` 用**引用比较**判断「配置换了没有」（深比较一份含
+   * 512 个 Worker 的配置要跑在每个请求上）。原地改字段会让引用不变 →
+   * 调度器认为配置没换 → Worker 池不重新 sync → 改了配置下一个请求还在用旧的池，
+   * 而这个偏差**不报任何错**。`saveConfig` 返回的是 `ConfigSchema.parse` 的
+   * 结果（新对象），`applyConfigPatch` 也 `structuredClone` 过，两处都成立。
+   */
+  const applyConfig = async (next: Config): Promise<void> => {
+    await saveConfig(next);
+    config = next;
+    /*
+     * 出口缓存失效。
+     *
+     * `EgressService` 按 bridgeId 缓存 Controller 客户端、按节点名缓存
+     * dispatcher，而 `apiBase`/`apiSecret` 变了必须重建 —— 否则会继续连旧地址
+     * 或用旧凭证，症状是「密码明明改对了还是 401」。`reset()` 正是为此存在的
+     * （它的注释写着「配置变更后让缓存失效」），而在 Phase 9 之前
+     * **没有任何调用点**。
+     *
+     * 不 await 也不吞掉:它只关连接池,失败不影响配置已经生效这个事实,
+     * 但要能被看见。
+     */
+    egress.reset().catch((err) => {
+      console.error(`出口缓存重置失败(下次请求可能仍用旧连接):${safeErrorMessage(err)}`);
+    });
+  };
+
   const app = createApp({
     configOf: () => config,
     egress,
@@ -161,6 +203,24 @@ async function main(): Promise<void> {
     ...(stats !== undefined ? { stats } : {}),
     storeWriteFailures,
     log: (message) => console.error(message),
+    admin: {
+      configOf: () => config,
+      applyConfig,
+      runtimeWorkers: () => scheduler.runtimeWorkers(config, Date.now()),
+      catalog,
+      // 与转发面同一个实例 —— 两套 dispatcher 池/selector 锁会让探测量到的出口
+      // 不是转发实际用的那个(不变量 #7 的延伸)。
+      egress,
+      /*
+       * `/health` 的体从同一处构造 —— 不在两个地方各拼一份。
+       *
+       * 两份会分叉（纪律 #4），而分叉方向是漏：加一个字段时 `/api/overview`
+       * 里那份不会更新，于是管理面显示的健康信息比 `/health` 旧一个版本。
+       */
+      health: () => buildHealth(storeWriteFailures()),
+      ...(stats !== undefined ? { stats } : {}),
+      log: (message) => console.error(message),
+    },
   });
 
   /*

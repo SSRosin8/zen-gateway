@@ -9,12 +9,34 @@ import { EgressService } from "../core/proxy/egress.ts";
 import { Scheduler } from "../core/routing/scheduler.ts";
 import { ModelCatalog } from "../core/models/catalog.ts";
 import { relayAuth } from "./middleware/relayAuth.ts";
-import { loopbackOnly } from "./middleware/loopbackOnly.ts";
+import { isLoopbackGuard, loopbackOnly } from "./middleware/loopbackOnly.ts";
 import { createRelayRoutes, type StatsSink } from "./routes/relay.ts";
 import { createModelsRoutes } from "./routes/models.ts";
+import { createAdminRoutes, type AdminDeps } from "./routes/admin.ts";
 
 const STARTED_AT = Date.now();
 export const VERSION = "0.1.0";
+
+/**
+ * 健康体的**唯一**构造点。
+ *
+ * `/health` 与 `/api/overview` 都要它，而两处各拼一份会分叉（纪律 #4）——
+ * 分叉方向是漏：加一个字段时管理面那份不会更新，于是后台显示的健康信息
+ * 比 `/health` 旧一个版本，而那种偏差没有任何症状。
+ *
+ * 走一遍 schema：契约变了这里立刻 typecheck 失败，而不是让 admin 在运行期发现。
+ */
+export function buildHealth(storeWriteFailures: number) {
+  return HealthSchema.parse({
+    ok: true,
+    version: VERSION,
+    uptimeSeconds: Math.floor((Date.now() - STARTED_AT) / 1000),
+    // service.mjs 靠这个验明进程身份,决定能否安全发送 SIGTERM。
+    pid: process.pid,
+    // 非 0 说明统计库有问题，报表数字不可信 —— 见 contract 里的说明。
+    storeWriteFailures,
+  });
+}
 
 /**
  * 应用装配。
@@ -93,24 +115,37 @@ export type AppDeps = {
    * （`affinityStore` 被塞进 `Scheduler` 后拿不出来）。不传则报 0。
    */
   readonly storeWriteFailures?: () => number;
+  /**
+   * 管理 API（Phase 9）。不传则 `/api` 只有 `/ping`。
+   *
+   * 与 `stats` 同理**不在这里兜底造一个**：它需要配置写入能力与调度器的
+   * 运行期状态，而「装配层顺手造一个写盘函数」会让每个测试都能改真实配置。
+   * 由 `index.ts` 显式注入。
+   */
+  readonly admin?: AdminDeps;
+  /**
+   * 覆盖「对端地址怎么取」—— **仅供测试**。
+   *
+   * 生产路径走 `getConnInfo(c).remote.address`（内核报告的 TCP 对端地址，
+   * 唯一可信的来源证据）。但集成测试需要驱动真实装配下的管理 API，
+   * 而 `app.request()` 起不了真 socket，`getConnInfo` 因此拿不到地址 →
+   * 一律判否（默认拒绝）→ 所有管理端点在测试里恒为 403，**整套 API
+   * 无从验证**。
+   *
+   * 这不是给生产开的后门:`loopbackOnly` 的默认实现没变,注入点在装配层,
+   * 而 `index.ts` 从不传它。第四轮审核查出过一个反例(回环测试注入
+   * `addressOf` 而被替换掉的**正是**要测的那段),所以这里要说清分工:
+   * 判定逻辑(`isLoopbackAddress`，含 IPv4-mapped IPv6 与 `127.0.0.0/8`)
+   * 由 `tests/unit/middleware.test.ts` 用真实实现穷举验证;
+   * 本注入只替换「地址从哪来」,不替换「怎么判断」。
+   */
+  readonly addressOf?: (c: import("hono").Context) => string | undefined;
 };
 
 export function createApp(deps?: AppDeps): Hono {
   const app = new Hono();
 
-  app.get("/health", (c) => {
-    // 走一遍 schema：契约变了这里立刻 typecheck 失败,而不是让 admin 在运行期发现。
-    const body = HealthSchema.parse({
-      ok: true,
-      version: VERSION,
-      uptimeSeconds: Math.floor((Date.now() - STARTED_AT) / 1000),
-      // service.mjs 靠这个验明进程身份,决定能否安全发送 SIGTERM。
-      pid: process.pid,
-      // 非 0 说明统计库有问题，报表数字不可信 —— 见 contract 里的说明。
-      storeWriteFailures: deps?.storeWriteFailures?.() ?? 0,
-    });
-    return c.json(body);
-  });
+  app.get("/health", (c) => c.json(buildHealth(deps?.storeWriteFailures?.() ?? 0)));
 
   /*
    * 没有依赖时只提供 /health。
@@ -191,16 +226,26 @@ export function createApp(deps?: AppDeps): Hono {
   /*
    * 管理面:仅回环。
    *
-   * Phase 9 才有真正的管理 API,这里先把闸门装上并挂一个探针端点 ——
-   * 好让「管理面仅回环」这条安全要求从现在起就有测试守着,
-   * 而不是等到 Phase 9 再补(那时它会变成一条容易被漏掉的待办)。
+   * Phase 9 起这里有真正的管理 API（`/api/overview`、`/api/stats`、
+   * `PATCH /api/config`）。`/ping` 保留 —— 它是「管理面仅回环」这条约束
+   * 最小的验证目标，且 `assertEveryRouteGuarded` 的变异测试依赖它。
+   *
+   * `loopbackOnly` 挂在 `/*` 上:管理面**任何**路由都不该接受远端,
+   * 所以这里用通配是对的 —— 与转发面相反(那里通配会漏,因为覆盖范围
+   * 与注册表无关)。差别在于:管理面的规则是「全部」,转发面的规则是
+   * 「注册表里那些」,而只有后者需要从真相推导。
    */
   const admin = new Hono();
-  admin.use("/*", loopbackOnly());
-  admin.get("/ping", (c) => c.json({ ok: true }));
+  admin.use("/*", loopbackOnly(deps.addressOf !== undefined ? { addressOf: deps.addressOf } : {}));
+  if (deps.admin !== undefined) {
+    admin.route("/", createAdminRoutes(deps.admin));
+  } else {
+    admin.get("/ping", (c) => c.json({ ok: true }));
+  }
   app.route("/api", admin);
 
   assertEveryRouteGuarded(app);
+  assertAdminRoutesLoopbackOnly(app);
 
   return app;
 }
@@ -248,6 +293,50 @@ function assertEveryRouteGuarded(app: Hono): void {
       `装配错误:以下路由没有任何守卫中间件覆盖,会对本机所有进程开放:\n` +
         unguarded.map((r) => `  - ${r}`).join("\n") +
         `\n若某条路由确实应当免鉴权,请显式加入 assertEveryRouteGuarded 的 EXEMPT 并说明理由。`,
+    );
+  }
+}
+
+/**
+ * 启动期断言:`/api/*` 下的每条路由都被 **loopbackOnly** 覆盖。
+ *
+ * ## 为什么上面那条断言不够（缺口 #8 到期）
+ *
+ * `assertEveryRouteGuarded` 只检查「有没有守卫」，不检查「是哪个」——
+ * 一条只挂了 `relayAuth` 而没挂 `loopbackOnly` 的管理路由能通过它。
+ * 第四轮审核查出的那个缺陷（无前缀别名绕过鉴权）的变体就是这个形态，
+ * 而 Phase 9 加管理 API 正是它变成活缺陷的时刻：管理面不设 Relay Token
+ * （那是转发面的凭证），它唯一的保护就是「仅本机」。
+ *
+ * 判据用中间件的**身份**而不是路径形状：`loopbackOnly()` 返回的处理器带
+ * 一个标记（见那个文件），据此可以区分它与其他中间件。只比路径的话，
+ * 「`/api/*` 上挂了某个中间件」并不能说明挂的是回环闸门。
+ *
+ * 构造期抛错 —— 服务起不来远好于管理面静默对外开放。
+ */
+function assertAdminRoutesLoopbackOnly(app: Hono): void {
+  const loopbackPaths = app.routes
+    .filter((r) => r.method === "ALL" && isLoopbackGuard(r.handler))
+    .map((r) => r.path);
+
+  const unprotected: string[] = [];
+  for (const route of app.routes) {
+    if (route.method === "ALL") continue;
+    if (!route.path.startsWith("/api")) continue;
+
+    const covered = loopbackPaths.some((mw) => {
+      if (mw === route.path) return true;
+      if (mw.endsWith("/*")) return route.path.startsWith(mw.slice(0, -1));
+      return false;
+    });
+    if (!covered) unprotected.push(`${route.method} ${route.path}`);
+  }
+
+  if (unprotected.length > 0) {
+    throw new Error(
+      `装配错误:以下管理路由没有被 loopbackOnly 覆盖,会接受远端请求:\n` +
+        unprotected.map((r) => `  - ${r}`).join("\n") +
+        `\n管理面不设 Relay Token,「仅本机」是它唯一的保护。`,
     );
   }
 }
