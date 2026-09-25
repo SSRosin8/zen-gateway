@@ -67,11 +67,12 @@ export function workerStatus(w: WorkerView): {
   /*
    * 启用了但没 key —— 必须与「已停用」分开。
    *
-   * `isUsable()` 除了 enabled 还要求 apiKey 非空(免 key 通道已被上游关闭,
-   * 没有 key 的 Worker 发出去必定 403)。合成一类的话,用户会看到 enabled
-   * 为真却发现它从不被选中,而界面上没有任何线索。
+   * `isUsable()` 对认证 Worker 要求 apiKey 非空，对匿名 Worker 允许免 key。
+   * 这里按 kind 判断，避免把合法的匿名 Worker 误报成缺少凭证。
    */
-  if (!w.apiKey.present) return { tone: "error", icon: "✕", label: "缺少 API key" };
+  if (w.kind === "authenticated" && !w.apiKey.present) {
+    return { tone: "error", icon: "✕", label: "缺少 API key" };
+  }
   if (!w.inPool) return { tone: "error", icon: "✕", label: "不在候选池" };
   if (!w.ready) {
     const why = w.lastFailure === null ? "" : `（${w.lastFailure}）`;

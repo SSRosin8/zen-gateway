@@ -49,6 +49,8 @@ export type ProtocolSurface = {
    * 其余面返回 undefined,由 header 里的 `x-opencode-session` 承担。
    */
   sessionKeyFrom(body: unknown): string | undefined;
+  /** 从完整响应或 SSE 事件中读取可用于 Responses 续链的响应 id。 */
+  responseIdFrom?(payload: unknown): string | null;
   /**
    * 该面特有的上游请求头。
    *

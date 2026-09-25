@@ -52,6 +52,7 @@ export type UpstreamRequest = {
   readonly body: Uint8Array | null;
   /** 绑定的出口代理 id;null 表示本机直连出口。 */
   readonly proxyId: string | null;
+  readonly signal?: AbortSignal;
 };
 
 export type UpstreamDeps = {
@@ -87,13 +88,6 @@ export async function fetchUpstream(
   }
   const target = resolved.target;
 
-  let dispatcher: Dispatcher;
-  try {
-    dispatcher = deps.dispatchers.get(target);
-  } catch (err) {
-    throw new EgressSetupError(err instanceof Error ? err.message : "无法建立出口");
-  }
-
   const init: UndiciRequestInit = {
     method: req.method,
     headers: { ...req.headers },
@@ -105,13 +99,27 @@ export async function fetchUpstream(
      * 就此变成凭证窃取原语。`manual` 让 3xx 原样返回给调用方处理。
      */
     redirect: "manual",
-    dispatcher,
+    ...(req.signal !== undefined ? { signal: req.signal } : {}),
   };
   // 有体才设 body:GET/HEAD 带 body 会被 fetch 拒绝。
   if (req.body !== null) init.body = req.body;
 
+  // 在真正发出请求的同步片段里取池，尤其不能把 dispatcher 留在 selector
+  // 排队或 select() 的 await 之前：期间热更新会优雅关闭那个旧实例。
+  const dispatch = (): Promise<UndiciResponse> => {
+    req.signal?.throwIfAborted();
+    let dispatcher: Dispatcher;
+    try {
+      dispatcher = deps.dispatchers.get(target);
+    } catch (err) {
+      throw new EgressSetupError(err instanceof Error ? err.message : "无法建立出口");
+    }
+    return doFetch(req.url, { ...init, dispatcher });
+  };
+
+
   if (target.mode !== "bridge") {
-    return doFetch(req.url, init);
+    return dispatch();
   }
 
   const controller = deps.controllerFor(target.bridge.bridgeId);
@@ -154,6 +162,9 @@ export async function fetchUpstream(
         err instanceof Error ? err.message : "切换 Clash 出站节点失败",
       );
     }
-    return doFetch(req.url, init);
-  });
+    if (req.signal?.aborted) {
+      throw req.signal.reason ?? new DOMException("操作已取消", "AbortError");
+    }
+    return dispatch();
+  }, req.signal);
 }

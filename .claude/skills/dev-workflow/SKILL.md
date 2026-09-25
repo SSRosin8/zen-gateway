@@ -1,12 +1,23 @@
 ---
 name: dev-workflow
-description: Use when starting any code change in zen-gateway — feature, bug fix, refactor, or adding tests. Enforces the mutation-testing discipline, the "assertions must be able to fail" rule, and the verify-before-claiming rule. Trigger on 改、修、加、实现、重构、fix, add, implement, refactor, test.
+description: 开始功能开发、修复缺陷、重构、补充测试或更新文档时使用。要求先确认独立功能分支，再完成实现、文档校对、必要的变异验证和完整校验；验证通过后按用户授权提交或申请合入。适用于人与各类开发工具，不限定分支前缀、客户端或模型。
 ---
 
-# zen-gateway 开发流程
+# 开发流程
 
-本项目**不用 worktree、直接在 main 上提交**（私人自用工具，单人开发）。
-不用 worktree：它解决的是多人并行改同一仓库的隔离问题，单人单分支下只增加一层目录切换成本。
+本项目每次功能、修复、重构、测试或文档改动都必须在独立的功能分支上完成，不能直接在
+主分支上开发或提交。分支名遵循仓库现有约定并准确描述目的；开始工作前先确认
+当前分支不是主分支，必要时创建并切换功能分支。
+
+工作流程固定为：
+
+1. 新任务从更新后的主分支创建功能分支；继续已有任务时切回对应功能分支，保留未提交工作。
+2. 在功能分支上完成实现、测试、文档和变异验证。
+3. 运行完整的 `npm run validate`，确认 typecheck、双构建和全部测试都通过。
+4. 整理验证结果和变更范围，按授权本地提交；需要合入时，再申请 MR。
+
+未完成第 3 步前不得申请 MR；未得到明确指示前不提交、不推送、不合并。`validate`
+失败时先修复实现或断言，再重新跑完整关卡，不能用局部测试代替它。
 
 真正硬性的是下面这些，每一条都对应一个真实发生过的缺陷。
 
@@ -85,7 +96,7 @@ Phase 10 的例子：导入订阅节点时 schema 报
 ## 提交
 
 ```bash
-npm run validate   # typecheck(三份 tsconfig) + 双构建 + 全部测试
+npm run validate   # typecheck(server+admin+test) → 双构建 → 全部测试
 ```
 
 `build` 必须排在 `test` 之前 —— `service.test.ts` 要 spawn
@@ -99,8 +110,8 @@ npm run validate   # typecheck(三份 tsconfig) + 双构建 + 全部测试
 ## 不要做的事
 
 - **不要为了行数拆文件。** 本项目从未有过行数硬上限。
-  `relay.ts` 801 行，实测仍只有一个调用者 —— 决定不拆，直到出现真实的
-  第二调用者。判据是**当下可测的调用点数量**，不是对未来的推断（纪律 #11）。
+  `relay.ts` 是否需要拆分，要依据当下的职责边界与调用关系，
+  不能依据行数或对未来调用者的推断（纪律 #11）。
 - **不要给没有生产读者的成员补测试**假装它被用着。手写的
   "有没有读者"标注必然漂（实测一轮内漂了两处）—— 唯一真相是调用点本身。
 - **不要在 doctor 里重新实现任何判定逻辑。** 它是诊断工具，

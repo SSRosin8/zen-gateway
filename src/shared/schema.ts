@@ -250,7 +250,7 @@ export const WorkerSchema = z
     id: IdSchema,
     name: z.string().max(200).default(""),
     kind: WorkerKindSchema,
-    /** Zen API key。匿名 Worker 为空串。是凭证。 */
+    /** Zen API key。匿名 Worker 归一化为空串；认证 Worker 必须提供。是凭证。 */
     apiKey: SecretSchema.default(""),
     enabled: z.boolean().default(true),
     /** 绑定的出口代理 id；null 表示直连本机网络出口。 */
@@ -258,7 +258,16 @@ export const WorkerSchema = z
   })
   .refine((w) => w.kind === "anonymous" || w.apiKey.trim() !== "", {
     message: "登录态 Worker 必须有 apiKey",
-  });
+  })
+  .transform((w) =>
+    w.kind === "anonymous"
+      ? {
+          ...w,
+          // 匿名身份不携带认证凭证；这里是配置归一化的唯一入口。
+          apiKey: "",
+        }
+      : w,
+  );
 export type Worker = z.infer<typeof WorkerSchema>;
 
 /* ------------------------------------------------------------------ *

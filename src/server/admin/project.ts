@@ -73,9 +73,8 @@ export type RuntimeWorkerState = {
  *
  * ## `inPool` 与 `enabled` 必须分开显示
  *
- * `isUsable()` 除了 `enabled` 还要求 apiKey 非空（免 key 通道已被上游关闭）。
- * 合成一个字段的话，「启用了但没 key」会显示成启用，而用户会发现它从不被
- * 选中却找不到原因。
+ * `isUsable()` 对认证 Worker 要求 apiKey 非空，对匿名 Worker 允许免 key。
+ * 合成一个字段的话，匿名 Worker 的类型语义会被丢掉，用户无法区分两种候选。
  *
  * `runtime` 里查不到的 Worker（不在候选池里）—— `ready` 为 false 而不是
  * 「未知」：它确实不会被选中，这是个确定的事实，不是缺失信息。

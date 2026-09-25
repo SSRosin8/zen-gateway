@@ -182,9 +182,30 @@ async function main(): Promise<void> {
    * 而这个偏差**不报任何错**。`saveConfig` 返回的是 `ConfigSchema.parse` 的
    * 结果（新对象），`applyConfigPatch` 也 `structuredClone` 过，两处都成立。
    */
-  const applyConfig = async (next: Config): Promise<void> => {
-    await saveConfig(next);
-    config = next;
+  let configWrite: Promise<void> = Promise.resolve();
+  const applyConfig = async (next: Config, expected?: Config): Promise<void> => {
+    const run = configWrite.then(async () => {
+      if (expected !== undefined && config !== expected) {
+        throw new Error("配置已被另一项操作修改，请刷新页面后重试");
+      }
+      await saveConfig(next);
+      const timeoutsChanged =
+        next.gateway.headersTimeoutMs !== config.gateway.headersTimeoutMs ||
+        next.gateway.bodyTimeoutMs !== config.gateway.bodyTimeoutMs;
+      config = next;
+      if (timeoutsChanged) {
+        egress.updateTimeouts({
+          headersTimeoutMs: next.gateway.headersTimeoutMs,
+          bodyTimeoutMs: next.gateway.bodyTimeoutMs,
+        });
+      } else {
+        void egress.reset().catch((err) => {
+          console.error(`出口缓存重置失败(下次请求可能仍用旧连接):${safeErrorMessage(err)}`);
+        });
+      }
+    });
+    configWrite = run.catch(() => {});
+    await run;
     /*
      * 出口缓存失效。
      *
@@ -197,10 +218,21 @@ async function main(): Promise<void> {
      * 不 await 也不吞掉:它只关连接池,失败不影响配置已经生效这个事实,
      * 但要能被看见。
      */
-    egress.reset().catch((err) => {
-      console.error(`出口缓存重置失败(下次请求可能仍用旧连接):${safeErrorMessage(err)}`);
-    });
   };
+
+  /*
+   * 在装配管理 API 之前解析有效端口，让 Overview 与真正监听的端口共享同一
+   * 个值（包括 ZG_PORT 覆盖）。resolvePort 仍然在 loadConfig 之后调用，首启
+   * 默认配置已在那一步落盘。
+   */
+  let port: number;
+  try {
+    port = resolvePort();
+  } catch (err) {
+    console.error(err instanceof Error ? err.message : String(err));
+    process.exitCode = 1;
+    return;
+  }
 
   /*
    * 批量探测的执行器（Phase 9 批次 2）。
@@ -250,6 +282,7 @@ async function main(): Promise<void> {
     admin: {
       configOf: () => config,
       applyConfig,
+      effectivePort: () => port,
       runtimeWorkers: () => scheduler.runtimeWorkers(config, Date.now()),
       catalog,
       // 与转发面同一个实例 —— 两套 dispatcher 池/selector 锁会让探测量到的出口
@@ -279,15 +312,6 @@ async function main(): Promise<void> {
    *
    * 必须在 `loadConfig()` **之后**调用:首启时那一步才会把默认配置落盘。
    */
-  let port: number;
-  try {
-    port = resolvePort();
-  } catch (err) {
-    console.error(err instanceof Error ? err.message : String(err));
-    process.exitCode = 1;
-    return;
-  }
-
   /*
    * 仅 loopback 监听。
    *

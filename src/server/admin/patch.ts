@@ -133,7 +133,7 @@ export function applyConfigPatch(config: Config, patch: ConfigPatch): PatchResul
         const parsed = WorkerSchema.safeParse({
           id: spec.id,
           name: spec.name,
-          kind: "authenticated",
+          kind: spec.kind ?? "authenticated",
           apiKey: spec.apiKey,
           enabled: spec.enabled,
           proxyId: spec.proxyId,
@@ -165,6 +165,7 @@ export function applyConfigPatch(config: Config, patch: ConfigPatch): PatchResul
         const current = next.workers[index]!;
         next.workers[index] = {
           ...current,
+          ...(wp.kind !== undefined ? { kind: wp.kind } : {}),
           ...(wp.name !== undefined ? { name: wp.name } : {}),
           ...(wp.enabled !== undefined ? { enabled: wp.enabled } : {}),
           // `proxyId: null` 是「改为直连」,与缺席(不动)不同 —— 见 schema 说明。

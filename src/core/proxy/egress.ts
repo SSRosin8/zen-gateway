@@ -2,9 +2,9 @@ import type { Config, Proxy } from "../../shared/schema.ts";
 import { DIRECT_EGRESS_ID } from "../../shared/schema.ts";
 import { ClashController } from "./clash/controller.ts";
 import { credentialFingerprint } from "./credentialFingerprint.ts";
-import { DispatcherPool, type TimeoutConfig } from "./dispatcher.ts";
+import { DispatcherError, DispatcherPool, type TimeoutConfig } from "./dispatcher.ts";
 import { bridgeSelectorGroup, describeResolveFailure, resolveProxy } from "./pool.ts";
-import { probeEgress, type IpEchoService, type ProbeOutcome } from "./probe.ts";
+import { probeEgress, type IpEchoService, type ProbeOutcome, type ProbeRequest } from "./probe.ts";
 import { SelectorLockRegistry } from "./selectorLock.ts";
 
 /**
@@ -62,6 +62,10 @@ export type ProbeProxyResult = {
 
 export class EgressService {
   #pool: DispatcherPool;
+  /** 只保留仍有在途流的关闭任务；空闲池关闭后立即移除。 */
+  #closingPools = new Set<Promise<void>>();
+  #closed = false;
+  #closePromise: Promise<void> | null = null;
   #locks = new SelectorLockRegistry();
   #controllers = new Map<string, ClashController>();
   /** 与 #controllers 平行:记下建立时的 apiBase/secret 指纹,用于判断是否需重建。 */
@@ -73,8 +77,13 @@ export class EgressService {
     this.#pool = new DispatcherPool(opts.timeouts);
   }
 
+  #assertOpen(): void {
+    if (this.#closed) throw new DispatcherError("出口服务已关闭", null);
+  }
+
   /** 按内核缓存 Controller 客户端。 */
   controllerFor(config: Config, bridgeId: string): ClashController | null {
+    this.#assertOpen();
     const bridge = config.clash.bridges.find((b) => b.id === bridgeId);
     if (!bridge) return null;
 
@@ -109,7 +118,8 @@ export class EgressService {
    * selector 的选中节点是全局状态,并发切换会让两条链路互相换掉对方的出口。
    */
   async probeProxy(config: Config, proxyId: string | null): Promise<ProbeProxyResult> {
-    const id = proxyId ?? "__direct__";
+    this.#assertOpen();
+    const id = proxyId ?? DIRECT_EGRESS_ID;
     const result = await this.#probeProxyInner(config, proxyId, id);
     /*
      * 落盘放在这里而不是 `probeAll` 里：`probeProxy` 是**唯一**产出探测结果的
@@ -148,9 +158,8 @@ export class EgressService {
 
     const target = resolved.target;
 
-    let dispatcher;
     try {
-      dispatcher = this.#pool.get(target);
+      this.#pool.get(target);
     } catch (err) {
       return {
         proxyId: id,
@@ -162,8 +171,14 @@ export class EgressService {
       };
     }
 
-    const common = {
-      dispatcher,
+    const service = this;
+    const common: ProbeRequest = {
+      // probeEgress 在锁内、select 完成后才读它。排队期间换配置不能让
+      // 探测持有一个已经关闭的 dispatcher；回退到另一个回显服务也同理。
+      get dispatcher() {
+        service.#assertOpen();
+        return service.#pool.get(target);
+      },
       ...(this.#opts.services !== undefined ? { services: this.#opts.services } : {}),
       ...(this.#opts.probeTimeoutMs !== undefined ? { timeoutMs: this.#opts.probeTimeoutMs } : {}),
     };
@@ -192,20 +207,14 @@ export class EgressService {
       };
     }
 
-    return {
-      proxyId: id,
-      outcome: await probeEgress({
-        ...common,
-        bridge: {
-          lock: this.#locks.forBridge(target.bridge.bridgeId),
-          controller,
-          selectorGroup: group,
-          // target.nodeName 由 resolveProxy 填好，与 dispatcher 的缓存身份同源 ——
-          // 两处若各自算一遍，迟早出现「锁切到 A 而 dispatcher 属于 B」的偏差。
-          nodeName: target.nodeName,
-        },
-      }),
+    common.bridge = {
+      lock: this.#locks.forBridge(target.bridge.bridgeId),
+      controller,
+      selectorGroup: group,
+      // target.nodeName 与 dispatcher 身份同源，不能在两处各自推导。
+      nodeName: target.nodeName,
     };
+    return { proxyId: id, outcome: await probeEgress(common) };
   }
 
   /**
@@ -256,9 +265,16 @@ export class EgressService {
     locks: SelectorLockRegistry;
     controllerFor: (bridgeId: string) => ClashController | null;
   } {
+    this.#assertOpen();
+    const service = this;
     return {
       config,
-      dispatchers: this.#pool,
+      // 每次尝试取当前池；请求的配置快照与 selector 锁不变，后续重试可采用
+      // 新超时。这样旧池能优雅关闭，不会因保留整条重试链而无限积累。
+      get dispatchers() {
+        service.#assertOpen();
+        return service.#pool;
+      },
       locks: this.#locks,
       controllerFor: (bridgeId) => this.controllerFor(config, bridgeId),
     };
@@ -266,15 +282,37 @@ export class EgressService {
 
   /** 配置变更后让缓存失效。 */
   async reset(): Promise<void> {
-    this.#controllers.clear();
-    this.#controllerKeys.clear();
-    await this.#pool.reset();
+    this.#replacePool(this.#opts.timeouts);
   }
 
-  async close(): Promise<void> {
+  /** 配置热更新后同步新超时；旧连接在后台退出，不阻塞配置保存。 */
+  updateTimeouts(timeouts: TimeoutConfig): void {
+    this.#replacePool(timeouts);
+  }
+
+  #replacePool(timeouts: TimeoutConfig): void {
+    this.#assertOpen();
+    this.#opts = { ...this.#opts, timeouts };
+    const old = this.#pool;
+    this.#pool = new DispatcherPool(timeouts);
     this.#controllers.clear();
     this.#controllerKeys.clear();
-    await this.#pool.close();
+    // close 不接受新请求，但允许已开始的响应流读完；不等待它完成，保存配置
+    // 才不会被长 SSE 阻塞。关闭任务完成就移除，停机时只需等待剩余任务。
+    const closing = old.close().catch(() => {}).finally(() => this.#closingPools.delete(closing));
+    this.#closingPools.add(closing);
+  }
+
+  close(): Promise<void> {
+    if (this.#closePromise !== null) return this.#closePromise;
+    this.#closed = true;
+    this.#controllers.clear();
+    this.#controllerKeys.clear();
+    this.#closePromise = Promise.allSettled([
+      this.#pool.close(),
+      ...this.#closingPools,
+    ]).then(() => undefined);
+    return this.#closePromise;
   }
 }
 

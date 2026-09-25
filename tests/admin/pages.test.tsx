@@ -1,5 +1,6 @@
 import { describe, expect, it, vi, afterEach } from "vitest";
 import { render, screen } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
 import { ProxyPage, subscriptionStatus } from "../../src/admin/pages/ProxyPage.tsx";
 import { OverviewPage } from "../../src/admin/pages/OverviewPage.tsx";
 import { ModelsPage } from "../../src/admin/pages/ModelsPage.tsx";
@@ -17,6 +18,7 @@ import type {
 } from "../../src/shared/contract.ts";
 import { fakeOverview } from "./App.test.tsx";
 import { parseHash } from "../../src/admin/lib/router.ts";
+import * as adminApi from "../../src/admin/lib/api.ts";
 
 /*
  * 其余 5 页 + 向导的组件契约。
@@ -27,6 +29,7 @@ import { parseHash } from "../../src/admin/lib/router.ts";
 
 afterEach(() => {
   vi.unstubAllGlobals();
+  vi.restoreAllMocks();
 });
 
 const view = parseHash("#proxy");
@@ -469,6 +472,41 @@ function worker(overrides: Partial<WorkerView> = {}): WorkerView {
 }
 
 describe("Worker 页", () => {
+  it("切换为匿名后隐藏并清空未提交的认证 key", async () => {
+    const user = userEvent.setup();
+    const patch = vi.spyOn(adminApi, "patchConfig").mockResolvedValue(undefined);
+    render(<WorkersPage data={fakeOverview()} view={parseHash("#workers")} navigate={noop} />);
+
+    await user.click(screen.getByRole("button", { name: "新增 Worker" }));
+    await user.type(screen.getByLabelText("ID"), "anon-1");
+    await user.type(screen.getByLabelText("API key（认证必填）"), "fake-stale-key-not-real");
+    await user.selectOptions(screen.getByLabelText("类型"), "anonymous");
+
+    expect(screen.queryByLabelText("API key（认证必填）")).not.toBeInTheDocument();
+    await user.selectOptions(screen.getByLabelText("类型"), "authenticated");
+    expect(screen.getByLabelText("API key（认证必填）")).toHaveValue("");
+    await user.selectOptions(screen.getByLabelText("类型"), "anonymous");
+    await user.click(screen.getByRole("button", { name: "保存" }));
+
+    expect(patch).toHaveBeenCalledTimes(1);
+    const payload = patch.mock.calls[0]![0];
+    const created = payload.workers?.create?.[0];
+    expect(created).toMatchObject({ id: "anon-1", kind: "anonymous", apiKey: "" });
+    expect(JSON.stringify(payload)).not.toContain("fake-stale-key-not-real");
+  });
+
+  it("匿名 Worker 的凭证列显示无需 key", () => {
+    render(
+      <WorkersPage
+        data={fakeOverview({ workers: [worker({ kind: "anonymous", apiKey: { present: false, fingerprint: null } })] })}
+        view={parseHash("#workers")}
+        navigate={noop}
+      />,
+    );
+    expect(screen.getByText("无需 key")).toBeInTheDocument();
+    expect(screen.queryByText("未配置")).not.toBeInTheDocument();
+  });
+
   it("显示连续失败次数 —— 那是「客户端一直在发坏请求」的证据", () => {
     /*
      * `bad_request` 不冷却但计数照加，所以「连续失败 12 次却从未冷却」
@@ -540,9 +578,9 @@ describe("首启向导", () => {
     expect(container.textContent).toContain("NODE_EXTRA_CA_CERTS");
   });
 
-  it("说明免 key 通道已关 —— 否则用户会试着不填 key", () => {
+  it("说明匿名与认证 Worker 的 key 要求不同", () => {
     render(<Wizard data={fakeOverview()} />);
-    expect(screen.getByText(/FreeTierError/)).toBeInTheDocument();
+    expect(screen.getByText(/匿名 Worker 可以不填 key/)).toBeInTheDocument();
   });
 });
 

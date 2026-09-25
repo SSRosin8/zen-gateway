@@ -158,6 +158,7 @@ function makeApp(
         current = next;
         opts.onApply?.(next);
       },
+      effectivePort: () => current.gateway.port,
       runtimeWorkers: () => scheduler.runtimeWorkers(current, Date.now()),
       catalog,
       egress,
@@ -261,7 +262,7 @@ describe("/api/overview 把配置与运行期状态合在一处", () => {
     const config = makeConfig({
       workers: [
         { id: "on", kind: "authenticated", apiKey: KEY_A, proxyId: null },
-        // 启用了但**没有 key** —— `isUsable()` 会过滤掉它。
+        // 匿名 Worker 没有 key 也应进入候选池。
         { id: "nokey", kind: "anonymous", apiKey: "", proxyId: null },
         { id: "off", kind: "authenticated", apiKey: KEY_B, enabled: false, proxyId: null },
       ],
@@ -278,12 +279,12 @@ describe("/api/overview 把配置与运行期状态合在一处", () => {
      * 「启用了但没 key」必须与「已停用」区分开:合成一类的话,用户会看到
      * enabled 为真却发现它从不被选中,而界面上没有任何线索。
      */
-    expect(byId.get("nokey")).toMatchObject({ enabled: true, inPool: false, ready: false });
+    expect(byId.get("nokey")).toMatchObject({ enabled: true, inPool: true, ready: true });
     expect(byId.get("off")).toMatchObject({ enabled: false, inPool: false, ready: false });
     expect(byId.get("on")).toMatchObject({ enabled: true, inPool: true, ready: true });
 
-    // 池计数只算在候选池里的 —— 停用与没 key 的都不算。
-    expect(parsed.pool).toMatchObject({ ready: 1, total: 1, health: "healthy" });
+    // 池计数只算在候选池里的 —— 停用不算，匿名 Worker 即使没 key 也算。
+    expect(parsed.pool).toMatchObject({ ready: 2, total: 2, health: "healthy" });
   });
 
   it("冷却中的 Worker 报 ready:false 并给出剩余时间与失败类别", async () => {
@@ -585,6 +586,48 @@ describe("写入失败分类", () => {
     });
     expect(result.ok).toBe(false);
     if (!result.ok) expect(result.failure.kind).toBe("invalid_config");
+  });
+
+  it("匿名 Worker 可以通过补丁完整创建、更新类型并删除", () => {
+    const config = makeConfig({ workers: [] });
+    const created = applyConfigPatch(config, {
+      workers: {
+        create: [{ id: "anon-1", kind: "anonymous", name: "公共额度", apiKey: "", proxyId: null, enabled: true }],
+      },
+    });
+    expect(created.ok).toBe(true);
+    if (!created.ok) return;
+    expect(created.config.workers[0]).toMatchObject({ id: "anon-1", kind: "anonymous", apiKey: "", enabled: true });
+
+    const changed = applyConfigPatch(created.config, {
+      workers: { update: { "anon-1": { name: "改名", proxyId: null, enabled: false } } },
+    });
+    expect(changed.ok).toBe(true);
+    if (!changed.ok) return;
+    expect(changed.config.workers[0]).toMatchObject({ kind: "anonymous", name: "改名", enabled: false });
+
+    const removed = applyConfigPatch(changed.config, { workers: { delete: ["anon-1"] } });
+    expect(removed.ok).toBe(true);
+    if (removed.ok) expect(removed.config.workers).toHaveLength(0);
+  });
+
+  it("认证 Worker 切匿名会清掉旧 key，切回认证必须重新提供 key", async () => {
+    const { app, getConfig } = makeApp(makeConfig());
+    expect(getConfig().workers[0]!.apiKey).toBe(KEY_A);
+
+    const anonymous = await patch(app, { workers: { update: { w1: { kind: "anonymous" } } } });
+    expect(anonymous.status).toBe(200);
+    expect(getConfig().workers[0]).toMatchObject({ kind: "anonymous", apiKey: "" });
+
+    const authenticated = await patch(app, { workers: { update: { w1: { kind: "authenticated" } } } });
+    expect(authenticated.status).toBe(422);
+    expect(getConfig().workers[0]).toMatchObject({ kind: "anonymous", apiKey: "" });
+
+    const restored = await patch(app, {
+      workers: { update: { w1: { kind: "authenticated", apiKey: { set: "fake-key-replacement-not-real" } } } },
+    });
+    expect(restored.status).toBe(200);
+    expect(getConfig().workers[0]).toMatchObject({ kind: "authenticated", apiKey: "fake-key-replacement-not-real" });
   });
 
   it("**同一请求里 `delete X` + `create X` 净效果是新建**（缺口 #27）", () => {

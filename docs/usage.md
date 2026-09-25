@@ -8,7 +8,7 @@ npm start -- --open  # 同上，并打开管理后台（需另开 npm run dev）
 npm stop
 npm run restart      # 同样会先构建
 npm run status       # 运行状态 / pid / 端口
-npm run open         # 只打开管理后台（服务没跑时报错，不开一个连不上的页面）
+npm run open         # 网关运行时打开管理后台；需另开 npm run dev
 npm run setup        # 一键探测本机 Clash Controller 并写进配置
 npm run setup -- --dry-run  # 只打印将要做的改动，不落盘 —— 头一次跑建议先用它
 npm run doctor       # 分层诊断，只报第一个失败的层 + 下一步建议
@@ -22,8 +22,13 @@ npm run dev          # 管理后台 dev server（Vite，5173）
 
 **端口**按 `ZG_PORT` > `config.json` 的 `gateway.port` > `9876` 解析，三处
 （服务端、`service.mjs`、vite 代理）共用同一份实现。
+管理 API 和客户端配置片段显示服务实际监听的端口，包含 `ZG_PORT` 覆盖。
 
 **`ZG_DATA_DIR`** 可以把 `data/` 挪到别处（测试与多实例用）。
+
+`npm run setup -- --api <地址> --secret <凭证>` 可指定 Controller；`--api`
+仅接受本机 HTTP 回环地址，不接受远程地址、HTTPS 或带内嵌凭证的 URL。
+首次使用先加 `--dry-run` 检查导入结果；使用 `--help` 查看参数。
 
 ### 管理后台
 
@@ -39,10 +44,10 @@ Worker 时）顶部多一个分步向导。
 | 页 | 它回答什么 |
 |---|---|
 | 概览 | 能不能用、**出口隔离成立吗**、某个 Worker 为什么没在被用 |
-| 网关 | 连接信息 + **可直接复制的 `opencode.json` 片段** |
+| 网关 | 连接信息、最多尝试次数设置、可一键复制的 `opencode.json` 片段 |
 | 代理池 | 节点列表（分页）、批量探测、出口隔离视图（**不分页**） |
-| Worker | 逐个的状态、连续失败次数、绑定的出口 |
-| 模型 | **含付费模型** —— 它要回答「为什么这个不能用」 |
+| Worker | 状态、连续失败次数、出口绑定；新增、编辑、删除 Worker |
+| 模型 | 含付费模型的判定结果；编辑免费后缀、显式免费名单和在架交集开关 |
 | 用量 | 请求 vs 尝试、缓存命中、用量覆盖、网关拒绝 |
 
 「某个 Worker 为什么没在被用」这条先前**无法回答** —— `config.json` 知道
@@ -50,15 +55,27 @@ Worker 时）顶部多一个分步向导。
 现在 `GET /api/overview` 把两半接起来了，`npm run doctor` 的第 4 层也去问它
 （拿不到那个端点时才降级成只报配置形态）。
 
-**URL 承载全部视图状态**：页面、标签、搜索词、筛选、页码都在 hash 里
-（`#proxy?tab=isolation&q=hk&page=2`），刷新与分享还原同一视图。
+页面、标签、搜索词、筛选和页码保存在 hash 里
+（`#proxy?tab=isolation&q=hk&page=2`），刷新与分享可以还原这些视图状态。
+用量页的时间范围和未提交的表单暂存在当前页面内存中，刷新后重置。
+
+Worker 的类型可选认证或匿名。认证 Worker 必须有非空 API key；匿名 Worker
+不使用 API key，不向上游发送 `Authorization` 或 `x-api-key`，也不会自动填入
+`public`。切换为匿名类型会清空原 key；切回认证类型时需要重新填写 key。
+编辑已有 Worker 时，key 输入框留空表示保留原值；清空必须显式选择，且认证
+Worker 清空 key 会被配置校验拒绝。保存成功后立即生效，无需重启。
+
+代理与 Clash 内核的增删改仍通过配置文件完成，手工改完需重启网关；订阅已有
+刷新入口，会把节点并入配置并立即写盘。
+Models 页当前不提供协议提示映射编辑；`defaultSurfaces`、`surfaceOverrides`
+需要手工配置，且只影响展示，不参与转发放行。
 
 ### 订阅（Phase 10）
 
 代理池页的「订阅」标签。一个机场几十个节点，逐个手填不现实。
 
 眼下**添加**订阅要直接编辑 `data/config.json` 的 `subscriptions` 数组
-（`id` / `name` / `url` 三个字段），然后回界面点「刷新」。
+（`id` / `name` / `url` 三个字段），重启网关后回界面点「刷新」。
 
 ```jsonc
 "subscriptions": [
@@ -103,11 +120,11 @@ API 也只给脱敏串 —— 拉取失败的错误消息里也不会有它。
 | 模式 | 行为 |
 |---|---|
 | `manual` | 严格用 `activeBridgeId` 那个。**挂了也不自动换** —— 只在 doctor 里报原因 |
-| `auto` | 探活后择优；**当前那个仍可用就不换**（粘滞） |
+| `auto` | 批测开始前探活并择优写回；当前内核仍可用就不换（粘滞） |
 
-`npm run doctor` 第 5 层会报**择优结果**（`当前走 <id>`）、每个内核在它的
-`selectorGroup` 里有多少可用节点、以及选它的理由。多内核时"现在到底走哪个"
-只看这一处。
+`npm run doctor` 第 5 层会报探活后的择优结果、每个内核在其 `selectorGroup`
+里的节点数及选择理由，但诊断不会把该选择写回配置。转发仍按当前
+`activeBridgeId` 选内核；没有在每条转发请求中自动探活或故障切换。
 
 几条判断：
 
@@ -168,9 +185,18 @@ curl -s http://127.0.0.1:9877/api/overview |
 >
 > 它会真的切 Clash selector 并发真实请求，所以**不要在转发正忙的时候调**。
 
-**凭证永远不出进程**：所有端点只回「有没有 + 8 位 sha256 指纹」。
+**管理 API 不回传凭证原值**：key、token 和口令只回「有没有 + 8 位 sha256 指纹」，
+订阅 URL 只回脱敏串。
 写入方向是**三态** —— `{"set":"..."}` 改、`{"clear":true}` 清、**字段缺席 = 不动**。
 所以改别的字段时不必回传 key（回传不了，你也拿不到原值）。
+
+配置写入串行执行，并校验合并时读取的配置仍是当前版本。若同时保存的另一项
+操作已经改过配置，后到的写入会失败并提示刷新后重试，不会覆盖先到的修改。
+当前 API 将这类冲突与写盘错误一样返回 `500 write_failed`。
+后台批测的配置写回失败只记服务端日志，不会自动重新合并，也不把整批标为失败。
+若看到“批量探测结果写入失败”，需重新探测以更新配置中的出口 IP。
+`headersTimeoutMs`、`bodyTimeoutMs` 可通过 `PATCH /api/config` 热更新，
+之后的新连接使用新超时；在途响应继续使用原连接。
 
 **dev 下的一个坑**：Vite 只转发 `/health` 与 `/api`，**不转发 `/v1`**
 （见 `vite.config.ts`）。拿 `:5173` 测转发会得到 Vite 的 404 而不是网关的响应。
@@ -178,7 +204,9 @@ curl -s http://127.0.0.1:9877/api/overview |
 ### 安全
 
 管理面**仅本机可访问**（只认内核报告的 TCP 对端地址，绝不采信
-`X-Forwarded-For`），且**绝不回显凭证**：API key / Relay Token / Clash secret /
+`X-Forwarded-For`）。Host 必须为回环主机；携带 Origin 时，来源也必须是回环
+HTTP(S) 地址。没有 Origin 的本机 CLI 请求可以正常使用，外部网页来源和
+`Origin: null` 会被拒绝。管理面**绝不回显凭证**：API key / Relay Token / Clash secret /
 代理口令一律只显示 8 位指纹，供人眼比对「是不是我刚填的那个」。
 用指纹而不是长度 —— 等长的两个 key 长度相同，于是「我改了没生效」在界面上
 不可见，而那恰好是修密码最常见的形态。
@@ -194,11 +222,11 @@ curl -s http://127.0.0.1:9877/api/overview |
 不改权限。唯一的例外是 `--deep` —— 桥接探测必须切 Clash 的 selector
 （那是进程外的全局状态），所以跑完之后选中节点是最后探测的那个，它会提前告知。
 
-### 企业网络下必须设 `NODE_EXTRA_CA_CERTS`
+### 企业网络的 CA 配置
 
 如果所在网络对 `opencode.ai` 做 TLS 中间人（内网 DNS 把它解析到内网地址、
-证书由企业 CA 签发），**Node 不读系统 CA 库**（它用编译进二进制的那一套），
-于是所有上游请求都失败：
+证书由企业 CA 签发），Node 默认使用内置 CA，未显式启用系统或额外 CA 时，
+可能无法验证上游证书。本机历史故障采用下面的方式解决：
 
 ```bash
 NODE_EXTRA_CA_CERTS=/etc/ssl/certs/ca-certificates.crt npm start
@@ -208,8 +236,8 @@ NODE_EXTRA_CA_CERTS=/etc/ssl/certs/ca-certificates.crt npm start
 **服务进程**的环境变量而不是你当前 shell 的（两者可以不同：服务可能是带着
 变量启动的，而你手敲 doctor 时没带）。
 
-**不能用 `curl` 判断**：`curl` 读系统 CA 库，所以它会正常返回 200，而网关
-同时是失败的。要自己验就用 Node 问：
+**不能只用 `curl` 判断**：本机 curl 使用系统 CA 库，它成功时网关仍可能失败。
+下面的 Node 命令仅检查当前 shell 下的 TLS 直连，不包含网关的代理出口配置：
 
 ```bash
 node -e 'fetch("https://opencode.ai/zen/v1/models").then(r=>console.log(r.status)).catch(e=>console.log("需要设置:",e.cause?.message))'
@@ -222,7 +250,7 @@ node -e 'fetch("https://opencode.ai/zen/v1/models").then(r=>console.log(r.status
 目录拉取失败(keyed): fetch failed ← unable to get local issuer certificate
 ```
 
-`←` 右边是 `err.cause`。`fetch failed` 是 undici 的顶层包装，真正的原因一律在右边。
+`←` 右边来自 `err.cause` 链；错误没有 cause 时不会出现该部分。
 
 > **这里先前写的是「返回 HTTP 200 加一个空列表」，那是错的**（2026-09-25 实测）。
 > `routes/models.ts` 在从未成功拉到目录时返回 **502**，它的注释写明了理由：
@@ -258,6 +286,9 @@ node -e 'fetch("https://opencode.ai/zen/v1/models").then(r=>console.log(r.status
 
 **不要写 `models` 块**：内置 provider 自带模型表，手写一份会随上游目录变化而过期。
 
+网关页的复制按钮提供同样的配置结构，Relay Token 仍是占位符，需要填入本机配置里的
+实际值。管理响应只包含 token 指纹，不返回已保存的完整值。
+
 > 项目级 `opencode.json` 含 Relay Token，**已在 `.gitignore` 里**，不要提交。
 
 验证：
@@ -266,11 +297,12 @@ node -e 'fetch("https://opencode.ai/zen/v1/models").then(r=>console.log(r.status
 opencode run --model opencode/mimo-v2.6-flash-free "Reply with exactly: OK"
 ```
 
-> **只能用真实 OpenCode CLI 验，`curl` 不算。** 免费额度闸门查请求**形态**不查 key，
-> 手搓 `curl` 必然得到 `403 FreeTierError` —— 那是预期行为，不是故障证据。
+> **客户端兼容性必须用真实 OpenCode CLI 验。** 2026-09-22 至 09-25 的手工探针
+> 曾返回 `403 FreeTierError`，而真实 CLI 经网关成功。该差异说明请求形态会影响
+> 上游行为，不代表所有 curl 请求、所有 key 或当前匿名请求都会得到相同结果。
 >
-> 判据也不止看 CLI 输出：还要在 `data/zen-gateway.log` 里看到对应的
-> `用量 chat/...` 行，否则无法排除 CLI 其实绕过了网关直连上游。
+> 验证流量路径用控制实验：停止网关后同一条命令应连接失败，重启后恢复。
+> 用量日志可辅助排查，但上游未报 usage 时不会写用量行，不能单靠它下结论。
 
 ---
 
@@ -323,11 +355,10 @@ opencode run --model opencode/mimo-v2.6-flash-free "Reply with exactly: OK"
   而出口隔离是这个项目存在的理由。
 - **缺 `version` 即视为配置损坏**，不做任何配置迁移或猜测补全。
 - **损坏的配置绝不自动覆盖**（会连凭证一起丢）。报错只给字节位置，不回显内容。
-- `routing.strategy` 按 Worker 的 `kind` 排序，三个取值产出三种不同顺序。
-  但**实践中你大概看不出区别**：可排序的只有 `anonymous` 与 `authenticated`
-  两类，而上游已关闭免 key 通道，所以正常配置里全是 `authenticated` ——
-  同一类别内部保持配置顺序，于是三个取值结果相同。想手工排优先级就直接改
-  `workers` 数组的顺序。
+- `routing.strategy` 按 Worker 的 `kind` 排序：`anonymous_first` 优先匿名 Worker，
+  `authenticated_first` 优先认证 Worker，`mixed` 保持配置顺序。默认是
+  `anonymous_first`；匿名 Worker 不发送 key，是否可用必须用真实客户端验证。
+  同一类别内部仍保持 `workers` 数组顺序，想调整同类优先级就直接调整数组顺序。
 - **`affinityTtlMs` 是闲置时长，不是绑定寿命**：每次请求都会刷新，所以一条持续
   活跃的会话永不换 Worker。固定寿命会在长对话中途强制换人，而那恰好是粘滞
   要避免的事（客户端回放的加密推理块会被上游拒）。
@@ -337,12 +368,12 @@ opencode run --model opencode/mimo-v2.6-flash-free "Reply with exactly: OK"
   继续用旧的，而且旧目录**永不因为太旧而失效**。一份三天前的目录远好于
   "网关拒绝一切"。默认 30 分钟 —— 目录以天为单位变化，更短没意义。
 - **`enforceCatalog` 关掉的是交集，不是免费判定**：后缀与名单照常生效。
-  留这个开关是因为交集依赖能联网拉到目录，而离线环境或本地假上游拉不到 ——
-  那种情况下你应当能明确关掉它，而不是困在"模型全说已下架"里。
+  目录缺失时本来就会按后缀与名单放行并标记未核验，开关不会改变离线转发行为；
+  它主要用于本地镜像或假上游目录与真实目录不一致时关闭求交集。
 
 ### 免费判定：（后缀 ∪ 名单）∩ 在架目录
 
-三条依据缺一不可，而**交集是已下架模型自动失效的唯一机制**：
+默认启用交集且目录可用时，**交集负责剔除已下架模型**：
 
 ```bash
 # 已下架的 glm-5-free 后缀命中，但不在上游在架目录里 → 403，且**不打上游**
@@ -376,7 +407,7 @@ curl -s -H "authorization: Bearer <relayToken>" http://127.0.0.1:9877/v1/models 
 | 客户端路径 | 面 | 说明 |
 |---|---|---|
 | `/v1/chat/completions`、`/chat/completions` | `chat` | OpenCode 默认用这个 |
-| `/v1/responses`、`/responses` | `responses` | 体内 `previous_response_id` 作会话指针 |
+| `/v1/responses`、`/responses` | `responses` | `previous_response_id` 优先作会话指针；完整成功响应的 `response.id` 绑定实际 Worker |
 | `/v1/messages`、`/messages` | `messages` | Anthropic Messages 形状 |
 
 三个面都收带 `/v1` 与不带的两种路径（客户端 `baseURL` 两种写法都常见），
@@ -389,7 +420,7 @@ curl -s -H "authorization: Bearer <relayToken>" http://127.0.0.1:9877/v1/models 
 |---|---|---|
 | `rate_limit` | `Retry-After` 或 15 分钟 | 上游限流 |
 | `auth` | 固定 60 秒 | key 粘错、被吊销、额度耗尽 |
-| `transport`/`timeout` | 2 秒起指数增长，上限 2 分钟 | 出口不通、Clash 没开 |
+| `transport`/`timeout` | 2 秒起指数增长，上限 2 分钟 | 上游连接失败或超时 |
 | `bad_request` | **不冷却** | 请求本身的问题，与 Worker 无关 |
 
 `auth` 刻意用固定短退避而不是指数增长：配错的 key 应该**反复暴露**，
@@ -404,10 +435,10 @@ curl -s -H "authorization: Bearer <relayToken>" http://127.0.0.1:9877/v1/models 
 > 端点时降级成只报配置形态。不看后台时可从响应头 `x-zen-gateway-route` 与
 > `x-zen-gateway-worker` 推断（见下文「排查」）。
 
-一个实际现象：**任何非 OpenCode 客户端**（curl、别的网关）打进来都会拿 403
-`FreeTierError`，而 403 归 `auth` —— 于是全部 Worker 被打进 60 秒冷却。
-这是自愈的（短退避 + 全员冷却时给最早恢复的那个），不影响真实 CLI，
-但若你刚用 curl 探过，随后一分钟内的请求会带 `x-zen-gateway-route: all_cooling`。
+历史手工探针曾返回 403 `FreeTierError`。403 归 `auth`，一次请求会让承接它的
+Worker 进入短冷却，且本条链不因 auth 换人重试；连续请求才可能逐个冷却全池。
+全员冷却时仍尝试最早恢复的 Worker，并带 `x-zen-gateway-route: all_cooling`。
+这不是客户端类型的固定判定，当前可用性仍须用真实客户端验证。
 
 ---
 
@@ -477,11 +508,12 @@ curl -s -H "Authorization: Bearer <apiSecret>" \
 
 建一个专用 selector 分组只放要隔离的节点。`npm run setup` 会读 `/rules` 自动挑
 **规则实际导向**的那个（兜底 `MATCH` 目标优先），`npm run doctor` 在选中的分组
-不参与选路时报警；最终核对用 `npm run doctor -- --deep`，它按实测公网 IP 分组。
+不参与选路时报警；`npm run doctor -- --deep` 按回显目标的实测公网 IP 分组，
+真实上游流量的出站节点仍需从 Clash `/connections` 核对。
 
-**只把活着的内核写进 `bridges` 并 `enabled`。** `auto` 模式在
-`activeBridgeId` 不可用时会按 priority 回落到另一个，于是流量去一个没人
-监听的本地端口，症状是"代理明明配了却连不上"。
+**只把可用的内核设为 `enabled`。** 转发按配置选内核，不会主动探活；
+`auto` 模式只在没有已启用的当前内核时按 priority 回落。当前内核失联时，
+先跑 doctor 诊断，再通过批测择优或手工切换配置。
 
 **`egressIp` 由探测填写，不要手填。** 隔离判定按它分组；`null` 归入"未知"
 而不算已隔离 —— "还不知道"和"确认不同"是两件事。
@@ -535,23 +567,23 @@ curl -s -H "Authorization: Bearer <apiSecret>" \
 | `x-zen-gateway-attempts` | 这次一共尝试了几个 Worker（成功前重试过时 >1） |
 | `x-zen-gateway-free` | **仅在放行未经在架核验时出现**：`suffix_unverified`／`extra_unverified`。有它 = 那一刻拿不到在架目录，所以只按后缀与名单放行了（见上文「免费判定」） |
 
-前三个头在**打过上游的请求**上成功与失败都有（第七轮审核补上了成功路径的
-`attempts`，第五轮修了只在成功路径设 `route`）。
+前三个头在**拿到上游响应并透传**时成功与失败都有。连接或出口配置失败，
+连上游响应头都未拿到时，网关自造的错误响应目前不带这些诊断头。
 
 > **但网关自己拒掉的请求没有这几个头**（第十轮审核实测）。免费闸门拒绝、
-> 请求体为空／超限／不是 JSON、流式面不支持流式、全员冷却的 `no_worker` ——
+> 请求体为空／超限／不是 JSON、流式面不支持流式、候选池为空的 `no_worker` ——
 > 这些都在选 Worker 之前或之后直接返回，一个诊断头都不带（实测
 > `403 model_not_allowed` 的响应里没有任何 `x-zen-gateway-*`）。
 >
 > 那不是疏漏：`route`/`worker`/`attempts` 描述的是「这次请求怎么打上游的」，
 > 而这些请求根本没打。要查它们看 `GET /api/stats` 的**网关拒绝**计数
-> （9 个 reason 各自分开，见「运行时数据库」），或日志。
+> （各个 reason 分开，见「运行时数据库」），或日志。
 
 `x-zen-gateway-free` 同理**两条路径都设**，而且失败时更有用：上游返回
 400 `Model is unavailable.` 时，它回答的正是「目录说它在架但上游拒了」还是
 「我们压根没拿到目录」—— 后者要查出口与网络，前者要查上游。
 
-实测一串 curl 探针（每次都拿 403，而 403 归 `auth`）：
+历史一串 curl 探针（当次每次都拿 403，而 403 归 `auth`）：
 
 ```
 第 1 次: 403 | route: strategy    | worker: worker-11
@@ -573,8 +605,8 @@ curl -s -H "Authorization: Bearer <apiSecret>" \
 
 最需要知道的三条：
 
-- **免费模型对手搓 curl 返回 403，但真实 OpenCode 客户端经本网关可用** ——
-  闸门查的是请求**形态**，而原样透传不改变形态。
+- **历史手工探针返回过 403，真实 OpenCode 客户端经本网关也有成功记录**。
+  两种测量覆盖的请求形态不同，不能互相替代。
 - **`/messages` 面从 `x-api-key` 读凭证，只给 Bearer 会 500**（§8）。网关已经
   自动镜像，你不需要做什么 —— 但值得知道，因为那个 500 会被归类成"上游错误"
   并**归咎于 Worker**，于是少了这个头就会把整池 Worker 打进冷却。
@@ -607,7 +639,8 @@ curl -s -H "Authorization: Bearer <apiSecret>" \
 
 **打不开不影响启动**：统计与亲和持久化都是可用性改善，不是转发的正确性前提。
 库坏了（磁盘满、档位高于本程序）网关照常起，只是退回纯内存 —— 日志会说明。
-想重置统计直接删掉它，重启自动重建（**只丢统计，不丢配置**）。
+重置数据库会一并丢弃统计、探测历史、亲和绑定和批测进度，不会删除配置。
+需要重置时先停止网关，再处理数据库及其 WAL/SHM 文件，启动后会重建。
 
 ### 三张聚合表分别答什么
 
@@ -630,8 +663,9 @@ curl -s -H "Authorization: Bearer <apiSecret>" \
 - **`retired`** —— 免费依据成立（后缀或名单命中）但**已不在上游在架目录**。
   去 `models.extraFreeIds` 里把那个 id 删掉。
 
-其余五种（`body_*` / `model_missing` / `stream_unsupported` / `no_worker`）
-里最值得看的是 **`no_worker`**：它意味着全池冷却或全员不可用。
+其余拒绝原因包含 `body_*`、`model_missing`、`stream_unsupported`、`no_worker`。
+其中 **`no_worker`** 表示候选池为空；全员冷却时仍会尝试最早恢复的 Worker，
+不走这个拒绝分支。
 
 > 被拒请求里的 `model` 是**客户端可控**且**没通过任何校验**的字符串，
 > 所以不形似模型 id（`[A-Za-z0-9._-]{1,64}`）的一律记成 `<other>` ——

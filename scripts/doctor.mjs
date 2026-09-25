@@ -319,12 +319,8 @@ async function layerStore() {
 /**
  * 第 4 层:至少有一个可用的 Worker。
  *
- * 判定用 `isUsable()` —— **调度器用的同一个函数**,不在这里另写一份
- * 「enabled 且 apiKey 非空」。两份并行判断必然分叉,而分叉后 doctor 会说
- * 「Worker 就绪」而调度器说「无可用 Worker」。
- *
- * 注意它按**有没有 key**判断而不按 `kind`:上游已于 2026-09-16 前后关闭
- * 免 key 的免费通道,所以一个空 key 的 Worker 发出去必定 403。
+ * 判定用 `isUsable()` —— **调度器用的同一个函数**,不在这里另写一份。
+ * 认证 Worker 需要 key，匿名 Worker 可以免 key；两种类型都应按配置进入候选池。
  */
 async function layerWorkers() {
   const workers = ctx.config.workers;
@@ -334,18 +330,18 @@ async function layerWorkers() {
     return {
       status: "fail",
       text: "没有配置任何 Worker",
-      nextStep: `在 ${join(DATA_DIR, "config.json")} 的 workers 数组里加一个:\n  { "id": "w1", "kind": "authenticated", "apiKey": "<你的 Zen key>", "proxyId": null }\n（免 key 的匿名通道已被上游关闭,必须用真实 key。）`,
+      nextStep: `在 ${join(DATA_DIR, "config.json")} 的 workers 数组里加一个:\n  { "id": "w1", "kind": "authenticated", "apiKey": "<你的 Zen key>", "proxyId": null }\n或显式添加免 key 的匿名 Worker。`,
     };
   }
 
   if (usable.length === 0) {
     return {
       status: "fail",
-      text: `${workers.length} 个 Worker 全部不可用(已停用或 apiKey 为空)`,
+      text: `${workers.length} 个 Worker 全部不可用(已停用或认证 Worker 缺 apiKey)`,
       detail: workers
-        .map((w) => `${w.id}: ${!w.enabled ? "已停用" : "apiKey 为空"}`)
+        .map((w) => `${w.id}: ${!w.enabled ? "已停用" : w.kind === "authenticated" && w.apiKey.trim() === "" ? "认证 Worker 的 apiKey 为空" : "不可用"}`)
         .join("\n"),
-      nextStep: "把 enabled 改为 true,并确认 apiKey 非空。",
+      nextStep: "把 enabled 改为 true；认证 Worker 还要确认 apiKey 非空。",
     };
   }
 

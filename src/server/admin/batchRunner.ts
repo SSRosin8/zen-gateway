@@ -39,7 +39,7 @@ import { lockedBridgeFor, type BridgeHealth } from "../../core/proxy/clash/selec
 
 export type BatchRunnerDeps = {
   readonly configOf: () => Config;
-  readonly applyConfig: (next: Config) => Promise<void>;
+  readonly applyConfig: (next: Config, expected?: Config) => Promise<void>;
   readonly egress: EgressService;
   readonly store: BatchProbeStore;
   readonly log?: (message: string) => void;
@@ -229,11 +229,12 @@ export class BatchProbeRunner {
            * 存在的理由）。这里用 id 比较而不是读 `changed`：`lockedBridgeFor`
            * 不透传那个字段，而"选出来的与当前记的不同"本身就是同一个判据。
            */
+          const expected = this.#deps.configOf();
           const next = {
-            ...config,
-            clash: { ...config.clash, activeBridgeId: locked.bridgeId },
+            ...expected,
+            clash: { ...expected.clash, activeBridgeId: locked.bridgeId },
           };
-          await this.#deps.applyConfig(next);
+          await this.#deps.applyConfig(next, expected);
           // 重取而不是用 `next`：`applyConfig` 之后进程内的真相是它换进去的那个引用。
           config = this.#deps.configOf();
         }
@@ -336,7 +337,7 @@ export class BatchProbeRunner {
     const merged = applyProbeResults(config, outcomes);
     if (!merged.changed) return;
     try {
-      await this.#deps.applyConfig(merged.config);
+      await this.#deps.applyConfig(merged.config, config);
     } catch (err) {
       /*
        * 写盘失败**不影响探测结果的有效性** —— 它们已经被测到了，

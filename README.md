@@ -23,7 +23,7 @@
 | | 说明 |
 |---|---|
 | **协议适配** | 可扩展的协议面注册表，多个客户端协议共用同一套鉴权/放行/重试/透传 |
-| **免费模型强制** | 只放行 Zen 免费目录里的模型，判定规则由配置驱动而非代码常量 |
+| **免费模型强制** | 按免费后缀或显式名单放行；拿到在架目录时默认再求交集 |
 | **Worker 调度** | 会话粘滞、故障轮换、分级冷却、加密推理指纹亲和 |
 | **出口隔离** | 每 Worker 独立出口，含订阅/Controller 导入、批量探测、按**实测出口 IP** 分组的隔离报告 |
 
@@ -46,14 +46,17 @@ npm run dev        # 管理后台（6 页 + 首启向导），另开一个终端
 ```
 
 首次启动会生成 `data/config.json`（0600 权限）并自动生成 Relay Token。
+在管理后台的 Worker 页添加 Worker 并绑定出口：认证 Worker 必须填写 Zen API key；
+匿名 Worker 不使用 key，不向上游发送凭证，也不会自动替换成旧项目的 `public`。
+上游是否接受当前匿名请求，需要用真实 OpenCode 客户端验证。
 
 > **所在网络对 `opencode.ai` 做 TLS 中间人的话**（内网 DNS + 企业 CA），
-> Node 不读系统 CA 库，要改成
+> Node 默认未启用该企业 CA 时，可使用
 > `NODE_EXTRA_CA_CERTS=/etc/ssl/certs/ca-certificates.crt npm start` ——
-> 否则症状是 `/v1/models` 返回 **502 `upstream_unreachable`**。
+> 否则服务健康检查仍可能正常，但 `/v1/models` 会返回 **502 `upstream_unreachable`**。
 > `npm run doctor` 的第 6 层会直接指出这一条（它查的是**服务进程**的环境变量，
-> 不是你当前 shell 的）。别用 `curl` 判断 —— 它读系统 CA，会正常返回 200
-> 而网关同时是失败的。原理见 [`docs/usage.md`](docs/usage.md)。
+> 不是你当前 shell 的）。别用 `curl` 通过来推断 Node 也能通过 —— 它们默认使用的
+> CA 集合不同。原理见 [`docs/usage.md`](docs/usage.md)。
 
 然后把 OpenCode 指向本网关 —— 在项目或 `~/.config/opencode/opencode.json` 里
 **覆盖内置 `opencode` provider**：
@@ -79,8 +82,8 @@ npm run dev        # 管理后台（6 页 + 首启向导），另开一个终端
 opencode run --model opencode/mimo-v2.6-flash-free "Reply with exactly: OK"
 ```
 
-验证要用**真实 OpenCode CLI**：免费额度闸门查请求形态不查 key，手搓 `curl`
-必然得到 `403 FreeTierError`，那是预期行为而非故障。
+验证要用**真实 OpenCode CLI**。历史手工探针曾得到 `403 FreeTierError`，
+而真实 CLI 经网关成功；两种请求形态不同，不能用其中一种的结果推断另一种。
 
 其余命令见 [`docs/usage.md`](docs/usage.md)。
 
@@ -99,6 +102,8 @@ opencode run --model opencode/mimo-v2.6-flash-free "Reply with exactly: OK"
 > 它在 `tests/design/contrast.test.ts` 而不在这个列表里。
 
 - 管理面**仅 loopback**，且**绝不**把 `X-Forwarded-For` 当作来源证据。
+  同时要求 Host 为回环主机；浏览器携带 Origin 时也必须来自回环 HTTP(S) 地址，
+  防止外部网页借本机浏览器触发管理操作。
   装配期还会断言 `/api/*` 每条路由都被回环闸门覆盖，且按中间件**身份**判定
   ——「挂了某个中间件」不等于「挂的是回环闸门」
 - 管理面**绝不回显凭证**：API key / Relay Token / Clash secret / 代理口令只给

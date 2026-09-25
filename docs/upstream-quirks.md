@@ -1,7 +1,12 @@
 # 上游怪癖清单（OpenCode Zen）
 
 每条记录**日期 + 触发条件 + 上游原始响应**作为证据。可用
-`npm run discover:upstream` 随时重验（免 key 即可跑，上游行为一变就退出 1）。
+`npm run discover:upstream` 重验脚本覆盖的探针（免 key 即可跑，断言不符时退出 1）。
+这些是指定日期、请求形态和样本下的观察，不是上游的永久协议承诺；脚本也不能
+替代真实 OpenCode 客户端验证。
+
+当前网关的匿名 Worker 与旧项目的 `Bearer public` 不同：匿名类型不使用 key，
+也不发送上游凭证。下面涉及 `public` 的内容仅记录旧项目请求形态。
 
 不进 `npm test` / `validate`：需要网络，上游抖动不该让本地关卡变红。
 
@@ -13,23 +18,24 @@
 用来逐字段定位这些已知怪癖（拒收 `client_metadata`、tools 上限、
 思考模型需重放 `reasoning_content`、effort-tier 别名拆分）。
 
-**那件事现在做不到，而且不是工程问题。** 见下面「闸门短路在请求体校验之前」。
-两条路都堵着：
+当时采用的手工探针不足以完成这项验证。见下面「闸门短路在请求体校验之前」：
 
-- **免费模型**永远停在 403，请求体从未被上游看过
+- 已测的**免费模型手工请求**停在 403，没有观察到字段级校验差异
 - **付费模型**能过体校验，但要真实计费，而本网关的前提就是只放行免费模型；
   在付费模型上测出的怪癖也未必适用于免费模型
 
-所以字段级怪癖清单这一块**暂时无法交付**，不是被跳过。闸门若哪天放开，
-`discover-upstream.mjs` 的那条探针会变红，届时这项工作重新可做。
+因此字段级怪癖清单当时未完成。真实 OpenCode CLI 经网关已有成功记录，
+所以不能据此声称那条请求路径不可行；要进一步验证字段级行为，应使用能通过
+闸门的真实客户端请求形态，并继续限制在免费模型内。
 
 ---
 
-## 1. 免费额度闸门对第三方客户端关闭
+## 1. 历史手工请求触发免费额度闸门
 
 **日期**：2026-09-16 前后收紧；09-22、09-23 两次复验仍在
 
-**触发**：`POST /zen/v1/chat/completions`，任何免费模型（`-free` 后缀或 `big-pickle`）
+**触发**：手工发送 `POST /zen/v1/chat/completions`，所测免费模型
+（`-free` 后缀或 `big-pickle`），未使用完整的真实 OpenCode CLI 请求流程
 
 ```
 403 application/json
@@ -40,23 +46,24 @@
 带有效 key 时消息**无** `Error from provider (Console): ` 前缀 —— 两条路不是
 同一段上游代码，但结论一致。
 
-**与 key 无关**（见 §2 的顺序说明）。维护者明确表态是反滥用措施
+在这些请求形态下，有效 key 也不能绕过闸门（见 §2）。维护者当时说明是反滥用措施
 （anomalyco/opencode#49621）：*"We've been tightening our logic to fight abuse.
 You cannot use the free tier in other harnesses."*
 
-### 匿名通道（字面量 `Bearer public`）已关
+### 旧项目 `Bearer public` 形态的历史探针
 
-这里说的「匿名」**不是不带 key**，而是发字面量
-`Bearer public` —— `src/proxy/upstream.ts:97` 的 `effectiveApiKey()`：
+旧项目 `<另一个本机项目>` 所说的「匿名」会发字面量
+`Bearer public`：当时 `src/proxy/upstream.ts` 的 `effectiveApiKey()` 在
 `kind === "anonymous_zen"` 时把 apiKey 替换成字符串 `"public"`。
 
-它**曾经真的能用**：已知的成功使用早于 2026-09-16 前后的闸门收紧，
-收紧 —— 成功使用就在这条线之前（同一时间窗里 `union-alpha` 也从目录消失了）。
+它有早于 2026-09-16 前后的成功使用记录；后来的手工探针结果如下。
 
 按真实形态复测（含 `synthesizeCliHeaders=true` 时的整套 CLI 身份头：
-`opencode-cli/1.0.0` + 四个 `x-opencode-*`）：**403**，通道已关。
+`opencode-cli/1.0.0` + 四个 `x-opencode-*`）：**403**。
+这些合成头不等于完整的真实 CLI 请求，不能据此判断当前匿名 Worker
+（不发送 key）经真实 OpenCode 的可用性。
 
-> 这条探针常驻的意义：它是「匿名通道是否重新打开」的唯一监测点。
+> 这条探针监测的是旧 `public` 请求形态是否变化，不是匿名 Worker 的端到端验收。
 
 ---
 
@@ -79,7 +86,7 @@ You cannot use the free tier in other harnesses."*
 > 但「闸门与 key 无关」这个结论反而更硬了 —— 同一个假 key 在付费模型上会走到
 > 密钥验证并失败，在免费模型上却没走到，证明闸门在密钥验证**之前**短路。
 > 既然它触发时密钥尚未被检查，结果就不可能取决于 key 是否有效。
-> 从「实测有效 key 也被拒」变成「任何 key 都到不了那一步」。
+> 这个结论的范围仍是本节的手工请求形态，不包括已经成功的真实 CLI 请求。
 
 ---
 
@@ -96,9 +103,9 @@ You cannot use the free tier in other harnesses."*
 
 响应与**完全合法**的请求**逐字节相同**（同一个 403 FreeTierError）。
 
-**直接后果**：请求体从未被上游看过，所以字段级怪癖一个都探不到 ——
-这正是 Phase 4 范围缩减的根据。`discover-upstream.mjs` 里有一条探针专门
-守着这个事实（它比对两次响应的字节是否相同）。
+**直接观察**：这些请求没有显示字段校验差异，因此不能用它们推断
+`client_metadata` 等字段是否被接受。`discover-upstream.mjs` 的对应探针比较
+两次响应字节；相同响应不能证明上游内部完全没有读取或解析请求体。
 
 ---
 
@@ -162,7 +169,7 @@ You cannot use the free tier in other harnesses."*
 
 ---
 
-## 7. 模型目录**按账号**区分，但免费子集一致
+## 7. 已测账号目录不同，免费子集在该批样本中一致
 
 **日期**：2026-09-22（账号 A）、09-23（账号 B）、09-23 晚（三账号同测，**推翻了前两次的结论**）
 
@@ -218,9 +225,9 @@ You cannot use the free tier in other harnesses."*
 | 仅 `x-api-key: <key>` | 403 | `FreeTierError` |
 | 两者都带 | 403 | `FreeTierError` |
 
-403 `FreeTierError` 说明请求**已经走到免费额度闸门**（凭证被识别了），而 500 说明
-它在那之前就崩了 —— 上游这个面从 `x-api-key` 读凭证，缺了就炸。另外两个面
-（`/chat/completions`、`/responses`）都只认 Bearer，所以这是 Messages 面**独有**的要求。
+403 `FreeTierError` 说明该请求到达了免费额度闸门，不证明 key 有效（见 §2）。
+当时给 Messages 增加 `x-api-key` 后，结果从 500 变成 403；另外两个面的
+带 key 探针只使用 Bearer。网关据此在非空 key 时同时发送两个凭证头。
 
 **不修的后果**：500 经 `classifyStatus` 归 `upstream_error` → `isRetryable` 为真
 且**归咎于 Worker** → 重试链把每个 Worker 依次试一遍，每个都记一次失败并进指数退避。
@@ -229,8 +236,8 @@ You cannot use the free tier in other harnesses."*
 
 不变量 #4 要保的正是这件事，而这里破坏它的不是客户端的坏请求，是网关自己少发了一个头。
 
-**这个要求不是本项目的特例**：任何驱动 Zen Messages 面的客户端都要顺带把
-Bearer key 镜像成 `x-api-key`。两处从不同入口撞到同一个要求。
+这条兼容处理来自上述测量；匿名 Worker 留空 key 时不会合成任意凭证，
+它在各协议面上的当前可用性仍需单独做真实客户端验证。
 
 `anthropic-version` 本身实测**对结果没有影响**（带与不带状态码相同），但协议要求它，
 且必须由网关设定 —— 取自客户端头的话，一个伪造的旧版本号就是协议降级原语。
@@ -254,6 +261,7 @@ Bearer key 镜像成 `x-api-key`。两处从不同入口撞到同一个要求。
 
 **有用的地方**：「模型是否在架」这条校验在**三个面上都免 key 可用**，对目录交集有直接帮助。
 
-**要当心的地方**：这些 500 都是**免 key 才出现**的形状，而转发链路上每个候选 Worker
-都有 key（`isUsable` 只看 key），所以生产路径走不到。不要据此给 500 加特殊处置 ——
-那会是一条永不执行的分支。
+**对当前实现的影响**：匿名 Worker 的空 key 现在可以进入候选池，所以历史记录中的
+免 key 500 形态已不是结构上不可达。网关仍按通用规则处理 500：归为
+`upstream_error`，按候选链重试并记冷却。这段历史数据不等于当前匿名 CLI 必然失败；
+也不能据此把所有免 key 500 都改判为配置错误。

@@ -85,6 +85,10 @@ export const messagesSurface: ProtocolSurface = {
     return undefined;
   },
 
+  responseIdFrom(): string | null {
+    return null;
+  },
+
   /** 见文件头:`x-api-key` 镜像是本面**能工作的前提**,不是可选优化。 */
   extraUpstreamHeaders(ctx: UpstreamHeaderCtx): Record<string, string> {
     const out: Record<string, string> = { "anthropic-version": ANTHROPIC_VERSION };
@@ -92,10 +96,10 @@ export const messagesSurface: ProtocolSurface = {
      * 空 key 不镜像一个空头。
      *
      * `x-api-key: ` (空值)与"没有这个头"在上游侧不一定等价,而免 key 的
-     * Worker 本就不会进转发候选链(`isUsable` 只看有没有 key)。
+     * 匿名 Worker 可以进入转发候选链，但它应保持没有这个头。
      * 目录查询那条路径会用空 key,但它不走本面。
      */
-    if (ctx.apiKey !== "") out["x-api-key"] = ctx.apiKey;
+    if (ctx.apiKey.trim() !== "") out["x-api-key"] = ctx.apiKey;
     return out;
   },
 

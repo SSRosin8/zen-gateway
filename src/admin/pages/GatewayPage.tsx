@@ -1,6 +1,8 @@
+import { useState } from "react";
 import type { Overview } from "../../shared/contract.ts";
-import { Mono, Panel, Strong } from "../components/Panel.tsx";
+import { Mono, Panel, PrimaryButton, Strong } from "../components/Panel.tsx";
 import { StatusIndicator } from "../components/StatusIndicator.tsx";
+import { patchConfig } from "../lib/api.ts";
 
 /**
  * 网关页 —— 连接信息与客户端配置片段。
@@ -15,7 +17,11 @@ import { StatusIndicator } from "../components/StatusIndicator.tsx";
  * 占位符并告诉用户去哪儿取 —— 把 token 渲染进 DOM 等于让它进截图、进
  * 浏览器扩展、进 devtools 的保存。
  */
-export function GatewayPage({ data }: { data: Overview }) {
+export function GatewayPage({ data, refresh }: { data: Overview; refresh?: () => void }) {
+  const [maxAttempts, setMaxAttempts] = useState(String(data.gateway.maxAttempts));
+  const [saving, setSaving] = useState(false);
+  const [message, setMessage] = useState<string | null>(null);
+  const [copied, setCopied] = useState(false);
   const snippet = `{
   "$schema": "https://opencode.ai/config.json",
   "provider": {
@@ -67,15 +73,64 @@ export function GatewayPage({ data }: { data: Overview }) {
         </dl>
       </Panel>
 
+      <Panel title="运行设置">
+        <form
+          className="flex flex-wrap items-end gap-3"
+          onSubmit={(event) => {
+            event.preventDefault();
+            setSaving(true);
+            setMessage(null);
+            void patchConfig({ gateway: { maxAttempts: Number(maxAttempts) } })
+              .then(() => {
+                setMessage("已保存");
+                refresh?.();
+              })
+              .catch((err) => setMessage(err instanceof Error ? err.message : String(err)))
+              .finally(() => setSaving(false));
+          }}
+        >
+          <label className="flex flex-col gap-1">
+            <span className="text-text-muted">最多尝试 Worker 数</span>
+            <input
+              type="number"
+              min={1}
+              max={10}
+              required
+              value={maxAttempts}
+              onChange={(e) => setMaxAttempts(e.target.value)}
+              className="min-h-[44px] w-40 rounded-sm border border-border-strong bg-bg px-3"
+            />
+          </label>
+          <PrimaryButton type="submit" onClick={() => undefined} disabled={saving}>
+            {saving ? "保存中…" : "保存"}
+          </PrimaryButton>
+          {message !== null && <span className="text-text-muted">{message}</span>}
+        </form>
+      </Panel>
+
       <Panel title="客户端配置">
         <p className="mb-3 text-text-muted">
           覆盖 OpenCode 内置的 <Mono>opencode</Mono> provider，只给{" "}
           <Mono>baseURL</Mono> 与 <Mono>apiKey</Mono>。放在{" "}
           <Mono>~/.config/opencode/opencode.json</Mono> 或项目根目录。
         </p>
-        <pre className="overflow-x-auto rounded-md border border-border-strong bg-bg p-3 font-mono">
-          {snippet}
-        </pre>
+        <div className="relative">
+          <pre className="overflow-x-auto rounded-md border border-border-strong bg-bg p-3 pr-28 font-mono">
+            {snippet}
+          </pre>
+          <button
+            type="button"
+            className="absolute right-2 top-2 min-h-[40px] rounded-xs border border-border-strong bg-surface px-3"
+            onClick={() => {
+              void navigator.clipboard?.writeText(snippet).then(() => {
+                setCopied(true);
+                window.setTimeout(() => setCopied(false), 1500);
+              });
+            }}
+          >
+            {copied ? "已复制" : "复制"}
+          </button>
+        </div>
         <p className="mt-3 text-text-muted">
           <Strong>不要写 <Mono>models</Mono> 块</Strong> —— 内置 provider 自带模型表，
           手写一份会随上游目录变化而过期。

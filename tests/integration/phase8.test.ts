@@ -812,7 +812,7 @@ describe("setup 对 GLOBAL 分组的处置", () => {
  * ================================================================== */
 
 describe("setup 刻意不创建 Worker", () => {
-  it("只配出口,并说明为什么不建匿名 Worker", async () => {
+  it("只配出口,并说明认证与匿名 Worker 都可由用户创建", async () => {
     await writeConfig();
     await startFakeClash({});
 
@@ -826,7 +826,7 @@ describe("setup 刻意不创建 Worker", () => {
      */
     expect(after.workers).toHaveLength(0);
     expect(after.proxies.length).toBeGreaterThan(0);
-    expect(result.stdout).toContain("FreeTierError");
+    expect(result.stdout).toContain("匿名 Worker");
   });
 });
 

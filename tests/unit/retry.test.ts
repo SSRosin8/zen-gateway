@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import { Response as UndiciResponse } from "undici";
+import { Response as UndiciResponse, type RequestInit as UndiciRequestInit } from "undici";
 import { runRetryChain, type AttemptRecord, type AttemptTarget } from "../../src/core/upstream/retry.ts";
 import { EgressSetupError } from "../../src/core/upstream/fetch.ts";
 import type { UpstreamDeps } from "../../src/core/upstream/fetch.ts";
@@ -103,6 +103,35 @@ describe("重试链：成功路径", () => {
       },
     });
     expect(seen).toEqual(["key-1-not-real", "key-2-not-real"]);
+  });
+
+  it("客户端取消会终止当前尝试且不进入下一次重试", async () => {
+    const controller = new AbortController();
+    let calls = 0;
+    const pool = new DispatcherPool({ headersTimeoutMs: 1000, bodyTimeoutMs: 1000 });
+    const d: UpstreamDeps = {
+      config: config(),
+      dispatchers: pool,
+      locks: new SelectorLockRegistry(),
+      controllerFor: () => null,
+      fetchImpl: (async (_url: string, init: UndiciRequestInit) => {
+        calls += 1;
+        return await new Promise<UndiciResponse>((_resolve, reject) => {
+          init.signal?.addEventListener("abort", () => reject(init.signal?.reason));
+        });
+      }) as unknown as NonNullable<UpstreamDeps["fetchImpl"]>,
+    };
+
+    const pending = runRetryChain({
+      ...baseInput,
+      targets: targets(2),
+      deps: d,
+      signal: controller.signal,
+    });
+    controller.abort();
+    await expect(pending).rejects.toBeDefined();
+    expect(calls).toBe(1);
+    await pool.close();
   });
 });
 

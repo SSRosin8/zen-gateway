@@ -38,22 +38,14 @@ describe("isUsable", () => {
     expect(isUsable(cfg.workers[0]!)).toBe(false);
   });
 
-  it("没有 apiKey 的不可用,即便 kind 声明是匿名", () => {
-    /*
-     * 上游已于 2026-09-16 前后关闭免 key 通道(免费模型返回 403 FreeTierError)。
-     * 没有 key 的 Worker 发出去必定失败,放进候选链只会白占一次尝试,
-     * 并把真实原因(没配 key)埋进重试日志。
-     *
-     * 按「有没有 key」而不按 kind 判断:kind 是用户的声明,
-     * key 是能不能用的事实,后者才是调度该依据的。
-     */
+  it("匿名 Worker 没有 apiKey 也可用", () => {
     const cfg = config([{ id: "w1", kind: "anonymous", apiKey: "" }]);
-    expect(isUsable(cfg.workers[0]!)).toBe(false);
+    expect(isUsable(cfg.workers[0]!)).toBe(true);
   });
 
-  it("只有空白的 apiKey 也不可用", () => {
+  it("匿名 Worker 的空白 apiKey 也可用", () => {
     const cfg = config([{ id: "w1", kind: "anonymous", apiKey: "   " }]);
-    expect(isUsable(cfg.workers[0]!)).toBe(false);
+    expect(isUsable(cfg.workers[0]!)).toBe(true);
   });
 
   it("启用 + 有 key 才可用", () => {
@@ -71,7 +63,7 @@ describe("sync", () => {
         { id: "w3", kind: "anonymous", apiKey: "" },
       ]),
     );
-    expect(pool.all().map((w) => w.id)).toEqual(["w1"]);
+    expect(pool.all().map((w) => w.id)).toEqual(["w1", "w3"]);
   });
 
   it("保留配置顺序 —— 用户手排的优先级不能被打乱", () => {

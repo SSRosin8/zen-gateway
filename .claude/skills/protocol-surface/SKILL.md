@@ -1,6 +1,6 @@
 ---
 name: protocol-surface
-description: Use when adding or changing a client protocol surface (chat / responses / messages), touching the relay request pipeline, retry/cooldown behaviour, or free-model gating. Encodes the seven control-flow invariants and the order the seven relay steps must keep. Trigger on 协议面, 转发, relay, 重试, 冷却, 免费判定, surface, retry, cooldown, streaming, SSE, 透传.
+description: 新增或修改客户端协议面、转发请求链、重试、冷却、免费模型判定或流式透传时使用。覆盖 chat、responses、messages 的注册、凭证头、会话亲和、取消传播、响应旁路解析，以及七条控制流不变量和七步处理顺序。改动前核对实现，改动后验证失败路径。
 ---
 
 # 协议面与转发链
@@ -28,7 +28,7 @@ description: Use when adding or changing a client protocol surface (chat / respo
 
 | # | 步骤 | 为什么在这个位置 |
 |---|---|---|
-| 1 | 读**原始字节**（只读一次） | 转发出去的必须是客户端的原始字节 |
+| 1 | 有界读取**原始字节**（只读一次，上限 64 MiB） | 先查声明大小，再逐块限制实读大小；转发仍使用原始字节 |
 | 2 | 解析一份**副本**做判定 | `JSON.parse`→`stringify` 往返**不是无损的**（实测 `{"n":1.0}` → `{"n":1}`） |
 | 3 | 免费判定 | 放行付费模型的代价是真金白银，且请求发出无法收回 |
 | 4 | 流式能力校验 | 面声明 `streaming: "none"` 时拒绝流式请求 |
@@ -52,16 +52,16 @@ description: Use when adding or changing a client protocol surface (chat / respo
    **实际承接者**而不是候选链首位。`plan` 绑 w1 而重试链静默转到 w2 成功时，
    签发推理块的是 w2 —— 不改绑则 w1 冷却结束后客户端回放必被拒。
    **这个缺陷只有集成测试查得出来**（单测模拟的是"冷却发生在 plan 之前"）。
-4. **不可重试的 4xx 记成功**：那是上游的真实回答，不是 Worker 的故障。
-   `blameWorker = failure !== "bad_request"`，而分支判据从 `shouldCooldown`
-   推导（单一真相）。
+4. **`bad_request` 与出口配置错误不归咎 Worker**：失败计数清零，已有冷却保留。
+   `Scheduler.record()` 结合 `blameWorker` 与 `shouldCooldown` 判定，
+   只有成功才清除冷却；401/403 的 `auth` 仍会冷却该 Worker。
 5. **selector 锁的范围**：`fetch.ts` 返回 Response 而**不是**读完 body 的
    promise —— keep-alive 连接复用会击穿锁，所以 `nodeName` 必须参与
    dispatcher 的缓存键。
 6. **headers/body 超时分开，三个时刻分开**：会话绑定用 **plan** 时刻、
    冷却用**失败**时刻、指纹学习用**流结束**时刻。
-   前提事实：`bodyTimeoutMs` 默认 300000 > `transportMaxMs` 上限 120000，
-   所以单一 `now` 的设计会让 **body 空闲超时的 Worker 永不冷却**。
+   冷却按尝试结束时刻计算，不把漫长的等待算进冷却期。当前尝试在响应头
+   到达时结算，后续 body 断流不另记一次失败；默认超时以 schema 为准。
 7. **每节点一个 dispatcher**，键含 sha256 凭证指纹（**不是长度** ——
    等长的错口令会撞键，于是"改掉一个等长的错口令"后仍复用旧 dispatcher，
    鉴权永久失败）。
@@ -80,38 +80,43 @@ description: Use when adding or changing a client protocol surface (chat / respo
 - **跨块扫描要带重叠窗口**：拒绝消息可能被切在两块之间，而漏掉的症状
   取决于上游的分块位置 —— 时有时无，极难复现。
 
-结算三种结局：检出失效推理 → 解绑 + 忘掉指纹；2xx 且**完整读完** →
-学习指纹；**不完整**（断流/客户端按 ESC）→ **什么都不做**。
+结算按顺序判定：检出失效推理 → 解绑 + 忘掉指纹（即使随后断流）；
+未检出失效推理且 2xx **完整读完** → 学习指纹；其他不完整响应不学习。
+客户端取消信号贯穿 selector 排队、fetch 与重试链，取消后不再尝试下一个 Worker。
 
 ## 免费判定
 
-**（后缀命中 ∪ `extraFreeIds`）∩ 在架目录**。交集是已下架 id 自动失效的
-**唯一**机制。
+免费依据是**后缀命中 ∪ `extraFreeIds`**；目录存在且 `enforceCatalog` 开启时，
+再与在架目录求交集。关闭交集不会关闭免费依据校验。
 
 **不对称要记住**：交集能自动剔除下架的，但**新出现的无后缀免费模型无法
 自动发现** —— 上游 `/models` 给在架性却不给价格。
 
 **目录缺失时放行而不是拒绝**，与"默认拒绝"不冲突：默认拒绝针对"判定不出
 免费"（放行代价是钱），而目录缺失时免费依据仍成立，缺的只是"是否还在架"，
-后果只是上游拒绝、不产生费用。反过来做的话一次上游抖动会让网关拒绝一切。
+网关会标记 `suffix_unverified` 或 `extra_unverified`。目录不提供价格，
+本地规则也不能证明上游永远免费，人工名单需要按上游定价核对。
 
 ## 各面独有的坑
 
 | 面 | 独有的事 |
 |---|---|
 | `chat` | 无体内会话标识，亲和只能靠 `x-opencode-session` |
-| `responses` | `previous_response_id` 是**体内**会话指针，优先于头 |
-| `messages` | 必须把 key 镜像到 `x-api-key`，并发 `anthropic-version` |
+| `responses` | `previous_response_id` 优先于头；成功完整响应中的 id 绑定实际 Worker，供下一轮续接 |
+| `messages` | 认证 Worker 的 key 镜像到 `x-api-key`；始终发送 `anthropic-version` |
+
+匿名 Worker 不发送 `Authorization` 或 `x-api-key`，也不合成 `Bearer public`。
+匿名身份是否能使用某个上游接口，须用真实客户端实测，不能由本地测试推断。
 
 `messages` 那条的失败方式最糟：只给 Bearer 时上游返回 **500** →
 归 `upstream_error` → 可重试且**归咎 Worker** → 客户端一用 Messages 面就把
 整池 Worker 打进冷却。详见 `docs/upstream-quirks.md` §8。
 
-## 验证只能用真实 OpenCode CLI
+## 客户端验收使用真实 OpenCode CLI
 
-免费额度闸门**查请求形态不查 key**，手搓 `curl` 必然得到
-`403 FreeTierError` —— 那是**预期行为而非故障**，所以"curl 打不通"
-不构成端到端失败的证据。
+历史手工探针遇到过 `403 FreeTierError`，真实 OpenCode CLI 经本网关也有成功记录。
+这些是特定日期、身份和请求形态的观察，不能推出所有 curl 都失败、所有 CLI 都成功，
+也不能用 403 证明 key 有效。具体证据见 `docs/upstream-quirks.md`。
 
 且证明"流量真的经过网关"要用**控制实验**（停掉网关 → 同一条命令必须失败
 → 重启 → 恢复），而不是读日志。

@@ -57,7 +57,8 @@ const POOL_ICON: Record<PoolHealth, string> = { empty: "○", healthy: "✓", de
 
 export function App() {
   const { view, navigate } = useViewState();
-  const { state } = useOverview();
+  const overview = useOverview();
+  const { state } = overview;
 
   return (
     <main className="mx-auto max-w-5xl px-6 py-10">
@@ -70,7 +71,7 @@ export function App() {
       <Nav current={view.page} onNavigate={(page) => navigate({ page })} />
 
       {state.status === "ready" ? (
-        <Body data={state.data} view={view} navigate={navigate} />
+        <Body data={state.data} view={view} navigate={navigate} refresh={overview.refresh} />
       ) : (
         /* 概览页:这里确实一个数字都没有,所以「尚未配置 Worker」是诚实的。 */
         <FallbackView state={state} showPool />
@@ -83,10 +84,12 @@ function Body({
   data,
   view,
   navigate,
+  refresh,
 }: {
   data: Overview;
   view: ReturnType<typeof useViewState>["view"];
   navigate: ReturnType<typeof useViewState>["navigate"];
+  refresh: () => void;
 }) {
   /*
    * 没有可用 Worker 时**任何页面之前先显示向导**。
@@ -102,10 +105,10 @@ function Body({
       {needsWizard && <Wizard data={data} />}
 
       {view.page === "overview" && <OverviewPage data={data} />}
-      {view.page === "gateway" && <GatewayPage data={data} />}
-      {view.page === "workers" && <WorkersPage data={data} view={view} navigate={navigate} />}
+      {view.page === "gateway" && <GatewayPage data={data} refresh={refresh} />}
+      {view.page === "workers" && <WorkersPage data={data} view={view} navigate={navigate} refresh={refresh} />}
       {view.page === "proxy" && <ProxyTab view={view} navigate={navigate} />}
-      {view.page === "models" && <ModelsTab view={view} navigate={navigate} />}
+      {view.page === "models" && <ModelsTab view={view} navigate={navigate} refresh={refresh} />}
       {view.page === "usage" && <UsageTab />}
     </div>
   );
@@ -127,9 +130,11 @@ function ProxyTab({
 function ModelsTab({
   view,
   navigate,
+  refresh,
 }: {
   view: ReturnType<typeof useViewState>["view"];
   navigate: ReturnType<typeof useViewState>["navigate"];
+  refresh: () => void;
 }) {
   /*
    * 模型目录以**天**为单位变化，所以 30s 一次够了 —— 与 Overview 的 3s
@@ -138,7 +143,7 @@ function ModelsTab({
    */
   const { state } = useEndpoint<ModelList>("/api/models", ModelListSchema, 30_000);
   if (state.status !== "ready") return <FallbackView state={state} />;
-  return <ModelsPage data={state.data} view={view} navigate={navigate} />;
+  return <ModelsPage data={state.data} view={view} navigate={navigate} refresh={refresh} />;
 }
 
 function UsageTab() {
