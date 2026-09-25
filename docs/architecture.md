@@ -536,8 +536,14 @@ auto 模式注释里那个"健康"**没有任何东西去测量**，实际行为
    于是「我有多少请求被网关自己挡了」现在完全无法回答，而
    `not_free` 与 `retired` 的处置完全不同（前者改模型名、后者删
    `extraFreeIds` 条目），哪种发生得多也不可观测（→ Phase 8/9）
-12. **「实现了但没有生产读者」的成员：逐个手写标注这个办法已经失效。**
-   第八轮审核把全仓的导出成员真数了一遍,得到的结论不是"数字变了",而是
+12. ~~**「实现了但没有生产读者」的成员：逐个手写标注这个办法已经失效。**~~ ——
+   **关卡已建成**（`tests/unit/exportsReferenced.test.ts`，提交 `07bbf3c`）：对白名单外的
+   每个导出成员断言至少有一个非定义处引用，白名单每项都要写明理由。
+   关卡自身带两条元断言（扫到的成员数、**真正被检查过**的成员数）——
+   第二条是变异逼出来的，而且逼了两次：先是循环体首行换 `continue` 后全绿，
+   再是把 `checked += 1` 放在循环开头后**仍然**全绿（计数对了而检查没做），
+   所以它必须放在算完 `referenced` 之后。
+   原文：第八轮审核把全仓的导出成员真数了一遍,得到的结论不是"数字变了",而是
    **这种标注方式本身不成立**：
 
    - 这里先前列的四个里有**两个已经错了**：`status()` 由 `/api/overview` 读、
@@ -550,8 +556,7 @@ auto 模式注释里那个"健康"**没有任何东西去测量**，实际行为
      `size`、`selectorLock.pending`/`size`、`headers.collectHeaders` 等等,量级约三十)
    - `chat.ts` 的 `looksLikeChatBody` 连测试引用都没有,是真正的死代码
 
-   结论不变、但依据更硬了：**该建的那道关卡（对白名单外的导出成员断言至少有一个
-   非定义处引用）现在是唯一可行的办法**。手写标注的漂移率已经实测出来 ——
+   依据：手写标注的漂移率已经实测出来 ——
    一轮之内漂了两处,而"有没有读者"这件事的唯一真相只能是调用点本身（纪律 #4）。
 
    > **Phase 8 没有接上其中任何一个**，这一点要说清楚而不是含糊过去。
@@ -560,9 +565,9 @@ auto 模式注释里那个"健康"**没有任何东西去测量**，实际行为
    > 而进程外没有任何出口拿到它。所以 doctor 的第 4 层明确写着「『可用』只表示
    > 配置形态对；它是否**就绪**（不在冷却中）眼下无法从外部查到」。
    >
-   > **Phase 9 之后这句话对 doctor 依然成立,但理由变了**：端点已经存在
-   > （`GET /api/overview` 带 `ready`/`cooldownRemainingMs`）,而 doctor 没去调它。
-   > 从"没有入口"变成了"有入口而诊断工具没接" —— 见缺口 #24。
+   > **这段引文的后半已被 `07bbf3c` 取代**：doctor 第 4 层现在真的去调
+   > `GET /api/overview` 读 `ready`/`cooldownRemainingMs`，拿不到才降级成只报形态
+   > —— 见缺口 #24。
 13. ~~**`recordProbe()` 无生产调用点且无测试覆盖**~~ —— **已接**进
    `EgressService.probeProxy`（汇合点）。**Phase 9 批次 1 起那条 SQL 真的在生产
    执行过了**：`POST /api/probe` 触发探测后 `probe_results` 第一次有了行
@@ -593,19 +598,21 @@ auto 模式注释里那个"健康"**没有任何东西去测量**，实际行为
    与「上游从不报用量显示成 100% 覆盖」严格对称，而处置方向相反
    （一个要改代码、一个不用）。修法是给 `model_usage` 加一列或让
    `recordUsage` 入参带上 `dropped`（→ Phase 9 做统计页时一起）
-18. **`SUM()` 的 int64 溢出仍未挡住**：`MIN(SUM(x), MAX_SAFE)` 只挡住了
+18. ~~**`SUM()` 的 int64 溢出仍未挡住**~~ —— **已修**（提交 `07bbf3c`）：六处聚合抽成
+   `saturatingSum()`，用 `CAST(MIN(total(x), MAX_SAFE) AS INTEGER)`（`total()` 恒返回
+   REAL，IEEE754 不溢出）。六处**必须同时改** —— 漏一处的症状是"某个聚合报错而
+   别的正常"。顺带确认行级 upsert 不需要改（两个已夹取的操作数相加是 2^54）。
+   原文：`MIN(SUM(x), MAX_SAFE)` 只挡住了
    「JS 转换阶段的越界」，而 `SUM` 的累加本身是 int64 —— 实测 **1025 个饱和行**
    （每行 MAX_SAFE = 2^53，2^53 × 1024 = 2^63）时 SQLite 直接报
    `integer overflow`，`MIN` 来不及夹。可达性极低（要上游持续报天文数字，
-   41 模型 × 3 Worker 约 9 天），但**注释与测试声称的性质比实际强**。
-   若要真做到，`CAST(MIN(total(x), MAX_SAFE) AS INTEGER)` 可以
-   （`total()` 返回 REAL 不溢出，实测 1025 行下正确返回）
-19. **`latencyMs` 可为负、非整数会丢整行**：`clock` 可注入任意实现而
+   41 模型 × 3 Worker 约 9 天），但**注释与测试声称的性质比实际强**
+19. ~~**`latencyMs` 可为负、非整数会丢整行**~~ —— **已修**（提交 `07bbf3c`）：抽出
+   `elapsedMs()` 做 `Math.max(0, Math.round(...))`，三处调用点统一。
+   原文：`clock` 可注入任意实现而
    `latencyMs = clock() - startedAt` 无下界也不取整。实测 `1.5` 会让 STRICT 表
    拒绝 REAL 进 INTEGER 列 → `recordAttempt` **整条事务回滚**，明细与累计
-   两条记录都丢（只留一个 `writeFailures` 计数）；`-5000` 照常写进库。
-   生产上 `clock` 恒为 `Date.now` 所以不可达，但 `Math.max(0, Math.round(...))`
-   的代价是一行，理由与 `clampTokens` 同源
+   两条记录都丢（只留一个 `writeFailures` 计数）；`-5000` 照常写进库
 20. ~~**明细表无保留策略**~~ —— **已加**：启动时清 30 天前的明细，并开 `secure_delete`（否则「已清理」是假保证）。原文：：`pruneExpired` 只管
    两张亲和表（它的注释说「增长受内存侧容量上限约束」，那句只对亲和表成立）。
    容量不是问题（实测约 157 B/行，每天 600 行约 47 MB/年），但**毫秒级时间戳
@@ -664,36 +671,51 @@ auto 模式注释里那个"健康"**没有任何东西去测量**，实际行为
    附带一条容易踩的：Vite 的 dev proxy 只转发 `/health` 与 `/api`，**不转发 `/v1`**
    （`vite.config.ts`），所以拿 `:5173` 测转发会得到 Vite 的 404 而不是网关的响应。
 
-24. **doctor 报不了「Worker 是否就绪」—— 现在的理由变了**：Phase 9 之后端点
+24. ~~**doctor 报不了「Worker 是否就绪」**~~ —— **已接**（提交 `07bbf3c`）：doctor 第 4 层
+   调 `GET /api/overview` 读 `ready` / `cooldownRemainingMs`。**关键是"问"而不是"算"**
+   —— 自己算一遍冷却会是第二份并行真相（纪律 #4）。全员冷却报 fail（此刻转发确实
+   不可用）、部分冷却报 warn；拿不到端点就降级成只报配置形态（服务可能正在重启），
+   而配置形态本身仍是有效信息 —— 这也保住了「服务起不来时 doctor 也能跑」这条定位。
+   原文：Phase 9 之后端点
    **已经存在**（`GET /api/overview` 带 `ready` / `cooldownRemainingMs`），
    而 doctor 没有去调它,第 4 层仍只报配置形态并把这个限制明写在输出里。
    所以这条从「没有入口」变成了「有入口而诊断工具没接」。
-   要接的话是让 doctor 调那个端点（而**不是**在 doctor 里重新实现一遍冷却判定
-   —— 那是纪律 #4 禁止的第二份并行真相）。眼下不做：doctor 的定位是
-   「服务起不来时也能跑」，而那个端点要求服务是活的。
 
-25. **`POST /api/probe` 的响应绕过投影层与 schema**（第八轮登记）：其余管理端点
+25. ~~**`POST /api/probe` 的响应绕过投影层与 schema**~~ —— **已补**（提交 `07bbf3c`）：
+   `contract.ts` 加了 `ProbeResultSchema`，那条端点与批测结果都经它。
+   原文：其余管理端点
    都是 `XxxSchema.parse(...)` + 由 `admin/project.ts` 构造，而这一条手工拼装
    `ProbeOutcome` 的字段，`contract.ts` 里也没有对应的 schema。
    **今天不泄漏凭证**（`reason` 来自 `safeErrorMessage`/`describeResolveFailure`，
    而 `probe.ts` 明确拒绝把响应正文放进 `reason`），但它在那条
    「凭证窄化集中在一处」的纪律**之外** —— 而那条纪律的全部价值在于
-   「新增端点时漏掉一个字段没有任何症状」。补一个 `ProbeResultSchema` 即可。
+   「新增端点时漏掉一个字段没有任何症状」。
 
-26. **`applyConfigPatch` 的 `changed` 按字段出现判定，不按值是否真的变**
-   （第八轮登记）：`if (x !== undefined) { assign; changed = true }`。
+26. ~~**`applyConfigPatch` 的 `changed` 按字段出现判定，不按值是否真的变**~~ ——
+   **已修**（提交 `07bbf3c`）：`changed` 由校验后的配置与原配置**真的比一次**得出
+   （`patch.ts:236`），而不是在每个赋值点跟一句 `changed = true`。
+   原文：`if (x !== undefined) { assign; changed = true }`。
    于是把一个字段写成它**当前的值**也会触发一次原子写 + Worker 池 re-sync，
    而管理 UI 提交的是整张表单 —— 也就是说网关页每次「保存」都会写盘。
    后果轻（写是原子的，re-sync 按 id 保留状态），但 `admin.ts` 的注释
    承诺的正是相反的行为。
 
-27. **同一个 patch 里 `delete X` + `create X` 会被拒**（第八轮登记）：
-   `patch.ts` 的注释说 delete 放在最后正是为了让「删掉再用同名重建」
+27. ~~**同一个 patch 里 `delete X` + `create X` 会被拒**~~ —— **已修**（提交 `07bbf3c`）：
+   重复 id 检查排除掉同请求内待删的 id（只在 `create` 排除，`update` 不排除 ——
+   更新一个同请求要删的 Worker 是自相矛盾的请求，该报错）。删除用 `findIndex`
+   取第一个匹配而 create 是 `push`，所以删掉的是旧的那个 —— **这个正确性依赖
+   "create 追加而不是插入开头"，所以它有一条独立断言**（不然把 push 改成
+   unshift 会静默删掉刚建的那个，症状是"我换了 key 但它没了"）。
+   原文：`patch.ts` 的注释说 delete 放在最后正是为了让「删掉再用同名重建」
    净化成一次 create，而实际 create 先跑并撞上重复 id 检查。
    于是「换一个 Worker 的 id/key」必须发两次请求。注释与行为相反。
 
-28. **两处死信息**（第八轮登记，都不影响当前行为）：
-   `batch_probe_jobs.started_at` 建行后永不更新（`ON CONFLICT DO UPDATE` 的
+28. ~~**两处死信息**~~ —— **均已修**（提交 `07bbf3c`）：
+   `batch_probe_jobs.started_at` 进了 `ON CONFLICT DO UPDATE` 的列清单；
+   直连出口的实测 IP 有了落点 `gateway.directEgressIp`（**刻意不造一条假 `Proxy`**
+   —— 本机直连没有 host/port/协议可言，硬塞成 Proxy 会让 `resolveProxy`、
+   dispatcher 缓存、UI 列表都要为这个特例开分支），于是直连 Worker 参与隔离分组。
+   原文：`batch_probe_jobs.started_at` 建行后永不更新（`ON CONFLICT DO UPDATE` 的
    列清单里没有它），且全仓无读者 —— 一旦有人显示「已跑多久」就会变成活缺陷；
    直连出口（`proxyId: null`）会被批量探测真发一次网络请求，而结果映射到
    合成 id `__direct__`，`config.proxies` 里没有这一行，于是测量被丢弃。
