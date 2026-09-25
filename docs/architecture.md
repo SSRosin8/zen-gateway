@@ -34,14 +34,14 @@ src/
 ├── server/
 │   ├── index.ts app.ts
 │   ├── middleware/      relayAuth / loopbackOnly / errorMap
-│   ├── admin/           管理面的投影与补丁合并（project / patch）
+│   ├── admin/           管理面的投影 / 补丁合并 / 批量探测执行器
 │   └── routes/          relay / models / admin
 ├── store/
 │   ├── paths.ts     data/ 与 config.json 的位置（轻量层，无第三方依赖）
 │   ├── port.ts      端口解析的唯一真相
 │   ├── config.ts    加载/校验/版本闸门/0600 原子写
 │   └── db/          sqlite schema + 迁移执行器
-└── admin/           React SPA（Overview 页已交付，其余 5 页在 Phase 9 批次 2）
+└── admin/           React SPA（6 页 + 首启向导；URL 承载全部视图状态）
 ```
 
 ### 三条不能改的结构约束
@@ -343,7 +343,7 @@ schema：实测 +57ms，而 `service.mjs status` 全程只有 51ms。
 | 6 | 其余协议面（`responses`/`messages`）+ 免费注册表与在架目录求交集 + `parseUsage` | ✅ |
 | 7 | 统计 SQL 聚合 + 亲和持久化 | ✅（**无 HTTP 端点** —— 管理 API 形状留给 Phase 9） |
 | 8 | `setup.mjs`（一键配置）、`doctor.mjs`（分层诊断）、`service.mjs` 打开浏览器 | ✅ |
-| 9 | 管理后台 6 页 + 首启向导 + 批量探测长任务状态机 | 🟡 批次 1 已交付（管理 API + Overview 页）；其余 5 页与向导待做 |
+| 9 | 管理后台 6 页 + 首启向导 + 批量探测长任务状态机 | ✅ |
 | 10 | 订阅拉取与多格式解析、多 Clash 内核择优 | 待做 |
 | 11 | 精简 `AGENTS.md`、4 个 skill、`docs/` 补全 | 部分 |
 
@@ -369,6 +369,47 @@ dispatcher/Controller 是否重建，取值范围由「碰撞会导致复用旧�
 写入方向的凭证是**三态**（`{set}` / `{clear:true}` / 缺席不动）：前端拿不到
 原值，所以不能靠「回传原值」表达「不动它」，而 `apiKey?: string` 会让一个未填的
 输入框静默抹掉能用的 key。
+
+### 批量探测的长任务（Phase 9 批次 2）
+
+三层分开，理由与 `routing/` 那四块同源 —— 判断能被穷举测试，执行层只需验证「接得对」：
+
+| 层 | 文件 | 职责 |
+|---|---|---|
+| 状态机 | `shared/batchProbe.ts` | 纯 reducer：`idle｜screening｜running｜paused｜cancelling｜done` |
+| 持久化 | `store/db/batchProbeStore.ts` | 进度落库（`batch_probe_jobs`，Phase 1 就按这个状态机建好了） |
+| 执行 | `server/admin/batchRunner.ts` | 按状态机的指示跑真实探测，把结果喂回去 |
+
+**进度归服务端所有**，这不是为了便利：探测**已经在跑**（在切 selector、在发
+真实请求），而前端内存里的进度只是它的倒影。真相放前端意味着刷新之后真相
+就没了 —— 而那批探测还在跑，用户此时看到「空闲」并再点开始，就会有两批并发
+互相换掉对方的出口节点。
+
+三条设计判断：
+
+- **两段进度不合成一个百分比**。合成要给两段定权重，而那个权重是编的：
+  筛选（纯本地 `resolveProxy`）比主探测（真发请求 + 切 selector）快得多，
+  于是进度条会先飞到 40% 再慢慢爬，用户会以为卡住了。
+- **`cancelling` 是独立中间态**，不是立刻回 `idle`：在途的那个探测还在跑，
+  立刻放开「开始」按钮会让用户启动第二批。
+- **中断要收尾**。`kill -9` 会在库里留下 `running`，而那批探测活在上一个进程里。
+  启动时标成 `done` + `failureKind: "interrupted"` —— 静默标成 idle 会让用户
+  以为它正常完成了，而不收尾则前端永远显示「探测中…」且唯一出路是手工改库。
+
+前端的轮询按 **generation 编号**防竞态：用户点取消时，一个取消之前发出的
+`GET` 正在途中，它带回来的是 `running`。照收会让界面从「正在取消」跳回
+「探测中」再跳回来。一次桥接探测几秒而轮询间隔 500ms，所以这是常态不是边角。
+
+### `relay.ts` 的拆分：当初给的理由实测不成立
+
+Phase 8 把它留到 Phase 9，理由是「那时管理 API 会真正增加转发层的调用者」。
+**Phase 9 做完后实测：`relay.ts` 仍然只有一个调用者**（`app.ts` 的
+`createRelayRoutes`）—— 管理 API 完全没碰它，它走的是自己的 `routes/admin.ts`
+与 `admin/{project,patch,batchRunner}.ts`。
+
+所以那个理由是**预测而不是观察**。801 行本身不构成依据（1000 行硬上限那条
+属于 **opencode-manager**，本项目从未有过），而「为了行数而拆」恰好是旧项目
+记在案的痛点。**结论：不拆，直到出现真实的第二调用者或职责边界真的变了。**
 
 ### 当前已知缺口
 
@@ -411,9 +452,9 @@ dispatcher/Controller 是否重建，取值范围由「碰撞会导致复用旧�
    与 relay 的 64 MiB 刻意不同：后者为多模态留的，管理面没有那个需求）。
    `content-length` 与实读长度**两处都查** —— 头可以撒谎或缺席，
    而只在读完之后检查等于上限没起作用
-10. **`models.defaultSurfaces` / `surfaceOverrides` 声明了但不设防**：`surfacesFor()`
-   已实现且有单测，但**全仓没有生产调用点** —— 这与第四轮那个 `streaming` 字段
-   是同一个形态（声明了却不读）。
+10. **`models.defaultSurfaces` / `surfaceOverrides` 声明了但不设防** —— 语义仍未定，
+   但 `surfacesFor()` 在 Phase 9 批次 2 **有了第一个生产调用点**（Models 页显示
+   每个模型声明支持哪些面），**只作展示、不参与放行判定**。
 
    **但不能顺手"补上"**：默认值是 `["chat", "responses"]`，若按它放行，
    默认配置下**所有**模型的 `/v1/messages` 请求都会被拒 —— 而那个面刚刚验证可用。

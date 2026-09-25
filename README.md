@@ -41,6 +41,7 @@ npm install
 npm start          # 构建 → 后台启动 → 健康等待 → 打印 URL
 npm run setup      # 可选：自动探测本机 Clash Controller 并导入节点
 npm run doctor     # 出问题先跑它 —— 分层诊断，只报第一个失败的层
+npm run dev        # 管理后台（6 页 + 首启向导），另开一个终端
 ```
 
 首次启动会生成 `data/config.json`（0600 权限）并自动生成 Relay Token。
@@ -89,6 +90,10 @@ opencode run --model opencode/mimo-v2.6-flash-free "Reply with exactly: OK"
 这些是硬要求，每条都有测试守着：
 
 - 管理面**仅 loopback**，且**绝不**把 `X-Forwarded-For` 当作来源证据
+- 管理面**绝不回显凭证**：API key / Relay Token / Clash secret / 代理口令只给
+  「有没有 + 8 位指纹」。用指纹而不是长度 —— 等长的两个 key 长度相同，
+  于是「我改了没生效」在界面上不可见
+- 管理面的 JSON 请求体有上限（1 MiB）；转发面对多模态保持无界
 - Relay Token 定长比较；空 token 时**拒绝所有请求**（不是放行所有请求）
 - `config.json` 0600 + 原子写；`data/` 0700
 - API key、代理口令、Clash secret、带 token 的订阅 URL 在所有日志/错误/统计里脱敏
