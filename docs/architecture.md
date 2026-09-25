@@ -598,3 +598,31 @@ Phase 8 把它留到 Phase 9，理由是「那时管理 API 会真正增加转�
    要接的话是让 doctor 调那个端点（而**不是**在 doctor 里重新实现一遍冷却判定
    —— 那是纪律 #4 禁止的第二份并行真相）。眼下不做：doctor 的定位是
    「服务起不来时也能跑」，而那个端点要求服务是活的。
+
+25. **`POST /api/probe` 的响应绕过投影层与 schema**（第八轮登记）：其余管理端点
+   都是 `XxxSchema.parse(...)` + 由 `admin/project.ts` 构造，而这一条手工拼装
+   `ProbeOutcome` 的字段，`contract.ts` 里也没有对应的 schema。
+   **今天不泄漏凭证**（`reason` 来自 `safeErrorMessage`/`describeResolveFailure`，
+   而 `probe.ts` 明确拒绝把响应正文放进 `reason`），但它在那条
+   「凭证窄化集中在一处」的纪律**之外** —— 而那条纪律的全部价值在于
+   「新增端点时漏掉一个字段没有任何症状」。补一个 `ProbeResultSchema` 即可。
+
+26. **`applyConfigPatch` 的 `changed` 按字段出现判定，不按值是否真的变**
+   （第八轮登记）：`if (x !== undefined) { assign; changed = true }`。
+   于是把一个字段写成它**当前的值**也会触发一次原子写 + Worker 池 re-sync，
+   而管理 UI 提交的是整张表单 —— 也就是说网关页每次「保存」都会写盘。
+   后果轻（写是原子的，re-sync 按 id 保留状态），但 `admin.ts` 的注释
+   承诺的正是相反的行为。
+
+27. **同一个 patch 里 `delete X` + `create X` 会被拒**（第八轮登记）：
+   `patch.ts` 的注释说 delete 放在最后正是为了让「删掉再用同名重建」
+   净化成一次 create，而实际 create 先跑并撞上重复 id 检查。
+   于是「换一个 Worker 的 id/key」必须发两次请求。注释与行为相反。
+
+28. **两处死信息**（第八轮登记，都不影响当前行为）：
+   `batch_probe_jobs.started_at` 建行后永不更新（`ON CONFLICT DO UPDATE` 的
+   列清单里没有它），且全仓无读者 —— 一旦有人显示「已跑多久」就会变成活缺陷；
+   直连出口（`proxyId: null`）会被批量探测真发一次网络请求，而结果映射到
+   合成 id `__direct__`，`config.proxies` 里没有这一行，于是测量被丢弃。
+   后者是个真实需求（直连与某个代理 NAT 到同一出口正是「看起来隔离其实没有」
+   的情形）碰上了存储模型表达不了它。
