@@ -3,7 +3,7 @@ import { reduce, type BatchProgress } from "../../shared/batchProbe.ts";
 import { INITIAL } from "../../shared/batchProbe.ts";
 import type { BatchProbeStore } from "../../store/db/batchProbeStore.ts";
 import type { EgressService } from "../../core/proxy/egress.ts";
-import { applyProbeResult } from "../../core/proxy/egress.ts";
+import { applyProbeResults } from "../../core/proxy/egress.ts";
 import { resolveProxy } from "../../core/proxy/pool.ts";
 import { isUsable } from "../../core/routing/workerPool.ts";
 import { safeErrorMessage } from "../../shared/redact.ts";
@@ -88,6 +88,16 @@ export class BatchProbeRunner {
   /** 当前进度。前端轮询这个。 */
   snapshot(): BatchProgress {
     return this.#progress;
+  }
+
+  /**
+   * 本批开始的时刻（毫秒时间戳）；从未跑过时为 null。
+   *
+   * 给 `elapsedMs` 用 —— 前端算不了这个数：刷新页面后它不知道这一批是
+   * 什么时候开始的，而进度本身归服务端所有。
+   */
+  startedAt(): number | null {
+    return this.#startedAt;
   }
 
   #dispatch(event: Parameters<typeof reduce>[1]): void {
@@ -285,18 +295,15 @@ export class BatchProbeRunner {
     if (outcomes.size === 0) return;
     const config = this.#deps.configOf();
 
-    let changed = false;
-    const proxies = config.proxies.map((proxy) => {
-      const outcome = outcomes.get(proxy.id);
-      if (outcome === undefined) return proxy;
-      const updated = applyProbeResult(proxy, outcome);
-      if (updated.egressIp !== proxy.egressIp) changed = true;
-      return updated;
-    });
-
-    if (!changed) return;
+    /*
+     * 走 `applyProbeResults`（与 `POST /api/probe` 同一个函数）—— 它同时处理
+     * **本机直连**那条（合成 id → `gateway.directEgressIp`）。
+     * 两处各写一遍必然漏，先前就是两处都只并了 proxies（缺口 #28）。
+     */
+    const merged = applyProbeResults(config, outcomes);
+    if (!merged.changed) return;
     try {
-      await this.#deps.applyConfig({ ...config, proxies });
+      await this.#deps.applyConfig(merged.config);
     } catch (err) {
       /*
        * 写盘失败**不影响探测结果的有效性** —— 它们已经被测到了，

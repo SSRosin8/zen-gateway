@@ -341,17 +341,98 @@ async function layerWorkers() {
   }
 
   const bound = usable.filter((w) => w.proxyId !== null).length;
-  const status = usable.length < workers.length ? "warn" : "pass";
+  const shape = `其中 ${bound} 个绑定了出口代理,${usable.length - bound} 个走本机直连。`;
+
+  /*
+   * 运行期就绪态 —— **问服务，不自己算**（缺口 #24）。
+   *
+   * 这一层先前只报配置形态，并在输出里写着「是否就绪 doctor 查不到」。
+   * Phase 9 之后那句话不再成立：`GET /api/overview` 带 `ready` 与
+   * `cooldownRemainingMs`，而 doctor 本来就已经在问服务（第 6 层查 /v1/models）。
+   *
+   * **关键是"问"而不是"算"**：在 doctor 里重新实现一遍冷却判定会是第二份
+   * 并行真相（纪律 #4），且必然与调度器分叉 —— 那时 doctor 说「就绪」而
+   * 转发说「在冷却」，两句话都出自本项目。
+   *
+   * 拿不到就退回只报形态（服务可能刚好在重启，或 `/api/overview` 因某个
+   * 原因不可用）—— **降级而不是失败**：配置形态本身仍然是有效信息。
+   */
+  const runtime = await workerRuntime();
+
+  if (runtime === null) {
+    return {
+      status: usable.length < workers.length ? "warn" : "pass",
+      text: `${usable.length}/${workers.length} 个 Worker 可用(仅配置形态)`,
+      detail:
+        `${shape}\n` +
+        `⚠️ 没能从 /api/overview 拿到运行期状态,所以「是否就绪(不在冷却中)」这一项未检查。\n` +
+        `   doctor 刻意不自己算一遍冷却:那会是第二份并行真相,且必然与调度器分叉。`,
+    };
+  }
+
+  const ready = runtime.filter((w) => w.ready);
+  const cooling = runtime.filter((w) => w.inPool && !w.ready);
+  const coolingLines = cooling.map(
+    (w) =>
+      `   ${w.id}: 冷却中 ${humanMs(w.cooldownRemainingMs)}` +
+      `${w.lastFailure === null ? "" : `(${w.lastFailure})`}` +
+      `${w.consecutiveFails > 0 ? ` · 连续失败 ${w.consecutiveFails} 次` : ""}`,
+  );
+
+  /*
+   * 全员冷却是 fail 而不是 warn：此刻任何请求都会被 `all_cooling` 分支
+   * 送到「最早恢复的那个」，也就是转发在这一刻是不可用的。
+   * 部分冷却是 warn —— 池子还能工作。
+   */
+  const status =
+    ready.length === 0 && runtime.some((w) => w.inPool)
+      ? "fail"
+      : cooling.length > 0 || usable.length < workers.length
+        ? "warn"
+        : "pass";
+
   return {
     status,
-    text: `${usable.length}/${workers.length} 个 Worker 可用`,
-    detail:
-      `其中 ${bound} 个绑定了出口代理,${usable.length - bound} 个走本机直连。\n` +
-      `⚠️ 「可用」只表示配置形态对(已启用且有 key)。是否**就绪**(不在冷却中)\n` +
-      `   doctor 查不到 —— 那是服务进程里的运行期状态。要看就绪态与剩余冷却:\n` +
-      `   管理后台的 Worker 页(npm run dev),或 curl :${ctx.config?.gateway.port ?? "<端口>"}/api/overview。\n` +
-      `   doctor 刻意不自己算一遍冷却:那会是第二份并行真相,且必然与调度器分叉。`,
+    text: `${ready.length}/${usable.length} 个 Worker 就绪(共配置 ${workers.length} 个)`,
+    detail: [shape, ...coolingLines].join("\n"),
+    ...(ready.length === 0 && runtime.some((w) => w.inPool)
+      ? {
+          nextStep:
+            "全部 Worker 都在冷却 —— 此刻转发会打到最早恢复的那个。\n" +
+            "若冷却类别是 auth,那是 key 配错了(固定 60 秒短退避,会反复暴露);\n" +
+            "若是 rate_limit,那是上游限流,等它过去。",
+        }
+      : {}),
   };
+}
+
+/**
+ * 从 `/api/overview` 取 Worker 的运行期状态。
+ *
+ * 返回 null 表示"拿不到" —— 调用方据此降级成只报配置形态。
+ * **不在这里解释失败原因**：第 2 层已经确认服务健康，所以走到这里失败
+ * 是个边角情况（刚好在重启），不值得多一层诊断输出。
+ */
+async function workerRuntime() {
+  try {
+    const res = await fetch(`${instance.base}/api/overview`, {
+      signal: AbortSignal.timeout(5_000),
+    });
+    if (!res.ok) return null;
+    const body = await res.json();
+    const workers = body?.workers;
+    if (!Array.isArray(workers)) return null;
+    return workers.map((w) => ({
+      id: typeof w?.id === "string" ? w.id : "?",
+      inPool: w?.inPool === true,
+      ready: w?.ready === true,
+      cooldownRemainingMs: typeof w?.cooldownRemainingMs === "number" ? w.cooldownRemainingMs : 0,
+      consecutiveFails: typeof w?.consecutiveFails === "number" ? w.consecutiveFails : 0,
+      lastFailure: typeof w?.lastFailure === "string" ? w.lastFailure : null,
+    }));
+  } catch {
+    return null;
+  }
 }
 
 /**

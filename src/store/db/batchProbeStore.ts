@@ -49,6 +49,11 @@ export class BatchProbeStore {
         cancel_requested = excluded.cancel_requested,
         added_worker_ids = excluded.added_worker_ids,
         failure_kind     = excluded.failure_kind,
+        -- started_at 也要更新（缺口 #28）：先前它不在这个列清单里，于是第一次
+        -- 批测写下的值会存一辈子。当时没有读者所以不出症状，而那正是"死信息"
+        -- 的形态 —— 一旦有人显示「已跑多久」就会得到一个荒谬的数字。
+        -- 现在 BatchProgress.elapsedMs 读它，所以这一行是承重的。
+        started_at       = excluded.started_at,
         updated_at       = excluded.updated_at
     `);
 

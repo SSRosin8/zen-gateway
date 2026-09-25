@@ -276,6 +276,49 @@ describe("大数不让聚合崩掉", () => {
     expect(() => stats.rates()).not.toThrow();
     expect(stats.rates().cacheHitRate).toBe(0);
   });
+
+  it("**1025 个饱和行**也不抛 —— int64 累加本身的溢出（缺口 #18）", () => {
+    /*
+     * 上面那条只灌 3 行，所以它验的是「JS 转换阶段的越界」。
+     * 而 `SUM()` 的**累加本身是 int64**：2^53 × 1024 = 2^63，
+     * 也就是第 1025 个饱和行会让 SQLite 在 `MIN` 拿到值**之前**就抛
+     * `integer overflow`。
+     *
+     * 实测确认过这个分界（直接喂 SQLite）：
+     *   1025 行 × MAX_SAFE → `MIN(SUM(x), MAX_SAFE)` 抛 integer overflow
+     *   同样数据    → `CAST(MIN(total(x), MAX_SAFE) AS INTEGER)` 返回 MAX_SAFE
+     *
+     * 所以先前那个注释声称的性质**比实际强** —— 它只在 int64 还没溢出的
+     * 区间内成立。修法是换 `total()`（恒返回 REAL，而 IEEE754 不溢出）。
+     *
+     * 可达性极低（要上游持续报天文数字约 9 天），但这条断言的价值不在
+     * 可达性 —— 它在于让注释与实际相符：一个声称"已挡住溢出"而实际没挡的
+     * 注释，会让下一个人在这上面做判断。
+     */
+    const huge = Number.MAX_SAFE_INTEGER;
+    /*
+     * 直接写库而不是走 `recordUsage` —— 那要 1025 次事务，太慢。
+     * 这里要造的是**读侧**的输入条件（1025 个饱和行），
+     * 写侧的夹取由上面那条独立守着。
+     */
+    const insert = db.prepare(`
+      INSERT INTO model_usage
+        (model, worker_id, day, input_tokens, output_tokens, cache_read_tokens,
+         cache_write_tokens, requests_with_usage, requests_without_usage, requests_dropped_usage)
+      VALUES (?, ?, ?, ?, 0, 0, 0, 1, 0, 0)
+    `);
+    for (let i = 0; i < 1025; i += 1) {
+      insert.run("m", `w${i}`, "2026-09-01", huge);
+    }
+
+    // 关键：不抛。先前的实现在这里就是 `integer overflow`。
+    expect(() => stats.modelUsage()).not.toThrow();
+    expect(stats.modelUsage()[0]?.inputTokens).toBe(huge);
+
+    // 另外两个聚合走同一个片段，一起验。
+    expect(() => stats.rates()).not.toThrow();
+    expect(() => stats.workerTotals()).not.toThrow();
+  });
 });
 
 describe("写入侧的夹取（与读侧是两层，各自承重）", () => {

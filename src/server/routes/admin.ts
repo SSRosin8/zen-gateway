@@ -5,6 +5,7 @@ import {
   ConfigPatchSchema,
   ModelListSchema,
   OverviewSchema,
+  ProbeReportSchema,
   ProxyListSchema,
   StatsViewSchema,
   SubscriptionRefreshSchema,
@@ -13,7 +14,7 @@ import {
 } from "../../shared/contract.ts";
 import { poolHealth } from "../../shared/contract.ts";
 import { buildIsolationReport } from "../../core/proxy/probe.ts";
-import { applyProbeResult, type EgressService } from "../../core/proxy/egress.ts";
+import { applyProbeResults, type EgressService } from "../../core/proxy/egress.ts";
 import { judgeFree } from "../../core/models/free.ts";
 import { catalogIdentityOf, slotOf, type ModelCatalog } from "../../core/models/catalog.ts";
 import { safeErrorMessage } from "../../shared/redact.ts";
@@ -394,18 +395,17 @@ export function createAdminRoutes(deps: AdminDeps): Hono {
      * 把已确认隔离的节点退回「未知」。那条规则在纯函数里,这里只负责接线。
      */
     const byProxy = new Map(results.map((r) => [r.proxyId, r.outcome] as const));
-    let changed = false;
-    const nextProxies = config.proxies.map((proxy) => {
-      const outcome = byProxy.get(proxy.id);
-      if (outcome === undefined) return proxy;
-      const updated = applyProbeResult(proxy, outcome);
-      if (updated.egressIp !== proxy.egressIp) changed = true;
-      return updated;
-    });
+    /*
+     * 走 `applyProbeResults` 而不是自己 map 一遍 proxies —— 它同时处理
+     * **本机直连**那条（合成 id `__direct__` → `gateway.directEgressIp`）。
+     * 先前这里只并 proxies，于是直连的测量被静默丢弃（缺口 #28）。
+     */
+    const merged = applyProbeResults(config, byProxy);
+    const changed = merged.changed;
 
     if (changed) {
       try {
-        await deps.applyConfig({ ...config, proxies: nextProxies });
+        await deps.applyConfig(merged.config);
       } catch (err) {
         deps.log?.(`探测结果写入失败: ${safeErrorMessage(err)}`);
         return adminError(c, "write_failed", `探测成功但写入失败:${safeErrorMessage(err)}`);
@@ -419,7 +419,15 @@ export function createAdminRoutes(deps: AdminDeps): Hono {
      * 用户最需要的信息（本机实测过一次：混合端口配错时全部桥接代理传输失败，
      * 而控制面是通的 —— 只有逐条的 failureKind 能指出方向）。
      */
-    return c.json({
+    /*
+     * 过一遍 schema —— 与其余端点一致（缺口 #25）。
+     *
+     * 先前这一条是唯一绕过 schema 的管理响应。过 schema 挡的不是今天的泄漏
+     * （今天没有），而是"将来新增一个字段时忘了想它该不该出去" ——
+     * 那种漏洞没有任何症状，响应照常返回，只是多带了一样东西。
+     */
+    return c.json(
+      ProbeReportSchema.parse({
       ok: true,
       changed,
       results: results.map((r) => ({
@@ -428,7 +436,8 @@ export function createAdminRoutes(deps: AdminDeps): Hono {
           ? { ok: true as const, egressIp: r.outcome.egressIp, latencyMs: r.outcome.latencyMs, via: r.outcome.via }
           : { ok: false as const, failureKind: r.outcome.failureKind, reason: r.outcome.reason }),
       })),
-    });
+      }),
+    );
   });
 
   /**
@@ -615,7 +624,14 @@ export function createAdminRoutes(deps: AdminDeps): Hono {
     if (deps.batch === undefined) {
       return adminError(c, "internal_error", "批量探测不可用(统计库未就绪)");
     }
-    return c.json(BatchProgressSchema.parse(deps.batch.snapshot()));
+    const startedAt = deps.batch.startedAt();
+    return c.json(
+      BatchProgressSchema.parse({
+        ...deps.batch.snapshot(),
+        // 从未跑过 → null，而不是 0：「没开始」与「刚开始」是两件事。
+        elapsedMs: startedAt === null ? null : Math.max(0, Date.now() - startedAt),
+      }),
+    );
   });
 
   /**
@@ -675,7 +691,14 @@ export function createAdminRoutes(deps: AdminDeps): Hono {
         return adminError(c, "invalid_request", "action 必须是 start / pause / resume / cancel");
     }
 
-    return c.json(BatchProgressSchema.parse(deps.batch.snapshot()));
+    const startedAt = deps.batch.startedAt();
+    return c.json(
+      BatchProgressSchema.parse({
+        ...deps.batch.snapshot(),
+        // 从未跑过 → null，而不是 0：「没开始」与「刚开始」是两件事。
+        elapsedMs: startedAt === null ? null : Math.max(0, Date.now() - startedAt),
+      }),
+    );
   });
 
   return app;

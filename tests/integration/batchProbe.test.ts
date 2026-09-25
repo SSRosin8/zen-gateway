@@ -126,6 +126,23 @@ describe("进度归服务端所有", () => {
     expect(store.load()).toEqual({ progress: INITIAL, startedAt: null });
   });
 
+  it("**`started_at` 每批都要更新** —— 否则第一批的值会存一辈子（缺口 #28）", () => {
+    /*
+     * 先前 `started_at` 不在 upsert 的列清单里，于是行建好之后再也不变。
+     * 当时没有读者所以不出症状，而那正是"死信息"的形态 —— 一旦有人显示
+     * 「已跑多久」就会得到一个从第一次批测算起的荒谬数字。
+     *
+     * 现在 `BatchProgress.elapsedMs` 读它（服务端用 `Date.now() - started_at`
+     * 算），所以这一行是承重的。
+     */
+    store.save({ ...INITIAL, state: "running" }, 1_000, 1_000);
+    expect(store.load().startedAt).toBe(1_000);
+
+    // 第二批：开始时刻不同，库里必须跟着变。
+    store.save({ ...INITIAL, state: "running" }, 9_000_000, 9_000_000);
+    expect(store.load().startedAt).toBe(9_000_000);
+  });
+
   it("落盘后能用**另一个** store 实例读回 —— 刷新页面接着看", () => {
     const progress = {
       state: "running" as const,

@@ -63,26 +63,21 @@ export function applyConfigPatch(config: Config, patch: ConfigPatch): PatchResul
    * 于是改了配置下一个请求还在用旧的池。而这个偏差**不报任何错**。
    */
   const next = structuredClone(config) as Config;
-  let changed = false;
 
   /* ---- gateway ---- */
   if (patch.gateway !== undefined) {
     const g = patch.gateway;
     if (g.maxAttempts !== undefined) {
       next.gateway.maxAttempts = g.maxAttempts;
-      changed = true;
     }
     if (g.headersTimeoutMs !== undefined) {
       next.gateway.headersTimeoutMs = g.headersTimeoutMs;
-      changed = true;
     }
     if (g.bodyTimeoutMs !== undefined) {
       next.gateway.bodyTimeoutMs = g.bodyTimeoutMs;
-      changed = true;
     }
     if (g.relayToken !== undefined) {
       next.gateway.relayToken = applySecret(next.gateway.relayToken, g.relayToken);
-      changed = true;
     }
   }
 
@@ -91,19 +86,15 @@ export function applyConfigPatch(config: Config, patch: ConfigPatch): PatchResul
     const m = patch.models;
     if (m.freeSuffix !== undefined) {
       next.models.freeSuffix = m.freeSuffix;
-      changed = true;
     }
     if (m.extraFreeIds !== undefined) {
       next.models.extraFreeIds = [...m.extraFreeIds];
-      changed = true;
     }
     if (m.catalogTtlMs !== undefined) {
       next.models.catalogTtlMs = m.catalogTtlMs;
-      changed = true;
     }
     if (m.enforceCatalog !== undefined) {
       next.models.enforceCatalog = m.enforceCatalog;
-      changed = true;
     }
   }
 
@@ -111,9 +102,22 @@ export function applyConfigPatch(config: Config, patch: ConfigPatch): PatchResul
   if (patch.workers !== undefined) {
     const w = patch.workers;
 
+    /*
+     * 同一请求里要删掉的 id —— 它们不参与"重复 id"判定（缺口 #27）。
+     *
+     * 文件头承诺「删掉一个又同名新建的净效果是新建」，而先前的重复检查看的是
+     * `next.workers`（那里还有待删的那个），于是 `delete X` + `create X`
+     * 被拒 —— **注释与行为相反**。用户想换一个 Worker 的 id/key 时
+     * 必须发两次请求，而中间那一刻配置里少了一个 Worker。
+     *
+     * 只在 `create` 里排除，`update` 不排除：更新一个同请求内要删的 Worker
+     * 是自相矛盾的请求（改完就删），那种应当报错而不是静默接受。
+     */
+    const deleting = new Set(w.delete ?? []);
+
     if (w.create !== undefined) {
       for (const spec of w.create) {
-        if (next.workers.some((x) => x.id === spec.id)) {
+        if (next.workers.some((x) => x.id === spec.id) && !deleting.has(spec.id)) {
           return {
             ok: false,
             failure: { kind: "invalid_config", message: `Worker id 已存在:${spec.id}` },
@@ -145,7 +149,6 @@ export function applyConfigPatch(config: Config, patch: ConfigPatch): PatchResul
           };
         }
         next.workers.push(parsed.data as Worker);
-        changed = true;
       }
     }
 
@@ -168,18 +171,25 @@ export function applyConfigPatch(config: Config, patch: ConfigPatch): PatchResul
           ...(wp.proxyId !== undefined ? { proxyId: wp.proxyId } : {}),
           apiKey: applySecret(current.apiKey, wp.apiKey),
         };
-        changed = true;
       }
     }
 
     if (w.delete !== undefined) {
       for (const id of w.delete) {
+        /*
+         * `findIndex` 取**第一个**匹配,而 create 是 `push`（追加到末尾）——
+         * 于是 `delete X` + `create X` 删掉的是**旧的那个**,新建的留下。
+         * 那正是文件头承诺的"净效果是新建"。
+         *
+         * 这个正确性依赖"create 追加而不是插入开头",所以它有一条独立的断言
+         * （不然下一个人把 push 改成 unshift 就会静默删掉刚建的那个,
+         * 而症状是"我换了 key 但它没了"）。
+         */
         const index = next.workers.findIndex((x) => x.id === id);
         if (index === -1) {
           return { ok: false, failure: { kind: "not_found", message: `Worker 不存在:${id}` } };
         }
         next.workers.splice(index, 1);
-        changed = true;
       }
     }
   }
@@ -202,6 +212,28 @@ export function applyConfigPatch(config: Config, patch: ConfigPatch): PatchResul
       failure: { kind: "invalid_config", message: issueText(validated.error) },
     };
   }
+
+  /*
+   * `changed` 由**真的比一次**得出，而不是「有没有出现这个字段」（缺口 #26）。
+   *
+   * 先前每个赋值点都跟一句 `changed = true`，于是把一个字段写成它**当前的值**
+   * 也算"改了" —— 而管理 UI 提交的是整张表单，所以网关页每次「保存」都会触发
+   * 一次原子写 + Worker 池 re-sync，即使用户什么都没动。
+   * `admin.ts` 的注释承诺的正是相反的行为。
+   *
+   * 用 JSON 序列化比较而不是逐字段深比较：
+   *
+   * - `Config` 过 `ConfigSchema.parse` 之后只含 JSON 原语/数组/记录
+   *   （没有 Date/Map/undefined），所以序列化是无损的；
+   * - 字段顺序由 schema 固定（`structuredClone` 保序，赋值不新增键），
+   *   所以"同样的配置"一定得到同样的字符串；
+   * - 手写一份逐字段比较会是**第二份**关于"Config 有哪些字段"的真相，
+   *   而 schema 加字段时它不会跟着变（纪律 #4）。
+   *
+   * 比的是 `validated.data` 而不是 `next` —— schema 会补默认值，
+   * 而"补了一个默认值"不该算用户改了东西。
+   */
+  const changed = JSON.stringify(validated.data) !== JSON.stringify(config);
 
   return { ok: true, config: validated.data, changed };
 }

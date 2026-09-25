@@ -362,6 +362,46 @@ describe("尝试记录", () => {
     });
   });
 
+  it("`latencyMs` 恒为**非负整数** —— 时钟倒退或给小数都不会污染存储（缺口 #19）", async () => {
+    /*
+     * 两个都不是理论问题，是喂真 SQLite 实测过的：
+     *
+     * - `1.5` 进 `upstream_attempts.latency_ms`（STRICT 表的 INTEGER 列）被拒
+     *   （`cannot store REAL value in INTEGER column`）→ `recordAttempt`
+     *   **整条事务回滚** → 明细与累计两条记录一起丢，只留一个 writeFailures。
+     * - `-5000` **照常写进库**，于是"平均延迟"被一个负值拉偏而没人会喊。
+     *
+     * 生产上 `clock` 恒为 `Date.now` 所以两者都不可达 —— 但 `clock` 是
+     * 可注入的（测试要控时钟），而"这个参数只有测试会传奇怪的值"不是一个
+     * 能长期依赖的前提。
+     */
+    // 一、小数时钟 → 必须取整。
+    const fractional: AttemptRecord[] = [];
+    let f = 1_000;
+    await runRetryChain({
+      ...baseInput,
+      targets: targets(1),
+      deps: deps([jsonResponse(200, {})]).deps,
+      onAttempt: (x) => fractional.push(x),
+      clock: () => (f += 25.7),
+    });
+    expect(Number.isInteger(fractional[0]!.latencyMs)).toBe(true);
+    expect(fractional[0]!.latencyMs).toBe(26);
+
+    // 二、倒退的时钟（NTP 校时、或注入了一个递减的实现）→ 夹到 0，不出负数。
+    const backwards: AttemptRecord[] = [];
+    let b = 1_000;
+    await runRetryChain({
+      ...baseInput,
+      targets: targets(1),
+      deps: deps([jsonResponse(200, {})]).deps,
+      onAttempt: (x) => backwards.push(x),
+      clock: () => (b -= 5_000),
+    });
+    expect(backwards[0]!.latencyMs).toBe(0);
+    expect(backwards[0]!.latencyMs).toBeGreaterThanOrEqual(0);
+  });
+
   /*
    * 建连之前就失败时 `status` 必须是 **null** 而不是 0。
    *

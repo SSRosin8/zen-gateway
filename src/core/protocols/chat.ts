@@ -60,8 +60,14 @@ export const chatSurface: ProtocolSurface = {
  */
 export const MODELS_PATHS = ["/v1/models", "/models"] as const;
 
-/** 判断请求体是否为「至少形状合法」的 chat 请求,用于 400 早退。 */
-export function looksLikeChatBody(body: unknown): boolean {
-  if (!isRecord(body)) return false;
-  return Array.isArray(body["messages"]);
-}
+/*
+ * 这里先前有一个 `looksLikeChatBody(body)` —— 注释写着「用于 400 早退」，
+ * 而**全仓零引用**（连测试都没有）。第九轮建了那道关卡之后删掉它。
+ *
+ * 为什么是删而不是留着加白名单：它声称的职责已经由 `relay.ts` 第 2 步
+ * （解析副本 + 免费判定）实际承担了，而一个"看起来该用却没人用"的校验函数
+ * 是个陷阱 —— 下一个人会以为请求体形状已经被它挡过一道。
+ *
+ * 真要加"形状早退"的话，那是协议面接口上的一个能力位（像 `streaming`），
+ * 要在 `types.ts` 里声明并由 `relay.ts` 统一调用，而不是一个孤立的导出。
+ */

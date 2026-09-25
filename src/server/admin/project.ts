@@ -112,13 +112,21 @@ export function workerViews(
       consecutiveFails: state?.consecutiveFails ?? 0,
       lastFailure: state?.lastFailure ?? null,
       /*
-       * 出口 IP 来自绑定的代理。
+       * 出口 IP 来自绑定的代理；`proxyId` 为 null（本机直连）时来自
+       * `gateway.directEgressIp`（缺口 #28）。
        *
-       * `proxyId` 为 null（本机直连）时是 null 而不是「本机」——
-       * 我们确实**没有实测过**本机出口，而编一个值会让隔离报告
-       * 把所有直连 Worker 归成一组「已知相同」，那是个未经测量的断言。
+       * 先前直连一律给 null，理由是"没有实测过本机出口，而编一个值会让隔离
+       * 报告把所有直连 Worker 归成一组『已知相同』" —— **那个理由在没有
+       * 实测值时是对的**，而现在探测会真的把它测出来并落盘。
+       *
+       * 这条很要紧：直连出口与某个代理 NAT 到同一个公网 IP 恰好是
+       * 「看起来隔离其实没隔离」的形态，而它此前结构上不可能被发现。
+       * 仍未探测过时是 null（→ 隔离报告里算「未知」，不算已隔离）。
        */
-      egressIp: worker.proxyId === null ? null : (proxyById.get(worker.proxyId)?.egressIp ?? null),
+      egressIp:
+        worker.proxyId === null
+          ? config.gateway.directEgressIp
+          : (proxyById.get(worker.proxyId)?.egressIp ?? null),
     };
   });
 }
