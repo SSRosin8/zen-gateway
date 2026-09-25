@@ -24,7 +24,6 @@ import { BATCH_STATES, INITIAL, type BatchProgress, type BatchState } from "../.
 const JOB_ID = "SINGLETON";
 
 export class BatchProbeStore {
-  #db: DatabaseSync;
   #writeFailures = 0;
   #lastWriteError: string | null = null;
 
@@ -32,7 +31,6 @@ export class BatchProbeStore {
   #read: StatementSync;
 
   constructor(db: DatabaseSync) {
-    this.#db = db;
 
     this.#upsert = db.prepare(`
       INSERT INTO batch_probe_jobs (

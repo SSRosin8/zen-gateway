@@ -1,7 +1,7 @@
 import { randomBytes } from "node:crypto";
 import { constants as fsConstants } from "node:fs";
 import { access, chmod, mkdir, open, readFile, rename, stat, unlink } from "node:fs/promises";
-import { dirname, join, resolve } from "node:path";
+import { dirname, join } from "node:path";
 import { configPath, dataDir } from "./paths.ts";
 import { CONFIG_VERSION, ConfigSchema, type Config } from "../shared/schema.ts";
 import { safeErrorMessage } from "../shared/redact.ts";

@@ -218,7 +218,8 @@ describe("桥接转发：select 与建连必须原子，且锁在响应头后释
           }, locks),
           controllerFor: () =>
             ({
-              async select(group: string, node: string) {
+              // 参数带 `_` —— 接口要求这两个形参，这个假实现不用它们。
+              async select(_group: string, _node: string) {
                 events.push(`select:${tag}`);
                 await sleep(10);
               },
