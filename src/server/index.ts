@@ -10,6 +10,8 @@ import { Scheduler } from "../core/routing/scheduler.ts";
 import { openRuntimeDb } from "../store/db/open.ts";
 import { StatsStore } from "../store/db/stats.ts";
 import { AffinityStore } from "../store/db/affinityStore.ts";
+import { BatchProbeStore } from "../store/db/batchProbeStore.ts";
+import { BatchProbeRunner } from "./admin/batchRunner.ts";
 import { safeErrorMessage } from "../shared/redact.ts";
 
 /**
@@ -54,10 +56,12 @@ async function main(): Promise<void> {
    */
   let stats: StatsStore | undefined;
   let affinityStore: AffinityStore | undefined;
+  let batchStore: BatchProbeStore | undefined;
   try {
     const db = await openRuntimeDb();
     stats = new StatsStore(db);
     affinityStore = new AffinityStore(db);
+    batchStore = new BatchProbeStore(db);
   } catch (err) {
     console.error(
       `运行时数据库不可用,统计与亲和持久化本次停用(转发不受影响):${safeErrorMessage(err)}`,
@@ -150,7 +154,8 @@ async function main(): Promise<void> {
   const storeWriteFailures = (): number => {
     const a = stats?.writeFailures().count ?? 0;
     const b = affinityStore?.writeFailures().count ?? 0;
-    return a + b;
+    const c = batchStore?.writeFailures().count ?? 0;
+    return a + b + c;
   };
 
   const catalog = new ModelCatalog({ log: (message) => console.error(message) });
@@ -195,6 +200,31 @@ async function main(): Promise<void> {
     });
   };
 
+  /*
+   * 批量探测的执行器（Phase 9 批次 2）。
+   *
+   * **必须在 `applyConfig` 之后建**：它要拿那个函数把实测 IP 写回配置。
+   *
+   * 启动时先收尾遗留状态:崩溃或 `kill -9` 会让库里留下 `running`,而那批探测
+   * **已经不在跑了**（它活在上一个进程里）。不收尾的话前端永远显示「探测中…」、
+   * 按钮永远禁用,唯一出路是手工改库。标成 `done` 且带 `interrupted` ——
+   * 静默标成 idle 会让用户以为那批探测正常完成了。
+   */
+  let batchRunner: BatchProbeRunner | undefined;
+  if (batchStore !== undefined) {
+    const recovered = batchStore.recoverInterrupted(Date.now());
+    if (recovered) {
+      console.log("上次的批量探测被中断(进程退出),已标记为结束。");
+    }
+    batchRunner = new BatchProbeRunner({
+      configOf: () => config,
+      applyConfig,
+      egress,
+      store: batchStore,
+      log: (message) => console.error(message),
+    });
+  }
+
   const app = createApp({
     configOf: () => config,
     egress,
@@ -211,6 +241,7 @@ async function main(): Promise<void> {
       // 与转发面同一个实例 —— 两套 dispatcher 池/selector 锁会让探测量到的出口
       // 不是转发实际用的那个(不变量 #7 的延伸)。
       egress,
+      ...(batchRunner !== undefined ? { batch: batchRunner } : {}),
       /*
        * `/health` 的体从同一处构造 —— 不在两个地方各拼一份。
        *

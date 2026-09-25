@@ -1,7 +1,10 @@
 import { createHash } from "node:crypto";
 import type { Config, Proxy, Worker } from "../../shared/schema.ts";
-import type { SecretPresence, WorkerView } from "../../shared/contract.ts";
+import type { ModelView, ProxyView, SecretPresence, WorkerView } from "../../shared/contract.ts";
 import { isUsable, isWorkerReady } from "../../core/routing/workerPool.ts";
+import { describeResolveFailure, resolveProxy } from "../../core/proxy/pool.ts";
+import { judgeFree, surfacesFor } from "../../core/models/free.ts";
+import type { CatalogSnapshot } from "../../core/models/catalog.ts";
 
 /**
  * 配置 → 管理面视图的投影。
@@ -214,3 +217,88 @@ export function allSecretValues(config: Config): string[] {
 /** 判定一个 Worker 现在是否就绪 —— 转出以便 handler 不必认识 workerPool。 */
 export { isUsable, isWorkerReady };
 export type { Worker };
+
+/* ------------------------------------------------------------------ *
+ * 其余页面的投影（Phase 9 批次 2）
+ * ------------------------------------------------------------------ */
+
+/**
+ * 代理列表的投影。
+ *
+ * 三样东西由服务端算好，而不是让前端拼:
+ *
+ * 1. `password` → `SecretPresence`（代理口令是凭证）
+ * 2. `usedBy` —— 哪些 Worker 引用它。前端要按它显示「删掉会影响谁」，
+ *    而那个判断若在前端做，就与 `patch.ts` 的引用完整性校验成了两份实现，
+ *    分叉后界面会允许一个服务端必拒的操作。
+ * 3. `resolvable` —— 能否解析出一条出口路径。复用 `resolveProxy` 而不是
+ *    另写一份「Clash 开了吗 / 协议能直连吗」的判断（纪律 #4）。
+ */
+export function proxyViews(config: Config): ProxyView[] {
+  const usedByProxy = new Map<string, string[]>();
+  for (const w of config.workers) {
+    if (w.proxyId === null) continue;
+    const list = usedByProxy.get(w.proxyId) ?? [];
+    list.push(w.id);
+    usedByProxy.set(w.proxyId, list);
+  }
+
+  return config.proxies.map((p): ProxyView => {
+    const resolved = resolveProxy(config, p.id);
+    return {
+      id: p.id,
+      name: p.name,
+      type: p.type,
+      host: p.host,
+      port: p.port,
+      enabled: p.enabled,
+      source: p.source,
+      bridgeId: p.bridgeId ?? null,
+      clashNodeName: p.clashNodeName ?? null,
+      direct: p.direct,
+      bridgeable: p.bridgeable,
+      egressIp: p.egressIp,
+      password: displayFingerprint(p.password ?? ""),
+      usedBy: usedByProxy.get(p.id) ?? [],
+      resolvable: resolved.ok,
+      // 措辞复用 `describeResolveFailure` —— 与转发失败时用户看到的是同一句话。
+      unresolvableReason: resolved.ok ? null : describeResolveFailure(resolved.failure),
+    };
+  });
+}
+
+/**
+ * 模型列表的投影。
+ *
+ * ## 为什么要把**付费的也列出来**
+ *
+ * Models 页要回答「为什么这个模型不能用」，而那必须看到被拒的那些。
+ * 只列免费集的话，用户在 OpenCode 里看到一个模型名却在这里找不到它，
+ * 于是不知道是「网关不认识它」还是「网关拒绝它」。
+ *
+ * `reason` 直接来自 `judgeFree` 的联合类型 —— 不在这里另造一套措辞
+ * （纪律 #4：那会让界面说的理由与转发时的理由分叉）。
+ */
+export function modelViews(config: Config, snapshot: CatalogSnapshot | null): ModelView[] {
+  if (snapshot === null) return [];
+
+  const view = { ids: snapshot.ids };
+  return snapshot.entries.map((entry): ModelView => {
+    const verdict = judgeFree(entry.id, config.models, view);
+    return {
+      id: entry.id,
+      free: verdict.free,
+      reason: verdict.reason,
+      /*
+       * `surfacesFor` 终于有了生产调用点 —— 但**只作展示**，不参与放行判定。
+       *
+       * 缺口 #10 说清了为什么不能顺手把它接成闸门:默认值是
+       * `["chat","responses"]`，按它放行会让默认配置下**所有**模型的
+       * `/v1/messages` 请求被拒 —— 而那个面 Phase 6 刚验证可用。
+       * 上游并不按模型区分面，所以当闸门缺乏依据。这里是它该有的用法。
+       */
+      surfaces: [...surfacesFor(entry.id, config.models)],
+      listed: snapshot.ids.has(entry.id),
+    };
+  });
+}

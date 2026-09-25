@@ -9,7 +9,7 @@ import { EgressService } from "../../src/core/proxy/egress.ts";
 import { ModelCatalog } from "../../src/core/models/catalog.ts";
 import { Scheduler } from "../../src/core/routing/scheduler.ts";
 import { ConfigSchema, CONFIG_VERSION, type Config } from "../../src/shared/schema.ts";
-import { OverviewSchema, StatsViewSchema } from "../../src/shared/contract.ts";
+import { ModelListSchema, OverviewSchema, ProxyListSchema, StatsViewSchema } from "../../src/shared/contract.ts";
 import { applyConfigPatch } from "../../src/server/admin/patch.ts";
 import { allSecretValues, displayFingerprint } from "../../src/server/admin/project.ts";
 
@@ -873,5 +873,103 @@ describe("配置写入是原子的且权限正确", () => {
     expect(parsed.success).toBe(true);
 
     await rm(root, { recursive: true, force: true });
+  });
+});
+
+/* ================================================================== *
+ * 批次 2 的端点
+ * ================================================================== */
+
+describe("/api/proxies", () => {
+  it("代理口令换成指纹,且 usedBy 由服务端算好", async () => {
+    const config = makeConfig();
+    config.proxies[0]!.password = "proxy-password-must-not-leak";
+    const { app } = makeApp(config);
+
+    const { status, body } = await get(app, "/api/proxies");
+    expect(status).toBe(200);
+    const parsed = ProxyListSchema.parse(body);
+
+    // 代理口令是凭证 —— 与 apiKey 同一条规则。
+    expect(JSON.stringify(body)).not.toContain("proxy-password-must-not-leak");
+    expect(parsed.proxies[0]!.password.present).toBe(true);
+    expect(parsed.proxies[0]!.password.fingerprint).toHaveLength(8);
+
+    /*
+     * `usedBy` 由服务端算 —— 前端要按它显示「删掉这个代理会影响谁」，
+     * 而那个判断若在前端做，就与 `patch.ts` 的引用完整性校验成了两份实现。
+     */
+    expect(parsed.proxies[0]!.usedBy).toEqual(["w1"]);
+    expect(parsed.proxies[1]!.usedBy).toEqual(["w2"]);
+  });
+
+  it("resolvable 复用 resolveProxy，措辞与转发失败时一致", async () => {
+    const config = makeConfig();
+    // 停用一个 —— `resolveProxy` 对 disabled 返回失败。
+    config.proxies[0]!.enabled = false;
+    const { app } = makeApp(config);
+
+    const parsed = ProxyListSchema.parse((await get(app, "/api/proxies")).body);
+    const off = parsed.proxies.find((p) => p.id === "p1")!;
+
+    expect(off.resolvable).toBe(false);
+    // 措辞来自 `describeResolveFailure` —— 与转发失败时用户看到的是同一句话。
+    expect(off.unresolvableReason).toBeTruthy();
+    expect(parsed.proxies.find((p) => p.id === "p2")!.resolvable).toBe(true);
+  });
+});
+
+describe("/api/models", () => {
+  it("目录拿不到时 catalogAvailable 为 false,而不是返回空列表就完事", async () => {
+    const { app } = makeApp(makeConfig());
+    const parsed = ModelListSchema.parse((await get(app, "/api/models")).body);
+
+    /*
+     * 「拿不到目录」与「目录里一个模型都没有」的下一步完全不同:
+     * 前者查网络/CA，后者查 freeSuffix。只返回空列表会把用户引向错误方向。
+     */
+    expect(parsed.catalogAvailable).toBe(false);
+    expect(parsed.models).toEqual([]);
+    // 规则照常给出 —— 那来自配置，与目录无关。
+    expect(parsed.rules.freeSuffix).toBe("-free");
+  });
+});
+
+describe("/api/batch-probe", () => {
+  it("没有 runner 时报不可用,而不是假装空闲", async () => {
+    const { app } = makeApp(makeConfig());
+    const { status } = await get(app, "/api/batch-probe");
+    expect(status).toBe(500);
+  });
+
+  it("非法 action 被拒", async () => {
+    const { app } = makeApp(makeConfig());
+    const res = await app.request("http://127.0.0.1/api/batch-probe", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ action: "explode" }),
+    });
+    // 500（无 runner）或 400（非法 action）都可接受 —— 两者都不是「静默成功」。
+    expect([400, 500]).toContain(res.status);
+  });
+
+  it("两个端点都被回环闸门挡住", async () => {
+    const { app } = makeApp(makeConfig(), { address: "203.0.113.9" });
+    expect((await app.request("http://127.0.0.1/api/batch-probe")).status).toBe(403);
+    expect(
+      (
+        await app.request("http://127.0.0.1/api/batch-probe", {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ action: "start" }),
+        })
+      ).status,
+    ).toBe(403);
+  });
+
+  it("新端点也不例外:/api/proxies 与 /api/models 同样仅本机", async () => {
+    const { app } = makeApp(makeConfig(), { address: "203.0.113.9" });
+    expect((await app.request("http://127.0.0.1/api/proxies")).status).toBe(403);
+    expect((await app.request("http://127.0.0.1/api/models")).status).toBe(403);
   });
 });
