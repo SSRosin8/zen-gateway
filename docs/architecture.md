@@ -13,7 +13,7 @@
 src/
 ├── shared/      # 三端唯一契约 —— 必须浏览器可移植（admin 会打包它）
 │   ├── schema.ts    zod schema + 推导类型 + 引用完整性
-│   ├── contract.ts  /health 与 poolHealth 的契约
+│   ├── contract.ts  /health、poolHealth、管理 API 的读写契约
 │   ├── redact.ts    脱敏的单点定义
 │   └── ip.ts        IP 校验（WHATWG URL 实现，不用 node:net —— 见下）
 ├── core/
@@ -34,13 +34,14 @@ src/
 ├── server/
 │   ├── index.ts app.ts
 │   ├── middleware/      relayAuth / loopbackOnly / errorMap
-│   └── routes/          relay / models
+│   ├── admin/           管理面的投影与补丁合并（project / patch）
+│   └── routes/          relay / models / admin
 ├── store/
 │   ├── paths.ts     data/ 与 config.json 的位置（轻量层，无第三方依赖）
 │   ├── port.ts      端口解析的唯一真相
 │   ├── config.ts    加载/校验/版本闸门/0600 原子写
 │   └── db/          sqlite schema + 迁移执行器
-└── admin/           React SPA（Phase 0 的骨架，完整页面在 Phase 9）
+└── admin/           React SPA（Overview 页已交付，其余 5 页在 Phase 9 批次 2）
 ```
 
 ### 三条不能改的结构约束
@@ -342,7 +343,7 @@ schema：实测 +57ms，而 `service.mjs status` 全程只有 51ms。
 | 6 | 其余协议面（`responses`/`messages`）+ 免费注册表与在架目录求交集 + `parseUsage` | ✅ |
 | 7 | 统计 SQL 聚合 + 亲和持久化 | ✅（**无 HTTP 端点** —— 管理 API 形状留给 Phase 9） |
 | 8 | `setup.mjs`（一键配置）、`doctor.mjs`（分层诊断）、`service.mjs` 打开浏览器 | ✅ |
-| 9 | 管理后台 6 页 + 首启向导 + 批量探测长任务状态机 | 待做 |
+| 9 | 管理后台 6 页 + 首启向导 + 批量探测长任务状态机 | 🟡 批次 1 已交付（管理 API + Overview 页）；其余 5 页与向导待做 |
 | 10 | 订阅拉取与多格式解析、多 Clash 内核择优 | 待做 |
 | 11 | 精简 `AGENTS.md`、4 个 skill、`docs/` 补全 | 部分 |
 
@@ -352,17 +353,39 @@ schema：实测 +57ms，而 `service.mjs status` 全程只有 51ms。
 > 都变，而第七轮审核发现这里的五个数字全部过期（测试数差 62、源码行差 1176）。
 > 要当前值就跑 `npm run validate`，或 `find src -name '*.ts*' | xargs wc -l`。
 
+### 管理面的投影层（Phase 9 批次 1）
+
+`server/admin/project.ts` 是**唯一**允许读凭证字段的地方，且它只输出
+`SecretPresence`（`{present, fingerprint}`）。窄化集中在一处而不是散落在各个
+handler 里 —— 散落的后果可预见：新增端点时漏掉一个字段，而那个漏洞**没有
+任何症状**（响应照常返回，只是多带了一个 key）。
+
+**用 sha256 前 8 位而不是长度**：等长的两个 key 长度相同，于是「我改了没生效」
+在界面上不可见 —— 而那恰好是修密码最常见的形态（把打错的换成同长度的对的）。
+刻意**不复用** `core/proxy/credentialFingerprint.ts`：那是安全边界（决定
+dispatcher/Controller 是否重建，取值范围由「碰撞会导致复用旧凭证」决定），
+这里是展示用途（必须短到能显示）。共用会让一方的约束变化悄悄影响另一方。
+
+写入方向的凭证是**三态**（`{set}` / `{clear:true}` / 缺席不动）：前端拿不到
+原值，所以不能靠「回传原值」表达「不动它」，而 `apiKey?: string` 会让一个未填的
+输入框静默抹掉能用的 key。
+
 ### 当前已知缺口
 
-1. **配置热更新只有形状没有入口**：`configOf()` 已做成函数，但没有改配置的 API（→ Phase 9）
+1. ~~**配置热更新只有形状没有入口**~~ —— **Phase 9 批次 1 已解决**。`PATCH /api/config`
+   → 纯函数合并（`server/admin/patch.ts`，含全量 `ConfigSchema` 与引用完整性）
+   → `saveConfig` 原子写 → 换进程内引用。顺序是**先写盘再换引用**（反过来会留下
+   「内存已生效而磁盘是旧值」的半生效状态），且必须换**新对象**（`Scheduler.#syncedFrom`
+   用引用比较）。生产验证：停用一个 Worker，池 3→2→3，无需重启。
+   顺带给了 `egress.reset()` 第一个生产调用点
 2. ~~**亲和只在内存里**~~ —— **Phase 7 已解决**。`AffinityMap` 接了一个
    `AffinitySink`，每次内存变更（绑定/解绑/学习/遗忘/容量淘汰/prune）都镜像落盘，
    启动时按 `bound_at` 升序装回。**查询路径仍然零 DB 读** —— `node:sqlite` 是
    同步 API，把亲和查询换成查库等于在每请求的关键路径上阻塞事件循环。
    代价是 `kill -9` 可能丢最后一刻的绑定（后果是那条会话重挑一次 Worker）
-3. ~~**用量只进日志，没有聚合**~~ —— **Phase 7 已解决**。`store/db/stats.ts`
-   接在同一个 `onDone` 钩子上，并提供 per-model／per-Worker 聚合与派生比值。
-   **尚无 HTTP 端点**：管理 API 的形状留给 Phase 9 定，现在定死没有收益（→ Phase 9 读它）
+3. ~~**用量只进日志，没有聚合**~~ / ~~**尚无 HTTP 端点**~~ —— **均已解决**。
+   Phase 7 给了 `store/db/stats.ts`，Phase 9 批次 1 给了 `GET /api/stats`
+   （默认带 `sinceDay`，见缺口 #14）。Usage **页面**在批次 2
 4. **探测目标与转发目标不同域**（见上文出口隔离节）
 5. **调度与目录状态没有查看入口**：`Scheduler.snapshot()` 与 `ModelCatalog.status()`
    都已实现且不含凭证，但**两者都没有生产调用点** —— `npm run status` 只报进程信息，
@@ -379,13 +402,15 @@ schema：实测 +57ms，而 `service.mjs status` 全程只有 51ms。
    响应被照常采纳。不构成当前风险（本机自用、baseUrl 由 schema 限 http/https、
    调用频率受 TTL 与失败退避约束），注释已把范围收窄到它真正守住的那件事。
    若 Phase 7+ 把 baseUrl 做成更开放的配置项，要在 `json()` **之前**加体积闸门
-8. **`assertEveryRouteGuarded` 只检查"有没有守卫"，不检查"是哪个"**：一条只挂
-   `relayAuth` 而没挂 `loopbackOnly` 的管理路由能通过断言。当前无活缺陷
-   （管理面只有 `/api/ping`），但 Phase 9 加管理 API 时这正是第四轮那个缺陷的变体
-   （→ Phase 9）
-9. **管理面的 body 上限尚无处可设**：约束「管理 JSON body 有上限而转发透传无界」
-   目前是**空洞成立**的 —— 管理侧没有任何读 body 的代码。Phase 9 加管理 POST 时
-   必须同时加，否则这条约束会静默变成"不成立"（→ Phase 9）
+8. ~~**`assertEveryRouteGuarded` 只检查"有没有守卫"，不检查"是哪个"**~~ ——
+   **Phase 9 批次 1 已补** `assertAdminRoutesLoopbackOnly`：`/api/*` 下每条路由都必须被
+   **回环闸门**覆盖。判据用中间件的**身份**（`loopbackOnly()` 带一个 Symbol 标记）
+   而不是路径形状 —— 只比路径的话，「`/api/*` 上挂了某个中间件」并不能说明挂的是它。
+   构造期抛错：服务起不来远好于管理面静默对外开放
+9. ~~**管理面的 body 上限尚无处可设**~~ —— **Phase 9 批次 1 已加**（1 MiB，
+   与 relay 的 64 MiB 刻意不同：后者为多模态留的，管理面没有那个需求）。
+   `content-length` 与实读长度**两处都查** —— 头可以撒谎或缺席，
+   而只在读完之后检查等于上限没起作用
 10. **`models.defaultSurfaces` / `surfaceOverrides` 声明了但不设防**：`surfacesFor()`
    已实现且有单测，但**全仓没有生产调用点** —— 这与第四轮那个 `streaming` 字段
    是同一个形态（声明了却不读）。
@@ -419,10 +444,10 @@ schema：实测 +57ms，而 `service.mjs status` 全程只有 51ms。
    > 要接上它们需要一个 HTTP 端点（Phase 9 的管理 API）。在那之前，
    > 给 doctor 硬塞一个「就绪数」只能靠重新实现一遍冷却判定 —— 那正是
    > 纪律 #4 禁止的第二份并行真相，而它必然与调度器的那份分叉。
-13. ~~**`recordProbe()` 无生产调用点且无测试覆盖**~~ —— **已接**进 `EgressService.probeProxy`（汇合点）。原文：：这条 SQL 从未执行过，
-   参数顺序与列名到 Phase 9 接上时要当全新代码验。同类陷阱 Phase 7 对两张
-   亲和表认出来了（「CHECK 在生产路径上一次都没执行过」）并真跑了，
-   对 `probe_results` 没有（→ Phase 9）
+13. ~~**`recordProbe()` 无生产调用点且无测试覆盖**~~ —— **已接**进
+   `EgressService.probeProxy`（汇合点）。**Phase 9 批次 1 起那条 SQL 真的在生产
+   执行过了**：`POST /api/probe` 触发探测后 `probe_results` 第一次有了行
+   （在此之前它零调用点，参数顺序与列名从未被验证过）
 14. **`requestCounts()` 是唯一随时间线性变慢的聚合**（已加 `sinceDay` 参数，管理 API 应总是传它）：`COUNT(DISTINCT
    request_id)` 全表扫，实测 100k 行 **12.4ms**、1M 行约 124ms，而它是同步
    调用 —— 接 HTTP 端点后会阻塞事件循环那么久。容量本身不是问题
