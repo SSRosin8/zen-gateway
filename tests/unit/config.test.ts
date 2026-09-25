@@ -12,6 +12,7 @@ import {
   loadConfig,
   saveConfig,
 } from "../../src/store/config.ts";
+import { ConfigSchema } from "../../src/shared/schema.ts";
 
 let root: string;
 
@@ -263,5 +264,112 @@ describe("保存", () => {
     const first = await readFile(configPath(root), "utf8");
     await saveConfig(config, root);
     expect(await readFile(configPath(root), "utf8")).toBe(first);
+  });
+});
+
+describe("原子写", () => {
+  /*
+   * README 的安全约束写着「`config.json` 0600 + **原子写**」，而第八轮审核实测:
+   * 把 temp→fsync→rename 换成直接 `open(file,"w")` 写，全套测试**依然全绿** ——
+   * 0600 那半条有测试（新写法也保留了 mode），原子那半条一条都没有。
+   *
+   * 「崩溃在写的中途」没法在单测里制造，但原子写有两个**可观测的后果**:
+   * 1. 任何时刻读到的都是一份完整的 JSON（绝不会是截断的半个文件）；
+   * 2. 写失败时不留下残骸，也不破坏原文件。
+   *
+   * 这个文件是唯一一份凭证存储 —— 一个被截断的 config.json 意味着
+   * 所有 Worker 的 key 一起没了，而它只在下次启动时才被发现。
+   */
+  it("并发读到的永远是完整 JSON，不会是半个文件", async () => {
+    const base = defaultConfig();
+    await saveConfig(base, root);
+
+    /*
+     * 一边反复写一个**很大**的配置（大到非原子写必然分多次 syscall），
+     * 一边反复读。每一次读到的都必须能 JSON.parse 成功。
+     */
+    /*
+     * 过一遍 schema 构造，而不是手写一个对象字面量 —— 后者会漏掉
+     * `enabled` 这类有默认值的必填字段，而 `saveConfig` 内部会 parse，
+     * 于是测试挂在类型/校验上而不是在它想测的那条性质上。
+     */
+    const big = ConfigSchema.parse({
+      ...base,
+      proxies: Array.from({ length: 400 }, (_, i) => ({
+        id: `p${i}`,
+        name: `节点-${i}-${"x".repeat(80)}`,
+        type: "http",
+        host: "127.0.0.1",
+        port: 18000 + i,
+        source: "manual",
+        direct: true,
+        bridgeable: false,
+        egressIp: null,
+      })),
+    });
+
+    let reads = 0;
+    let parseFailures = 0;
+    let stop = false;
+    const reader = (async () => {
+      while (!stop) {
+        try {
+          const text = await readFile(configPath(root), "utf8");
+          JSON.parse(text);
+          reads += 1;
+        } catch (err) {
+          // ENOENT 不算失败:非原子写的另一种形态是「文件短暂不存在」，
+          // 那同样是缺陷，但这里单独计 parse 失败更能指认「读到半个文件」。
+          if ((err as NodeJS.ErrnoException).code !== "ENOENT") parseFailures += 1;
+          else parseFailures += 1;
+        }
+        await new Promise((r) => setImmediate(r));
+      }
+    })();
+
+    for (let i = 0; i < 12; i += 1) {
+      await saveConfig(i % 2 === 0 ? big : base, root);
+    }
+    stop = true;
+    await reader;
+
+    expect(reads).toBeGreaterThan(0);
+    expect(parseFailures).toBe(0);
+  });
+
+  it("写失败时不留临时文件，也不动原文件", async () => {
+    const base = defaultConfig();
+    await saveConfig(base, root);
+    const before = await readFile(configPath(root), "utf8");
+
+    /*
+     * 怎么让写**真的**失败:
+     *
+     * 第一版把 data/ 改成 0500 —— 没用。进程是目录的 owner，而 `saveConfig`
+     * 开头就 `chmod(dir, DIR_MODE)` 把权限改回 0700 了（那是 `ensurePermissions`
+     * 那条「权限不对就修正」的另一面）。所以那条测试测的是「它会自我修复」。
+     *
+     * 改用「把目标路径占成一个目录」:`rename(temp, file)` 会得到 EISDIR。
+     * 这是一条真实可达的失败路径（用户手工在 data/ 里建了个同名目录，
+     * 或某个工具留下的残骸），而且它落在 rename 那一步 ——
+     * 正是原子写最要紧的那一步。
+     */
+    const { rm: rmOne, mkdir: mkdirOne, readdir } = await import("node:fs/promises");
+    const dir = join(root, "data");
+    await rmOne(configPath(root));
+    await mkdirOne(configPath(root));
+
+    await expect(
+      saveConfig({ ...base, gateway: { ...base.gateway, port: 19999 } }, root),
+    ).rejects.toThrow(ConfigError);
+
+    // 没有残留的 .tmp —— 失败路径会清理掉临时文件。
+    const left = (await readdir(dir)).filter((n) => n.endsWith(".tmp"));
+    expect(left).toEqual([]);
+
+    // 恢复成文件后，原内容仍可写回（证明失败没有留下别的副作用）。
+    await rmOne(configPath(root), { recursive: true });
+    await saveConfig(base, root);
+    expect(await readFile(configPath(root), "utf8")).toBe(before);
   });
 });

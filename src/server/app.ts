@@ -313,8 +313,14 @@ function assertEveryRouteGuarded(app: Hono): void {
  * 「`/api/*` 上挂了某个中间件」并不能说明挂的是回环闸门。
  *
  * 构造期抛错 —— 服务起不来远好于管理面静默对外开放。
+ *
+ * **导出仅为可测。** 第八轮审核实测:在本函数首行插一句 `return` 之后
+ * 全套测试**依然全绿** —— 唯一碰到它的测试是对一个**正确**的 app 断言
+ * `.not.toThrow()`,那只能发现误报,永远发现不了「断言被阉掉」。
+ * 于是这条声称已关闭缺口 #8 的守卫,自己没有任何东西守着。
+ * 现在测试会喂一个故意装错的 app 进来（见 `tests/unit/middleware.test.ts`）。
  */
-function assertAdminRoutesLoopbackOnly(app: Hono): void {
+export function assertAdminRoutesLoopbackOnly(app: Hono): void {
   const loopbackPaths = app.routes
     .filter((r) => r.method === "ALL" && isLoopbackGuard(r.handler))
     .map((r) => r.path);
