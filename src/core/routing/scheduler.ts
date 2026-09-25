@@ -277,17 +277,51 @@ export class Scheduler {
   /**
    * Worker 就绪数与总数。
    *
-   * ⚠️ **本方法当前没有生产调用点。** 先前这里写的是「供 `/health` 与管理后台」
-   * —— 而 `/health` 的 handler 只返回 `ok/version/uptimeSeconds/pid`，
-   * **完全不调 scheduler**（第七轮审核查出）。那句话是一个**假的调用点声明**，
-   * 比 `snapshot()`/`status()` 那几处更糟：后者都老实标了「无生产调用点」。
+   * ⚠️ **本方法仍没有生产调用点，而那是对的。**
    *
-   * 与它们同属一类（实现了、有单测、不含凭证、但没人读），
-   * 已登记在 `docs/architecture.md` 的缺口清单（→ Phase 8 的 doctor / Phase 9 的管理 API）。
+   * Phase 9 的 `/api/overview` 需要的是**与 Worker 列表同源**的计数
+   * （`admin/project.ts` 的 `poolCounts` 从 `workerViews` 推导）——
+   * 若这里再问一次，同一个响应里的 `pool.ready` 与 `workers[].ready`
+   * 就来自两次独立查询，中间状态可能变过，而用户会把它们当成一句话读
+   * （「3 个 Worker，2 个就绪」后面跟着一张三行的表）。
+   *
+   * 先前这里写的是「供 `/health` 与管理后台」—— 而 `/health` 的 handler
+   * 完全不调 scheduler（第七轮审核查出那是个**假的调用点声明**）。
+   * 保留 + 标注，与 `snapshot()`/`status()` 同格式。
    */
   counts(config: Config, now: number): { ready: number; total: number } {
     this.#ensureSynced(config);
     return this.#pool.counts(now);
+  }
+
+  /**
+   * Worker 的运行期状态 —— 管理 API 的数据来源（Phase 9）。
+   *
+   * ## 为什么不直接用 `snapshot()`
+   *
+   * `snapshot()` 返回的是 `WorkerPool` 的内部形状（含 `kind`/`proxyId`，
+   * 那些**配置里已经有了**），而管理面需要的恰好是配置里**没有**的那一半：
+   * 冷却剩余、连续失败、就绪与否。让投影层去 `snapshot()` 里挑字段会形成
+   * 一处隐式耦合 —— 那个方法的形状为诊断导出而定，改它会悄悄改掉 API 契约。
+   *
+   * 这个方法只承诺管理 API 需要的那几个字段，两者各自演进。
+   * `snapshot()` 因此**仍然没有生产调用点**，如实标注着。
+   */
+  runtimeWorkers(config: Config, now: number): Array<{
+    id: string;
+    ready: boolean;
+    cooldownRemainingMs: number;
+    consecutiveFails: number;
+    lastFailure: string | null;
+  }> {
+    this.#ensureSynced(config);
+    return this.#pool.snapshot(now).map((w) => ({
+      id: w.id,
+      ready: w.ready,
+      cooldownRemainingMs: w.cooldownRemainingMs,
+      consecutiveFails: w.consecutiveFails,
+      lastFailure: w.lastFailure,
+    }));
   }
 
   /** 供诊断导出。不含 apiKey。 */

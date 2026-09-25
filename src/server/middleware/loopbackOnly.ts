@@ -54,6 +54,24 @@ export type LoopbackOnlyOptions = {
 };
 
 /**
+ * 标记属性 —— 让装配期断言能**按身份**认出这道闸门。
+ *
+ * `app.ts` 的 `assertAdminRoutesLoopbackOnly` 要验证「`/api/*` 下每条路由都被
+ * **回环闸门**覆盖」，而只比路径形状是不够的：「`/api/*` 上挂了某个中间件」
+ * 并不能说明挂的是这一个。用一个不可枚举的符号属性做标记，据此精确识别。
+ *
+ * 用 `Symbol` 而不是字符串属性:避免与 Hono 或用户代码的属性名相撞,
+ * 也不会出现在 `JSON.stringify` 或 `Object.keys` 里。
+ */
+export const LOOPBACK_GUARD = Symbol("zen-gateway.loopbackOnly");
+
+/** 这个中间件是不是回环闸门。供装配期断言使用。 */
+export function isLoopbackGuard(handler: unknown): boolean {
+  if (typeof handler !== "function") return false;
+  return (handler as unknown as Record<symbol, unknown>)[LOOPBACK_GUARD] === true;
+}
+
+/**
  * 中间件:非回环来源一律 403。
  *
  * 用于管理面。转发面(`/v1/*`)另有 Relay Token 保护,且服务本身只监听
@@ -63,7 +81,7 @@ export type LoopbackOnlyOptions = {
 export function loopbackOnly(options: LoopbackOnlyOptions = {}): MiddlewareHandler {
   const addressOf = options.addressOf ?? ((c: Context) => getConnInfo(c).remote.address);
 
-  return async (c, next) => {
+  const guard: MiddlewareHandler = async (c, next) => {
     let address: string | undefined;
     try {
       address = addressOf(c);
@@ -87,4 +105,8 @@ export function loopbackOnly(options: LoopbackOnlyOptions = {}): MiddlewareHandl
 
     return next();
   };
+
+  // 见 LOOPBACK_GUARD 的说明:装配期断言靠它按身份识别这道闸门。
+  Object.defineProperty(guard, LOOPBACK_GUARD, { value: true, enumerable: false });
+  return guard;
 }
