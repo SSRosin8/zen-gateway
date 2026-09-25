@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+import { ConfigSchema } from "../../src/shared/schema.ts";
 import { cooldownMs, cooldownUntil } from "../../src/core/routing/cooldown.ts";
 import { FAILURE_KINDS, shouldCooldown, type FailureKind } from "../../src/core/failures.ts";
 import { CooldownConfigSchema, type CooldownConfig } from "../../src/shared/schema.ts";
@@ -250,5 +251,65 @@ describe("cooldownUntil", () => {
       now: NOW,
     });
     expect(until).toBe(NOW + 60_000);
+  });
+});
+
+/* ================================================================== *
+ * 非有限 now 的守卫（第十轮审核）
+ * ================================================================== */
+
+describe("cooldownUntil 对非有限 now 返回 null", () => {
+  /*
+   * 这行 `Number.isFinite(input.now)` 先前零覆盖 —— 删掉它后相关测试全绿。
+   *
+   * 它的价值在于**选对了保守方向**：去掉之后算出 `NaN` / `±Infinity` 写进
+   * `cooldownUntil`，而下游 `isWorkerReady` 的守卫会把它们全判成不就绪 ——
+   * 也就是 Worker **永久消失**。返回 null（不冷却）则最多多打一次上游。
+   *
+   * 两种都不会让它错误地变就绪，所以这不是安全缺陷；但「永久丢掉一个 Worker」
+   * 与「多打一次上游」的代价差得很远，而那正是这个守卫要选的那一边。
+   */
+
+  const cfg = () => ConfigSchema.parse({
+    version: 1,
+    gateway: { relayToken: "cooldown-test-token-xx" },
+    workers: [{ id: "w1", kind: "authenticated", apiKey: "k".repeat(20), proxyId: null }],
+  }).routing.cooldown;
+
+  it.each([
+    ["NaN", Number.NaN],
+    ["+Infinity", Number.POSITIVE_INFINITY],
+    ["-Infinity", Number.NEGATIVE_INFINITY],
+  ])("now 为 %s 时返回 null，而不是一个 NaN 时刻", (_label, now) => {
+    const until = cooldownUntil({
+      kind: "rate_limit",
+      retryAfter: "900",
+      consecutiveFails: 1,
+      config: cfg(),
+      now,
+      jitter: 0,
+    });
+
+    // null = 不冷却。去掉守卫这里会是 NaN / ±Infinity。
+    expect(until).toBeNull();
+  });
+
+  it("有限 now 照常算出时刻 —— 守卫不改变正常路径", () => {
+    /*
+     * 与上面几条配对：少了它，一个「永远返回 null」的实现也能让它们通过，
+     * 而那等于整个冷却机制失效。
+     */
+    const until = cooldownUntil({
+      kind: "rate_limit",
+      retryAfter: "900",
+      consecutiveFails: 1,
+      config: cfg(),
+      now: 1_000_000,
+      jitter: 0,
+    });
+
+    expect(until).not.toBeNull();
+    expect(Number.isFinite(until)).toBe(true);
+    expect(until).toBeGreaterThan(1_000_000);
   });
 });

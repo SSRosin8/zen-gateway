@@ -66,6 +66,18 @@ export function classifyStatus(facts: ResponseFacts): FailureKind | null {
   if (status >= 400 && status < 500) return "bad_request";
   if (status >= 500) return "upstream_error";
 
+  /*
+   * **不可达**（第十轮审核实测：100–599 全枚举，这一行零命中）。
+   *
+   * 上面几条已经穷尽：2xx/3xx 走 `null`、4xx 走 `bad_request`、5xx 走
+   * `upstream_error`。留着它只为满足返回类型（TS 看不出 number 的这几个区间
+   * 是穷尽的）。
+   *
+   * **写明这一点，因为「保留一行永远不改变结果的代码比删掉它更危险」** ——
+   * 下一个人会以为某些状态码走 `unknown` 这条保守路径，从而据此推断
+   * 「有些响应不重试也不冷却」。`unknown` 的真实来源**只有** `classifyError`
+   * （非 Error 抛出物），不是这里。
+   */
   return "unknown";
 }
 

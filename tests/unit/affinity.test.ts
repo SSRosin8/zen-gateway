@@ -162,6 +162,50 @@ describe("extractBlobHashes", () => {
     expect(() => extractBlobHashes(wide)).not.toThrow();
   });
 
+  it("**压栈预算真的限制访问次数** —— `not.toThrow()` 对两种实现都成立", () => {
+    /*
+     * 第十轮审核实测：删掉数组分支里压栈前的那两行预算检查（退回到「只数
+     * 出栈」的形态）后，`affinity.test.ts` + `select.test.ts` **85 条全绿** ——
+     * 因为上面那条只断言 `not.toThrow()`，而两种实现都不抛。
+     *
+     * 判据用**元素被访问了多少次**（由修复直接导致的行为差异），
+     * 不用耗时或堆增长 —— 那类阈值天生要靠猜，且被 GC 时机左右
+     * （纪律 #1：能用行为断言就别用性能断言）。
+     *
+     * 实测无预算时 300 万元素：115ms / heap +173MB；有预算：3.9ms / +1MB，
+     * 而两者提取到的指纹数都是 0 —— 所以"提取结果"这个出口测不出差别。
+     */
+    const LENGTH = 200_000;
+    let reads = 0;
+
+    /*
+     * 每个下标都是 getter —— 于是"访问了几个元素"可被精确计数。
+     * 用 `Object.defineProperty` 而不是 Proxy：数组的 `for...of` 会走
+     * 迭代器协议读 `length` 与各下标，getter 对这条路径是透明的。
+     */
+    const counting: unknown[] = new Array(LENGTH);
+    for (let i = 0; i < LENGTH; i += 1) {
+      Object.defineProperty(counting, i, {
+        enumerable: true,
+        configurable: true,
+        get() {
+          reads += 1;
+          return { signature: BLOB_A };
+        },
+      });
+    }
+
+    extractBlobHashes({ messages: counting });
+
+    /*
+     * 预算是 20000，所以访问次数必须远小于 200000。
+     * 缺陷版本会把 20 万个元素全压进栈并逐个读。
+     */
+    expect(reads).toBeLessThan(LENGTH / 2);
+    // 而且它真的开始遍历了 —— 不是靠"一个都不读"通过的。
+    expect(reads).toBeGreaterThan(0);
+  });
+
   it("最多收集 64 个不同指纹", () => {
     const many = {
       messages: Array.from({ length: 500 }, (_unused, i) => ({

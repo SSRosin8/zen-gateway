@@ -425,6 +425,39 @@ describe("settleStream:不变量 #3", () => {
     expect(s.snapshot(cfg, NOW).affinity).toEqual({ sessions: 0, blobs: 0 });
   });
 
+  it("**流不完整时仍要解绑失效推理** —— `staleHit` 先于 `complete` 检查", () => {
+    /*
+     * `settleStream` 里 `staleHit` 是唯一**先于** `complete` 检查的分支，
+     * 那是刻意设计（"即使流不完整也要解绑"）。而现有用例的 `staleHit: true`
+     * 全部配 `complete: true`，于是把那个分支挪到 `complete` 检查之后
+     * **全绿**（第十轮审核实测）。
+     *
+     * 这个形态很实在：上游在 SSE 中途报「推理已失效」然后断流 ——
+     * 正是这个功能最该管的情形。少了这条顺序，那条会话会带着一个
+     * 已知失效的绑定继续钉在同一个 Worker 上，每轮都失败。
+     */
+    const cfg = config(["w1"]);
+    const s = scheduler();
+    plan(s, cfg, NOW, sessionHash, ["b1"]);
+
+    // 先确认绑定真的存在 —— 否则下面的"变成 0"毫无意义。
+    expect(s.snapshot(cfg, NOW).affinity.sessions).toBe(1);
+
+    s.settleStream({
+      workerId: "w1",
+      sessionHash,
+      blobHashes: ["b1"],
+      status: 200,
+      staleHit: true,
+      // 关键：流**没有**读完（上游中途断了）。
+      complete: false,
+      now: NOW + 1000,
+    });
+
+    // 仍然解绑 + 忘掉指纹。挪到 complete 之后的版本这里两个都是 1。
+    expect(s.snapshot(cfg, NOW).affinity).toEqual({ sessions: 0, blobs: 0 });
+  });
+
   it("失效推理即便带着 200 也要处置 —— SSE 里可以夹着拒绝", () => {
     /*
      * 这正是不变量 #3 的由来:只看状态码会整条漏掉。
