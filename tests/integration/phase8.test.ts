@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { execFile, spawn } from "node:child_process";
-import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { chmod, mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
 import { createServer, type Server } from "node:http";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
@@ -218,6 +218,46 @@ describe("doctor 是只读的", () => {
     const version = (after.prepare("PRAGMA user_version").get() as { user_version: number }).user_version;
     after.close();
     expect(version).toBe(0);
+  }, 40_000);
+
+  it("**不改权限** —— 过松的 config.json 与 data/ 要被报出来而不是被悄悄修掉", async () => {
+    /*
+     * 第八轮审核实测查出的一个真实缺陷。
+     *
+     * `loadConfig` 默认会把 `config.json` chmod 到 0600、`data/` 到 0700。
+     * 那对**服务**是对的（凭证不该赌一句警告会被看见），但对诊断工具是错的,
+     * 而 doctor 的文件头明写着「不改权限」。实测:755/644 跑完 doctor
+     * 变成 700/600 —— 一次「跑下 doctor 看看」改掉了两个 inode 的权限。
+     *
+     * 更要紧的是第二层后果:**它把该报告的问题修掉了**。于是「权限过松」
+     * 这一项在 doctor 里永远报不出来 —— 一个诊断工具结构上无法诊断
+     * 它自己负责的一类问题。
+     *
+     * 断言同时钉两件事:权限**没被改**，且问题**被报出来**。
+     * 只断言前者的话,一个什么都不查的实现也能通过。
+     */
+    await writeConfig();
+    await chmod(configFile(), 0o644);
+    await chmod(dataDir, 0o755);
+
+    const result = await run(DOCTOR);
+
+    // 一、报出来了（两项各自点名，而不是一句笼统的「权限有问题」）。
+    expect(result.stdout).toContain("权限过松");
+    expect(result.stdout).toContain("config.json 权限 644");
+    expect(result.stdout).toContain("权限 755");
+
+    // 二、真的没改。
+    const fileMode = (await stat(configFile())).mode & 0o777;
+    const dirMode = (await stat(dataDir)).mode & 0o777;
+    expect(fileMode).toBe(0o644);
+    expect(dirMode).toBe(0o755);
+
+    /*
+     * 三、它是 warn 而不是 fail —— 服务照样能跑,用户需要看到后面的层。
+     * 若它阻断，「权限过松」会把一个能用的系统报成不能用。
+     */
+    expect(result.stdout).toContain("2. 服务");
   }, 40_000);
 });
 

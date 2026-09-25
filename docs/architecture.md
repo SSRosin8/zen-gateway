@@ -316,9 +316,9 @@ schema：实测 +57ms，而 `service.mjs status` 全程只有 51ms。
 | `data/config.json`（0600 原子写） | 凭证、Worker、代理池、订阅、桥接、网关设置、模型规则 | 可手工编辑/备份/审阅；无 UI 阶段直接编辑它 |
 | `data/runtime.db`（SQLite WAL） | 见下表 | 高频写 + 需聚合查询 |
 
-已建的 7 张表（Phase 1 建好结构，Phase 7 才填数据）：
+已建的 8 张表（Phase 1 建好结构，Phase 7 起填数据，`gateway_rejections` 是档位 3 新增）：
 `worker_stats`、`model_usage`、`upstream_attempts`、`probe_results`、
-`session_affinity`、`blob_affinity`、`batch_probe_jobs`。
+`session_affinity`、`blob_affinity`、`batch_probe_jobs`、`gateway_rejections`。
 
 两处把约定变成结构约束：
 
@@ -341,13 +341,13 @@ schema：实测 +57ms，而 `service.mjs status` 全程只有 51ms。
 | 4 | 上游协议发现（范围按实测缩减，见 `upstream-quirks.md`） | ✅ |
 | 5 | 调度状态机：`workerPool` / `cooldown` / `affinity` / `select` / `scheduler` | ✅ |
 | 6 | 其余协议面（`responses`/`messages`）+ 免费注册表与在架目录求交集 + `parseUsage` | ✅ |
-| 7 | 统计 SQL 聚合 + 亲和持久化 | ✅（**无 HTTP 端点** —— 管理 API 形状留给 Phase 9） |
+| 7 | 统计 SQL 聚合 + 亲和持久化 | ✅ |
 | 8 | `setup.mjs`（一键配置）、`doctor.mjs`（分层诊断）、`service.mjs` 打开浏览器 | ✅ |
-| 9 | 管理后台 6 页 + 首启向导 + 批量探测长任务状态机 | ✅ |
+| 9 | 管理后台 6 页 + 首启向导 + 管理 API + 批量探测长任务状态机 | ✅ |
 | 10 | 订阅拉取与多格式解析、多 Clash 内核择优 | 待做 |
-| 11 | 精简 `AGENTS.md`、4 个 skill、`docs/` 补全 | 部分 |
+| 11 | 精简 `AGENTS.md`、4 个 skill、`docs/` 补全 | 文档已交付；`.claude/skills/` 下的 4 个 skill 待做 |
 
-经**七轮**独立子 agent 审核（一轮审规划 + 六轮审代码/文档）。
+经**八轮**独立子 agent 审核（一轮审规划 + 七轮审代码/文档）。
 
 > 规模数字（测试条数、文件数、代码行数）刻意不写在文档里 —— 它们每次提交
 > 都变，而第七轮审核发现这里的五个数字全部过期（测试数差 62、源码行差 1176）。
@@ -428,12 +428,13 @@ Phase 8 把它留到 Phase 9，理由是「那时管理 API 会真正增加转�
    Phase 7 给了 `store/db/stats.ts`，Phase 9 批次 1 给了 `GET /api/stats`
    （默认带 `sinceDay`，见缺口 #14）。Usage **页面**在批次 2
 4. **探测目标与转发目标不同域**（见上文出口隔离节）
-5. **调度与目录状态没有查看入口**：`Scheduler.snapshot()` 与 `ModelCatalog.status()`
-   都已实现且不含凭证，但**两者都没有生产调用点** —— `npm run status` 只报进程信息，
-   也还没有管理 API 读它们。两处都已在源码里明确标注（照 `surfacesFor()` 的先例），
-   免得下一轮把它们当成在用的接口。眼下只能从响应头 `x-zen-gateway-route`／
-   `x-zen-gateway-worker`／`x-zen-gateway-free` 与 `/v1/models` 响应体里的
-   `zen_gateway_catalog` 字段推断（→ Phase 8 的 `doctor.mjs` / Phase 9 的管理 API）
+5. **调度与目录状态：已有查看入口，但 `Scheduler.snapshot()` 仍无读者**。
+   Phase 9 批次 1 起 `GET /api/overview` 读 `ModelCatalog.status()`
+   （`routes/admin.ts`）与 `Scheduler.runtimeWorkers()`，Workers 页渲染就绪态与
+   冷却剩余。所以原来那句"两者都没有生产调用点"**只剩后半句成立**：
+   `snapshot()` 的形状是为诊断导出设计的，管理面用的是刻意更窄的
+   `runtimeWorkers()`。`status()` 源码里那条"本方法当前没有生产调用点"的标注
+   已经过期（第八轮审核查出，与 `contract.ts` 里"它此前没有生产读者"互相矛盾）
 6. **目录的免费子集一致性没有本地守卫，也守不住**：两个槽位的设计依赖"免费子集
    三账号一致"（`upstream-quirks.md` §7），而那是**上游的**性质，单测无论怎么写都只是
    在断言自造的 fixture。复核办法是拿多个账号各拉一次目录比对免费子集。
@@ -460,7 +461,11 @@ Phase 8 把它留到 Phase 9，理由是「那时管理 API 会真正增加转�
    默认配置下**所有**模型的 `/v1/messages` 请求都会被拒 —— 而那个面刚刚验证可用。
    所以这里要先定清楚它的语义（是"放行闸门"还是"后台展示用的提示"），
    再决定默认值。眼下当作后备展示数据，不参与判定（→ Phase 9 的 Models 页）
-11. ~~**「网关拒绝」这项规划要求没有实现**~~ —— **已补**（档位 3 的 `gateway_rejections`，七条拒绝路径全部记账，`not_free` 与 `retired` 分开）。原文：：Phase 7 的验收列了六项统计，
+11. ~~**「网关拒绝」这项规划要求没有实现**~~ —— **已补**（档位 3 的 `gateway_rejections`，
+   `relay.ts` 打上游之前返回的**每一条**路径都记账，`not_free` 与 `retired` 分开）。
+   路径条数刻意不写数字：它随协议面增加而变，真相是 `RejectionReason` 这个联合类型
+   与 `relay.ts` 里 `reject()` 的调用点（第八轮审核发现这里先前同时写着"七条"和
+   "6 条"，而实际是 8 个调用点 / 9 个 reason —— 三方互不相同）。原文：Phase 7 的验收列了六项统计，
    前五项都有（Worker 计数 / per-model token / 缓存命中 / usage 覆盖率 /
    上游尝试日志），而**第六项「网关拒绝」没有表、没有列、没有写入点**
    （第七轮审核查出）。`relay.ts` 有 6 条在打上游之前就返回的路径
@@ -469,12 +474,23 @@ Phase 8 把它留到 Phase 9，理由是「那时管理 API 会真正增加转�
    于是「我有多少请求被网关自己挡了」现在完全无法回答，而
    `not_free` 与 `retired` 的处置完全不同（前者改模型名、后者删
    `extraFreeIds` 条目），哪种发生得多也不可观测（→ Phase 8/9）
-12. **仍有四个「实现了但没有生产读者」的成员**（`snapshot` / `status` / `surfacesFor` / `counts`；`writeFailures` 与 `recordProbe` 已在第七轮接上）。`counts()` 曾带一个假的调用点声明：注释写着「供 `/health`
-   与管理后台」，而 `/health` 的 handler 完全不调 scheduler。已改为显式标注
-   「无生产调用点」，与 `snapshot()`/`status()` 同格式。这类成员现已有六个
-   （`snapshot` / `status` / `surfacesFor` / `counts` / `writeFailures` ×2 /
-   `recordProbe`），**逐个标注是手工约定而实例还在增加** ——
-   该建一道关卡（对白名单外的导出成员断言至少有一个非定义处引用）
+12. **「实现了但没有生产读者」的成员：逐个手写标注这个办法已经失效。**
+   第八轮审核把全仓的导出成员真数了一遍,得到的结论不是"数字变了",而是
+   **这种标注方式本身不成立**：
+
+   - 这里先前列的四个里有**两个已经错了**：`status()` 由 `/api/overview` 读、
+     `surfacesFor()` 由 `admin/project.ts` 读（都是 Phase 9 接上的）。
+     两处源码注释里的"本方法没有生产调用点"也随之过期,已一并改掉
+   - 而实际没有生产读者的成员**远多于这里写的六个**（`Scheduler.snapshot`/
+     `counts`/`prune`/`settleBuffered`、`stats.recentAttempts`、
+     `ClashController` 的 `version`/`selectors`/`nodes`/`currentNode`/`delay`
+     —— 后者五个 `setup.mjs` 宁可用裸 fetch 重新实现一遍、`registry.get`/`ids`/
+     `size`、`selectorLock.pending`/`size`、`headers.collectHeaders` 等等,量级约三十)
+   - `chat.ts` 的 `looksLikeChatBody` 连测试引用都没有,是真正的死代码
+
+   结论不变、但依据更硬了：**该建的那道关卡（对白名单外的导出成员断言至少有一个
+   非定义处引用）现在是唯一可行的办法**。手写标注的漂移率已经实测出来 ——
+   一轮之内漂了两处,而"有没有读者"这件事的唯一真相只能是调用点本身（纪律 #4）。
 
    > **Phase 8 没有接上其中任何一个**，这一点要说清楚而不是含糊过去。
    > `doctor.mjs` 报的是 Worker 的**配置形态**（从 `config.json` 读，用
@@ -482,9 +498,9 @@ Phase 8 把它留到 Phase 9，理由是「那时管理 API 会真正增加转�
    > 而进程外没有任何出口拿到它。所以 doctor 的第 4 层明确写着「『可用』只表示
    > 配置形态对；它是否**就绪**（不在冷却中）眼下无法从外部查到」。
    >
-   > 要接上它们需要一个 HTTP 端点（Phase 9 的管理 API）。在那之前，
-   > 给 doctor 硬塞一个「就绪数」只能靠重新实现一遍冷却判定 —— 那正是
-   > 纪律 #4 禁止的第二份并行真相，而它必然与调度器的那份分叉。
+   > **Phase 9 之后这句话对 doctor 依然成立,但理由变了**：端点已经存在
+   > （`GET /api/overview` 带 `ready`/`cooldownRemainingMs`）,而 doctor 没去调它。
+   > 从"没有入口"变成了"有入口而诊断工具没接" —— 见缺口 #24。
 13. ~~**`recordProbe()` 无生产调用点且无测试覆盖**~~ —— **已接**进
    `EgressService.probeProxy`（汇合点）。**Phase 9 批次 1 起那条 SQL 真的在生产
    执行过了**：`POST /api/probe` 触发探测后 `probe_results` 第一次有了行
@@ -492,8 +508,10 @@ Phase 8 把它留到 Phase 9，理由是「那时管理 API 会真正增加转�
 14. **`requestCounts()` 是唯一随时间线性变慢的聚合**（已加 `sinceDay` 参数，管理 API 应总是传它）：`COUNT(DISTINCT
    request_id)` 全表扫，实测 100k 行 **12.4ms**、1M 行约 124ms，而它是同步
    调用 —— 接 HTTP 端点后会阻塞事件循环那么久。容量本身不是问题
-   （实测 100k 行 21.6 MB，按每天 600 行算约 47 MB/年，不需要清理机制），
-   但加端点时该给它一个 `sinceDay` 参数，与 `modelUsage`/`rates` 一致
+   （实测 100k 行 21.6 MB，按每天 600 行算约 47 MB/年，不需要清理机制）。
+   **端点已经在传它了**：`GET /api/stats` 由 `days`（默认 30）算出 `sinceDay`
+   传进 `requestCounts(since)`，与 `modelUsage`/`rates` 一致。
+   （第八轮审核发现本条的开头与结尾自相矛盾 —— 开头写"已加"、结尾还写"加端点时该给"。）
 15. ~~**`restore()` 绕过容量上限**~~ —— **已修**：`LIMIT` 从 `SESSION_CAP`/`BLOB_CAP` 推导，取最新的 cap 条。原文：：`loadSessions`/`loadBlobs` 没有 `LIMIT`，
    而 `restore()` 不调 `evict`。今天不会越界（DB 是内存的忠实镜像、内存有
    cap），但它**依赖一个没有守卫的不变量**：「DB 行数 ≤ cap」。
@@ -564,12 +582,19 @@ Phase 8 把它留到 Phase 9，理由是「那时管理 API 会真正增加转�
    `/configs` 的 rules —— 眼下不做（→ Phase 10 做多内核择优时一并考虑）。
    兜底手段是 `doctor --deep`：它按实测公网 IP 分组，共用出口一定会被报出来。
 
-23. **`service.mjs --open` 指向 Vite dev server（5173），不是网关端口**：
-   实测网关**不伺服** `dist/admin`（`GET /` 返回 404），只有 `/health`、
-   `/v1/*`、`/api/*` 三组路由。所以 `--open` 打开 5173，需要另开
-   `npm run dev`。Phase 9 若让网关自己伺服静态产物，`ADMIN_URL` 要跟着改 ——
-   那时是一处真实修改，不是遗漏（→ Phase 9）
+23. **网关不伺服静态产物,这是设计事实而不是缺口**：实测 `GET /` 返回 404，
+   只有 `/health`、`/v1/*`、`/api/*` 三组路由。于是 `service.mjs --open` 指向
+   Vite dev server（`ADMIN_URL` = 5173），需要另开 `npm run dev`。
+   **Phase 9 没有改这一点,而且是刻意的**：管理后台的 hash 路由正是因为这条
+   才不用 History API —— `pushState` 在 Vite 的 SPA fallback 下能工作、
+   在别处不能,而那个差异只在用户刷新页面时暴露。
+   附带一条容易踩的：Vite 的 dev proxy 只转发 `/health` 与 `/api`，**不转发 `/v1`**
+   （`vite.config.ts`），所以拿 `:5173` 测转发会得到 Vite 的 404 而不是网关的响应。
 
-24. **doctor 报不了「Worker 是否就绪」**：见缺口 #12 的补注 —— 运行期冷却状态
-   住在服务进程里而进程外没有出口。doctor 的第 4 层只能报配置形态，
-   并已把这个限制明写在输出里（→ Phase 9 的管理 API）
+24. **doctor 报不了「Worker 是否就绪」—— 现在的理由变了**：Phase 9 之后端点
+   **已经存在**（`GET /api/overview` 带 `ready` / `cooldownRemainingMs`），
+   而 doctor 没有去调它,第 4 层仍只报配置形态并把这个限制明写在输出里。
+   所以这条从「没有入口」变成了「有入口而诊断工具没接」。
+   要接的话是让 doctor 调那个端点（而**不是**在 doctor 里重新实现一遍冷却判定
+   —— 那是纪律 #4 禁止的第二份并行真相）。眼下不做：doctor 的定位是
+   「服务起不来时也能跑」，而那个端点要求服务是活的。

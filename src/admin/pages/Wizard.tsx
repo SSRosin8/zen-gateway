@@ -1,5 +1,5 @@
 import type { Overview } from "../../shared/contract.ts";
-import { Mono, Panel } from "../components/Panel.tsx";
+import { Mono, Panel, Strong } from "../components/Panel.tsx";
 import { StatusIndicator } from "../components/StatusIndicator.tsx";
 
 /**
@@ -58,13 +58,13 @@ export function Wizard({ data }: { data: Overview }) {
         <>
           <p className="text-text-muted">
             目录拉不到的话免费判定没有依据，转发会被拒。最常见的成因是企业网络
-            对 <Mono>opencode.ai</Mono> 做 TLS 中间人，而 **Node 不读系统 CA 库**
+            对 <Mono>opencode.ai</Mono> 做 TLS 中间人，而 <Strong>Node 不读系统 CA 库</Strong>
             （<Mono>curl</Mono> 读 —— 所以 curl 通不代表网关通）。
           </p>
           <Cmd>NODE_EXTRA_CA_CERTS=/etc/ssl/certs/ca-certificates.crt npm start</Cmd>
           <p className="mt-2 text-text-muted">
             跑 <Mono>npm run doctor</Mono> 会直接告诉你是不是这个原因 ——
-            它查的是**服务进程**的环境变量，不是你当前 shell 的。
+            它查的是<Strong>服务进程</Strong>的环境变量，不是你当前 shell 的。
           </p>
         </>
       ),
@@ -79,7 +79,7 @@ export function Wizard({ data }: { data: Overview }) {
       ) : (
         <>
           <p className="text-text-muted">
-            出口隔离是这个工具存在的理由 —— 多个 Zen 账号必须从**不同的公网 IP**
+            出口隔离是这个工具存在的理由 —— 多个 Zen 账号必须从<Strong>不同的公网 IP</Strong>
             发出，否则有被上游判定关联的风险。一条命令自动探测本机 Clash 并导入节点：
           </p>
           <Cmd>npm run setup</Cmd>
@@ -99,7 +99,7 @@ export function Wizard({ data }: { data: Overview }) {
             {hasWorker
               ? "已有 Worker 条目，但没有一个在候选池里 —— 多半是缺 API key 或被停用了。"
               : "转发需要真实的 Zen API key。"}
-            **免 key 的匿名通道已被上游关闭**（403 <Mono>FreeTierError</Mono>），
+            <Strong>免 key 的匿名通道已被上游关闭</Strong>（403 <Mono>FreeTierError</Mono>），
             所以没有 key 的条目一个都不能用。
           </p>
           <p className="mt-2 text-text-muted">
@@ -126,8 +126,8 @@ export function Wizard({ data }: { data: Overview }) {
             {snippet}
           </pre>
           <p className="mt-2 text-text-muted">
-            然后验证 —— **只能用真实 OpenCode CLI，<Mono>curl</Mono> 不算**
-            （免费闸门查请求**形态**不查 key，手搓 curl 必得 403）：
+            然后验证 —— <Strong>只能用真实 OpenCode CLI，<Mono>curl</Mono> 不算</Strong>
+            （免费闸门查请求<Strong>形态</Strong>不查 key，手搓 curl 必得 403）：
           </p>
           <Cmd>opencode run --model opencode/mimo-v2.6-flash-free &quot;Reply with exactly: OK&quot;</Cmd>
         </>

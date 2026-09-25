@@ -2,7 +2,7 @@ import { useCallback, useEffect, useState } from "react";
 import type { ProxyList, ProxyView } from "../../shared/contract.ts";
 import { isActive, percentages, type BatchProgress } from "../../shared/batchProbe.ts";
 import { StatusIndicator, type StatusTone } from "../components/StatusIndicator.tsx";
-import { Metric, Mono, Panel, PrimaryButton } from "../components/Panel.tsx";
+import { Metric, Mono, Panel, PrimaryButton, Strong } from "../components/Panel.tsx";
 import { DataTable, TableFilters, type Column } from "../components/DataTable.tsx";
 import type { ViewState } from "../lib/router.ts";
 import { useBatchProbe } from "../lib/api.ts";
@@ -23,6 +23,22 @@ function proxyTone(p: ProxyView): "success" | "warn" | "error" | "neutral" {
   // 能用但没实测过出口 —— 那不是错误，只是还不知道。
   if (p.egressIp === null) return "warn";
   return "success";
+}
+
+/**
+ * 「配置真的有问题」—— 启用了却解析不出出口。
+ *
+ * **不能直接用 `!resolvable`**:`resolveProxy` 对**已停用**的代理返回的也是一个
+ * 失败（`{kind:"disabled"}`）,而停用是用户的正常操作,不是配置错误。
+ * 于是 `!resolvable` 计数会把「我故意关掉的三个节点」报成
+ * 「3 个配置自身矛盾」并标红 —— 第八轮审核实测:4 个代理里 3 个仅是停用,
+ * 卡片就显示「不可解析 3」,而真正坏掉的是 0 个。
+ *
+ * 这与 `proxyStatus` 那个 early-return 缺陷同源,只是换了载体:那次修的是
+ * **单行的原因显示**,这里修的是**指标与筛选**。同一个误解在三处各有一份表现。
+ */
+function isBroken(p: ProxyView): boolean {
+  return p.enabled && !p.resolvable;
 }
 
 function proxyStatus(p: ProxyView): { tone: StatusTone; icon: string; label: string } {
@@ -145,7 +161,7 @@ function BatchPanel({ progress, control }: { progress: BatchProgress; control: R
 
       <p className="mt-3 text-text-muted">
         进度由服务端持有 —— 刷新页面或关掉再开都能接着看。桥接探测会切换
-        Clash selector（那是进程外的全局状态），所以**同一时刻只允许一批**。
+        Clash selector（那是进程外的全局状态），所以<Strong>同一时刻只允许一批</Strong>。
       </p>
     </Panel>
   );
@@ -200,7 +216,7 @@ function SecondaryButton({
       type="button"
       onClick={onClick}
       disabled={disabled}
-      className="min-h-[44px] rounded-sm border border-border-strong px-3 disabled:cursor-not-allowed disabled:opacity-50"
+      className="min-h-[44px] rounded-sm border border-border-strong px-3 disabled:cursor-not-allowed disabled:border-border disabled:text-text-muted"
     >
       {children}
     </button>
@@ -226,8 +242,8 @@ function IsolationTab({ data }: { data: ProxyList }) {
       />
 
       <p className="mt-3 text-text-muted">
-        **按实测公网 IP 分组，不按代理 id** —— 两个不同代理可能 NAT 到同一个
-        公网 IP，那种情况下「已隔离」是假的。未探测出 IP 的**不算已隔离**。
+        <Strong>按实测公网 IP 分组，不按代理 id</Strong> —— 两个不同代理可能 NAT 到同一个
+        公网 IP，那种情况下「已隔离」是假的。未探测出 IP 的<Strong>不算已隔离</Strong>。
       </p>
 
       {groups.length > 0 && (
@@ -292,7 +308,8 @@ export function ProxyPage({
     if (view.status === "disabled" && p.enabled) return false;
     if (view.status === "probed" && p.egressIp === null) return false;
     if (view.status === "unprobed" && p.egressIp !== null) return false;
-    if (view.status === "broken" && p.resolvable) return false;
+    // 「配置有问题」筛选同样排除仅停用的 —— 见 `isBroken`。
+    if (view.status === "broken" && !isBroken(p)) return false;
     return true;
   });
 
@@ -368,10 +385,10 @@ export function ProxyPage({
             hint="有公网 IP"
           />
           <Metric
-            label="不可解析"
-            value={String(data.proxies.filter((p) => !p.resolvable).length)}
-            hint="配置自身矛盾"
-            tone={data.proxies.some((p) => !p.resolvable) ? "error" : "normal"}
+            label="配置有问题"
+            value={String(data.proxies.filter(isBroken).length)}
+            hint="启用了但解析不出出口"
+            tone={data.proxies.some(isBroken) ? "error" : "normal"}
           />
         </div>
       </Panel>
@@ -401,7 +418,7 @@ export function ProxyPage({
               { value: "disabled", label: "已停用" },
               { value: "probed", label: "已实测" },
               { value: "unprobed", label: "未探测" },
-              { value: "broken", label: "不可解析" },
+              { value: "broken", label: "配置有问题" },
             ]}
             placeholder="搜索节点名 / id / 出口 IP…"
           />

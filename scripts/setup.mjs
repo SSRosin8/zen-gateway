@@ -49,7 +49,7 @@ import { copyFile } from "node:fs/promises";
 import { fileURLToPath } from "node:url";
 import { createHash } from "node:crypto";
 import { dirname, join } from "node:path";
-import { configPath, loadConfig, saveConfig, ConfigError } from "../src/store/config.ts";
+import { configExists, configPath, loadConfig, saveConfig, ConfigError } from "../src/store/config.ts";
 import { ConfigSchema } from "../src/shared/schema.ts";
 import { safeErrorMessage } from "../src/shared/redact.ts";
 import { dataDirOf } from "./lib/instance.mjs";
@@ -336,6 +336,26 @@ async function main() {
 
   /* ---------- 1. 读现有配置 ---------- */
   heading("1. 现有配置");
+
+  /*
+   * `--dry-run` 时先问「文件在不在」,**不能直接 loadConfig**。
+   *
+   * `loadConfig` 在文件不存在时会**生成一份默认配置并写盘**(含新 Relay Token)。
+   * 那对服务端是对的(首启该生成),但让 `--dry-run` 变成了一句假话:
+   * 横幅打着「不会写盘」,而它刚刚落了一个 0600 文件和一个新 token。
+   *
+   * `doctor.mjs` 的第 1 层早就用 `configExists` 挡了同一个陷阱
+   * （注释写着「跑一次 doctor 就把状态改了」）—— 这里当初漏了。
+   * 第八轮审核实测查出:空 data 目录跑 `--dry-run` 后出现 43 字符的 relayToken。
+   */
+  if (DRY_RUN && !(await configExists(ROOT_ARG))) {
+    line("fail", "配置不存在");
+    detail("--dry-run 刻意不替你生成 —— 那会改变状态,而你只是想先看看。");
+    nextStep("先 `npm start`（首启会生成默认配置与 Relay Token）,再跑本命令。");
+    process.exitCode = 1;
+    return;
+  }
+
   let config;
   let created;
   try {

@@ -369,4 +369,108 @@ describe("执行器", () => {
     expect(after.proxies.find((x) => x.id === "off")!.egressIp).toBeNull();
     expect(after.proxies.find((x) => x.id === "good")!.egressIp).not.toBeNull();
   }, 30_000);
+
+  it("中途暂停再恢复后，进度不丢 —— 完成时 mainDone 必须追平 mainTotal", async () => {
+    /*
+     * 第八轮审核查出的一个**真实缺陷**在这里钉住。
+     *
+     * `#waitIfPaused()` 原先只在循环**开头**等,于是「点暂停时正在途中的那一发」
+     * 会照常返回并 dispatch `probed`。reducer 对暂停态的处置是「不推进」——
+     * 那条规则本身是对的（它挡的是前端在途轮询造成的「暂停了进度还在涨」）,
+     * 但执行器恢复后**没有把这一发补回来**。
+     *
+     * 后果:工作真的做了、IP 真的写回了,只有计数少了 1 ——
+     * 20 个节点暂停一次就永久停在 19/20。用户看到「已结束 95%」会去找
+     * 那个并不存在的失败节点,而每点一次暂停就再丢一个。
+     *
+     * ## 为什么必须用一个可控的探测,而不是本机 echo
+     *
+     * 第一版用真实 echo 服务写这条,**它对着缺陷版本也通过** —— 因为本机探测
+     * 几毫秒就结束了,`pause()` 根本挤不进「探测在途」那个窗口。
+     * 那是一条空壳断言:缺陷要求的时序是「pause 发生在 await 期间」,
+     * 而那条路径在测试里从不发生（纪律 #1 的四分类里的「路径不存在」）。
+     *
+     * 所以这里把 `probeProxy` 换成一个**卡住的** probe:测试先等它进入在途,
+     * 再 pause,再放行 —— 时序就成了确定的而不是碰运气。
+     */
+    let current = makeConfig();
+    /**
+     * 放行当前这一发探测。
+     *
+     * 显式标注类型:赋值只发生在 `probeProxy` 的闭包里,而 TS 的控制流分析
+     * 看不进那里 —— 不标注的话它会在 `release?.()` 处把类型窄成 `never`。
+     */
+    const gate: { release: (() => void) | null } = { release: null };
+    /** 已进入在途的探测数。 */
+    let inFlight = 0;
+
+    const gatedEgress = {
+      probeProxy: async (_config: Config, proxyId: string | null) => {
+        inFlight += 1;
+        await new Promise<void>((resolve) => {
+          gate.release = resolve;
+        });
+        return {
+          proxyId: proxyId ?? "__direct__",
+          outcome: {
+            ok: true as const,
+            egressIp: proxyId === "p1" ? "198.51.100.11" : "198.51.100.22",
+            latencyMs: 5,
+          },
+        };
+      },
+    } as unknown as EgressService;
+
+    const runner = new BatchProbeRunner({
+      configOf: () => current,
+      applyConfig: async (next) => {
+        current = next;
+      },
+      egress: gatedEgress,
+      store,
+    });
+
+    runner.start();
+
+    // 等第一发真的进入在途。
+    const deadline = Date.now() + 5000;
+    while (Date.now() < deadline && inFlight === 0) {
+      await new Promise((r) => setTimeout(r, 2));
+    }
+    expect(inFlight).toBe(1);
+    expect(runner.snapshot().mainTotal).toBe(2);
+
+    // **在途期间**暂停 —— 这正是丢计数的时机。
+    runner.pause();
+    expect(runner.snapshot().state).toBe("paused");
+
+    // 放行那一发:它会在 paused 状态下返回。
+    gate.release?.();
+    await new Promise((r) => setTimeout(r, 20));
+
+    // 暂停期间进度条不该涨（这条在缺陷版本里也成立,所以它不是判据）。
+    expect(runner.snapshot().mainDone).toBe(0);
+
+    runner.resume();
+
+    // 放行剩下那一发。
+    const d2 = Date.now() + 5000;
+    while (Date.now() < d2 && inFlight < 2) {
+      await new Promise((r) => setTimeout(r, 2));
+    }
+    gate.release?.();
+
+    await waitDone(runner);
+
+    const p = runner.snapshot();
+    expect(p.state).toBe("done");
+    expect(p.failureKind).toBeNull();
+    // 判据:两发都真实完成了,计数必须追平 —— 缺陷版本这里是 1。
+    expect(p.mainDone).toBe(2);
+    expect(p.mainDone).toBe(p.mainTotal);
+
+    // 而且计数不是空转出来的 —— 两个代理都拿到了实测 IP。
+    expect(current.proxies.find((x) => x.id === "p1")!.egressIp).toBe("198.51.100.11");
+    expect(current.proxies.find((x) => x.id === "p2")!.egressIp).toBe("198.51.100.22");
+  }, 30_000);
 });

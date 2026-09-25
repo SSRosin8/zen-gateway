@@ -72,7 +72,8 @@ export function App() {
       {state.status === "ready" ? (
         <Body data={state.data} view={view} navigate={navigate} />
       ) : (
-        <FallbackView state={state} />
+        /* 概览页:这里确实一个数字都没有,所以「尚未配置 Worker」是诚实的。 */
+        <FallbackView state={state} showPool />
       )}
     </main>
   );
@@ -172,8 +173,27 @@ function UsageTab() {
  * Worker 数为 0，朴素写法 `ready === total` 得到 `0 === 0` 为真。
  * 这条契约由 `poolHealth` 的 `empty` 第三态保证，而这里在**拿不到数据时**
  * 也要成立：首次加载还没有任何数字，此时绝不能显示成功态。
+ *
+ * ## `showPool` 为什么必须由调用方决定
+ *
+ * 那个「尚未配置 Worker / 运行 npm run setup」面板只在**概览页首次加载**时成立
+ * —— 那时确实一个数字都没有。子页面（代理池/模型/用量）各有自己的端点，
+ * 而**概览的数字可能已经拿到了**:它们讲的是同一个 Worker 池。
+ *
+ * 不区分的后果是实测出来的:池 1/1 健康、`/api/proxies` 还在飞的时候进代理池页,
+ * 界面同时显示「检测中」和「尚未配置 Worker · 还没有可用出口,运行 npm run setup」
+ * —— 后两句都是假的,而它让一个装好的系统看起来需要重新装一遍。
+ * 第八轮审核查出。所以子页面传 `showPool={false}`:它们不知道池的状态,
+ * 就不该替池说话。
  */
-function FallbackView({ state }: { state: FetchState<unknown> }) {
+function FallbackView({
+  state,
+  showPool = false,
+}: {
+  state: FetchState<unknown>;
+  /** 是否渲染 Worker 池面板。只有概览页该给 true —— 见上文。 */
+  showPool?: boolean;
+}) {
   // 拿不到数据时按空池渲染 —— 绝不在没有数字的情况下显示「全部就绪」。
   const pool = poolHealth({ ready: 0, total: 0 });
 
@@ -200,7 +220,7 @@ function FallbackView({ state }: { state: FetchState<unknown> }) {
         )}
       </section>
 
-      {state.status !== "ready" && (
+      {showPool && state.status !== "ready" && (
         <section className="rounded-lg border border-border-strong bg-surface p-5">
           <h2 className="mb-4 text-base font-medium">Worker 池</h2>
           <StatusIndicator tone={POOL_TONE[pool]} icon={POOL_ICON[pool]} label={POOL_LABEL[pool]} />

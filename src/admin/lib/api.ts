@@ -242,6 +242,24 @@ export function useEndpoint<T>(
  *
  * 运行中 500ms / 空闲 5000ms（规划的两个值）。后台标签页不轮询 ——
  * 刷新一个没人看的页面只是浪费。
+ *
+ * ## 为什么间隔要走 ref，而 effect 的依赖必须是空数组
+ *
+ * 间隔取决于**当前状态**,而状态是这个 effect 自己写进去的。
+ * 于是「把 `progress` 放进依赖数组」会变成一个自激循环:
+ * 响应到达 → `setProgress` → effect 重挂 → 立刻 `tick()` → 响应到达 → …
+ * 而排好的 `setTimeout` 在重挂时被 cleanup 清掉,**间隔永远等不到**。
+ *
+ * 关键在于 `safeParse` **每次都返回新对象**,所以即使进度没有任何变化,
+ * `setProgress` 也拿到一个新身份,`[progress]` 也就次次都变。
+ * 实测(第八轮审核):200ms 内发出 **27691 个**请求 —— 设计值是每 5000ms 一个,
+ * 而且 `document.hidden` 那条降频同样失效(隐藏标签页 32760 个)。
+ * 单线程的本机网关每个请求都要跑一次 `batch.snapshot()`,于是打开代理池页
+ * 就等于给自己压测。
+ *
+ * 修法是让 effect **只挂一次**,间隔从 ref 里读最新值。
+ * 同一文件里的 `useOverview`/`useEndpoint` 本来就是这么做的
+ * （它们刻意把 `state` 留在依赖数组外），这里当初漏了。
  */
 export function useBatchProbe(): {
   progress: BatchProgress;
@@ -252,6 +270,13 @@ export function useBatchProbe(): {
   const [error, setError] = useState<string | null>(null);
   /** 见文档:每次用户动作递增,在途的旧响应据此作废。 */
   const generation = useRef(0);
+  /**
+   * 当前进度的镜像,只给排间隔用。
+   *
+   * 不能读闭包里的 `progress`:effect 只挂一次,那个值会永远是 `INITIAL`
+   * （于是探测跑起来后仍按 5000ms 轮询,进度条一卡一卡地跳）。
+   */
+  const latest = useRef<BatchProgress>(INITIAL);
 
   useEffect(() => {
     let cancelled = false;
@@ -269,6 +294,7 @@ export function useBatchProbe(): {
            * 否则「点了取消又跳回探测中」这种闪烁会反复出现。
            */
           if (parsed.success && generation.current === myGeneration) {
+            latest.current = parsed.data;
             setProgress(parsed.data);
           }
         }
@@ -276,8 +302,14 @@ export function useBatchProbe(): {
         /* 轮询失败静默 —— 页面上其他地方会报「未连接」 */
       } finally {
         if (!cancelled) {
-          // 间隔由**当前**状态决定，所以每轮重新排 —— 不用固定 interval。
-          timer = setTimeout(() => void tick(), document.hidden ? 5000 : pollIntervalMs(progress));
+          /*
+           * 间隔由**当前**状态决定，所以每轮重新排 —— 不用固定 interval。
+           * 状态从 ref 读:effect 只挂一次(见文档,放进依赖数组会自激成忙轮询)。
+           */
+          timer = setTimeout(
+            () => void tick(),
+            document.hidden ? 5000 : pollIntervalMs(latest.current),
+          );
         }
       }
     };
@@ -287,7 +319,7 @@ export function useBatchProbe(): {
       cancelled = true;
       if (timer !== undefined) clearTimeout(timer);
     };
-  }, [progress]);
+  }, []);
 
   const send = useCallback(async (action: "start" | "pause" | "resume" | "cancel") => {
     // 动作发出即作废所有在途轮询 —— 见文档。
@@ -310,7 +342,11 @@ export function useBatchProbe(): {
       }
       const parsed = BatchProgressSchema.safeParse(body);
       // 动作的响应**总是**采纳：它就是这次动作的结果，generation 已经是最新的。
-      if (parsed.success) setProgress(parsed.data);
+      if (parsed.success) {
+        // ref 要一起更新 —— 否则点了「开始」之后轮询仍按空闲的 5000ms 排。
+        latest.current = parsed.data;
+        setProgress(parsed.data);
+      }
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
     }

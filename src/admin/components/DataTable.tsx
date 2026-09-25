@@ -121,7 +121,7 @@ export function DataTable<T>({
               type="button"
               onClick={() => onPageChange(current - 1)}
               disabled={current === 1}
-              className="min-h-[44px] rounded-xs border border-border-strong px-3 disabled:cursor-not-allowed disabled:opacity-50"
+              className="min-h-[44px] rounded-xs border border-border-strong px-3 disabled:cursor-not-allowed disabled:border-border disabled:text-text-muted"
             >
               上一页
             </button>
@@ -134,7 +134,7 @@ export function DataTable<T>({
               type="button"
               onClick={() => onPageChange(current + 1)}
               disabled={current === totalPages}
-              className="min-h-[44px] rounded-xs border border-border-strong px-3 disabled:cursor-not-allowed disabled:opacity-50"
+              className="min-h-[44px] rounded-xs border border-border-strong px-3 disabled:cursor-not-allowed disabled:border-border disabled:text-text-muted"
             >
               下一页
             </button>

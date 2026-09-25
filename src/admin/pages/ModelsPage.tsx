@@ -1,5 +1,5 @@
 import type { ModelList, ModelView } from "../../shared/contract.ts";
-import { Metric, Mono, Panel } from "../components/Panel.tsx";
+import { Metric, Mono, Panel, Strong } from "../components/Panel.tsx";
 import { StatusIndicator, type StatusTone } from "../components/StatusIndicator.tsx";
 import { DataTable, TableFilters, type Column } from "../components/DataTable.tsx";
 import type { ViewState } from "../lib/router.ts";
@@ -100,7 +100,7 @@ export function ModelsPage({
       <Panel title="模型">
         <StatusIndicator tone="error" icon="✕" label="拿不到上游模型目录" />
         <p className="mt-3 text-text-muted">
-          目录从未成功拉取过，所以这一页没有数据可显示 —— 这**不是**
+          目录从未成功拉取过，所以这一页没有数据可显示 —— 这<Strong>不是</Strong>
           「一个免费模型都没有」。
         </p>
         <p className="mt-2 text-text-muted">
@@ -132,14 +132,14 @@ export function ModelsPage({
         </div>
 
         <p className="mt-5 border-t border-border pt-4 text-text-muted">
-          判定规则是 **（后缀命中 ∪ extraFreeIds）∩ 在架目录**。交集是已下架
-          模型自动失效的**唯一**机制 —— 少了它，一个下架的{" "}
+          判定规则是 <Strong>（后缀命中 ∪ extraFreeIds）∩ 在架目录</Strong>。交集是已下架
+          模型自动失效的<Strong>唯一</Strong>机制 —— 少了它，一个下架的{" "}
           <Mono>xxx-free</Mono> 会被放行，再由上游返回 400，而那条措辞指不到
           「这个 id 已经下架了」。
         </p>
         <p className="mt-2 text-text-muted">
-          **有一个不对称**：交集能自动剔除下架的，但**新出现的无后缀免费模型
-          无法自动发现** —— 上游的 <Mono>/models</Mono> 给在架性却不给价格。
+          <Strong>有一个不对称</Strong>：交集能自动剔除下架的，但<Strong>新出现的无后缀免费模型
+          无法自动发现</Strong> —— 上游的 <Mono>/models</Mono> 给在架性却不给价格。
           所以新的零费率无后缀模型只能手工补进{" "}
           <Mono>extraFreeIds</Mono>（<Mono>big-pickle</Mono> 就是这么来的）。
         </p>

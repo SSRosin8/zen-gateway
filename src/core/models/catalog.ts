@@ -353,18 +353,19 @@ export class ModelCatalog {
    *
    * `now` 可省,与 `isFresh` 同理:时钟来源在本类里唯一,调用方不各自决定。
    *
-   * ## ⚠️ 本方法**当前没有生产调用点**
+   * ## 生产调用点:`GET /api/overview`（Phase 9 批次 1 起）
    *
-   * 全仓只有 `catalog.test.ts` 在调它。按纪律 #1 的四分类这属于"代码里有死信息",
-   * 而本项目对这类东西的既定处置是 `surfacesFor()` 那个先例:**保留 + 明确标注**,
-   * 而不是补一条断言假装它被用着(那会给一个没人用的方法加测试)。
+   * `routes/admin.ts` 读它填 `catalog.slots`,Models 页显示每个槽位的条目数与年龄
+   * —— 正是下面那段曾经预期的用途。
    *
-   * 保留的理由具体:Phase 9 的 Models 页需要正是这块数据(每个槽位的条目数与
-   * 年龄),而 Phase 8 的 `doctor.mjs` 要做分层诊断。已记进
-   * `docs/architecture.md` 的缺口清单。
+   * > 这里先前写着"⚠️ 本方法当前没有生产调用点,全仓只有 `catalog.test.ts` 在调它"。
+   * > 第八轮审核查出那已经过期,且 `shared/contract.ts` 里同时写着"它此前没有
+   * > 生产读者"—— 同一事实两处副本互相矛盾。这是纪律 #4 在**注释**这个载体上的
+   * > 形态:"有没有读者"这件事的真相只能是调用点本身,手写标注必然漂。
+   * > 登记在案的那个关卡（断言每个导出成员都有非测试引用）才是正解。
    *
-   * `CatalogSnapshot.slot` 字段同理 —— 它**只被本方法读**(`#slots` 这个 Map 的
-   * 键来自 `slotOf()`,不是来自 `snapshot.slot`)。两者一起留,一起标注。
+   * `CatalogSnapshot.slot` 字段仍**只被本方法读**(`#slots` 这个 Map 的键来自
+   * `slotOf()`,不是来自 `snapshot.slot`),那一条标注仍然成立。
    */
   status(now: number = this.#clock()): Array<{ slot: CatalogSlot; total: number; ageMs: number }> {
     return [...this.#slots.values()].map((s) => ({
