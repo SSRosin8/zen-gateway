@@ -32,8 +32,13 @@ const POOL_LABEL: Record<PoolHealth, string> = {
 
 const POOL_ICON: Record<PoolHealth, string> = { empty: "○", healthy: "✓", degraded: "!" };
 
-/** 冷却剩余的人可读形态。诊断输出里 `900000` 要读者自己换算是不友好的。 */
-function humanMs(ms: number): string {
+/**
+ * 毫秒的人可读形态。诊断输出里 `900000` 要读者自己换算是不友好的。
+ *
+ * 导出给代理池页的批测耗时用 —— 那里需要同一套措辞（纪律 #4：
+ * 两处各写一份会让"90 秒"在一页显示成「1分钟」另一页显示成「90秒」）。
+ */
+export function humanMs(ms: number): string {
   if (ms < 1000) return `${ms}ms`;
   if (ms < 60_000) return `${Math.round(ms / 1000)}秒`;
   return `${Math.round(ms / 60_000)}分钟`;

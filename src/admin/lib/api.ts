@@ -1,12 +1,14 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import {
   BatchProgressSchema,
+  INITIAL_BATCH_VIEW,
+  type BatchProgressView,
   OverviewSchema,
   SubscriptionRefreshSchema,
   type Overview,
   type SubscriptionRefresh,
 } from "../../shared/contract.ts";
-import { INITIAL, pollIntervalMs, type BatchProgress } from "../../shared/batchProbe.ts";
+import { pollIntervalMs } from "../../shared/batchProbe.ts";
 
 /**
  * 管理 API 的客户端。
@@ -268,21 +270,21 @@ export function useEndpoint<T>(
  * （它们刻意把 `state` 留在依赖数组外），这里当初漏了。
  */
 export function useBatchProbe(): {
-  progress: BatchProgress;
+  progress: BatchProgressView;
   error: string | null;
   send: (action: "start" | "pause" | "resume" | "cancel") => Promise<void>;
 } {
-  const [progress, setProgress] = useState<BatchProgress>(INITIAL);
+  const [progress, setProgress] = useState<BatchProgressView>(INITIAL_BATCH_VIEW);
   const [error, setError] = useState<string | null>(null);
   /** 见文档:每次用户动作递增,在途的旧响应据此作废。 */
   const generation = useRef(0);
   /**
    * 当前进度的镜像,只给排间隔用。
    *
-   * 不能读闭包里的 `progress`:effect 只挂一次,那个值会永远是 `INITIAL`
+   * 不能读闭包里的 `progress`:effect 只挂一次,那个值会永远是初始值
    * （于是探测跑起来后仍按 5000ms 轮询,进度条一卡一卡地跳）。
    */
-  const latest = useRef<BatchProgress>(INITIAL);
+  const latest = useRef<BatchProgressView>(INITIAL_BATCH_VIEW);
 
   useEffect(() => {
     let cancelled = false;

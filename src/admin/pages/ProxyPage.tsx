@@ -1,11 +1,18 @@
 import { useCallback, useEffect, useState } from "react";
-import type { ProxyList, ProxyView, SubscriptionRefresh } from "../../shared/contract.ts";
-import { isActive, percentages, type BatchProgress } from "../../shared/batchProbe.ts";
+import type {
+  BatchProgressView,
+  ProxyList,
+  ProxyView,
+  SubscriptionRefresh,
+} from "../../shared/contract.ts";
+import { isActive, percentages } from "../../shared/batchProbe.ts";
 import { StatusIndicator, type StatusTone } from "../components/StatusIndicator.tsx";
 import { Metric, Mono, Panel, PrimaryButton, Strong } from "../components/Panel.tsx";
 import { DataTable, TableFilters, type Column } from "../components/DataTable.tsx";
 import type { ViewState } from "../lib/router.ts";
 import { useBatchProbe, useSubscriptionRefresh } from "../lib/api.ts";
+// 复用 Overview 那份 —— 两处各写一份会让同一个时长在两页显示成不同措辞。
+import { humanMs } from "./OverviewPage.tsx";
 
 /**
  * 代理池页。
@@ -79,11 +86,11 @@ function proxyStatus(p: ProxyView): { tone: StatusTone; icon: string; label: str
  * 取消是「请求已发出、等服务端确认」，不是立刻回 idle —— 那时后台那一批
  * 还在跑（它们要切 selector），放开「开始」按钮会让用户启动第二批。
  */
-function BatchPanel({ progress, control }: { progress: BatchProgress; control: ReturnType<typeof useBatchProbe> }) {
+function BatchPanel({ progress, control }: { progress: BatchProgressView; control: ReturnType<typeof useBatchProbe> }) {
   const pct = percentages(progress);
   const running = isActive(progress);
 
-  const stateLabel: Record<BatchProgress["state"], string> = {
+  const stateLabel: Record<BatchProgressView["state"], string> = {
     idle: "未开始",
     screening: "筛选中",
     running: "探测中",
@@ -130,7 +137,15 @@ function BatchPanel({ progress, control }: { progress: BatchProgress; control: R
       <StatusIndicator
         tone={tone}
         icon={progress.state === "done" && progress.failureKind === null ? "✓" : running ? "◴" : "○"}
-        label={stateLabel[progress.state]}
+        /*
+         * 带上耗时 —— 一个几十秒的任务不报「已跑多久」时，用户无法区分
+         * 「还在跑」与「卡住了」。`elapsedMs` 为 null 表示从未跑过。
+         */
+        label={
+          progress.elapsedMs === null
+            ? stateLabel[progress.state]
+            : `${stateLabel[progress.state]} · ${humanMs(progress.elapsedMs)}`
+        }
       />
 
       {(progress.screenTotal > 0 || progress.mainTotal > 0) && (

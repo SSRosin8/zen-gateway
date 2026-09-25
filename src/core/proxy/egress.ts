@@ -288,3 +288,43 @@ export function applyProbeResult(proxy: Proxy, outcome: ProbeOutcome): Proxy {
   if (!outcome.ok) return proxy;
   return { ...proxy, egressIp: outcome.egressIp };
 }
+
+/**
+ * 探测结果里的**合成 id**：本机直连出口（缺口 #28）。
+ *
+ * `probeProxy(config, null)` 把结果挂在这个 id 下 —— 它不是一个代理 id，
+ * `config.proxies` 里永远不会有这一行。落盘时要认出它并写进
+ * `gateway.directEgressIp`，否则那次探测的结果无处可存（先前就是被丢掉的）。
+ */
+export const DIRECT_EGRESS_ID = "__direct__";
+
+/**
+ * 把一批探测结果并回配置 —— 代理与**本机直连**一起。
+ *
+ * 抽成一个函数是因为它有**两个**调用方（`POST /api/probe` 与批量探测执行器），
+ * 而"直连那一条要认合成 id"这个细节在两处各写一遍必然漏（纪律 #4）——
+ * 先前就是两处都只处理了 `config.proxies`，于是直连的测量被静默丢弃。
+ */
+export function applyProbeResults(
+  config: Config,
+  outcomes: ReadonlyMap<string, ProbeOutcome>,
+): { config: Config; changed: boolean } {
+  let changed = false;
+
+  const proxies = config.proxies.map((proxy) => {
+    const outcome = outcomes.get(proxy.id);
+    if (outcome === undefined) return proxy;
+    const updated = applyProbeResult(proxy, outcome);
+    if (updated.egressIp !== proxy.egressIp) changed = true;
+    return updated;
+  });
+
+  let gateway = config.gateway;
+  const direct = outcomes.get(DIRECT_EGRESS_ID);
+  if (direct !== undefined && direct.ok && direct.egressIp !== gateway.directEgressIp) {
+    gateway = { ...gateway, directEgressIp: direct.egressIp };
+    changed = true;
+  }
+
+  return { config: { ...config, proxies, gateway }, changed };
+}

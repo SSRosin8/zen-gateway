@@ -370,6 +370,22 @@ export const GatewaySchema = z.strictObject({
   bodyTimeoutMs: z.number().int().min(1_000).max(3_600_000).default(300_000),
   /** 一条客户端请求最多尝试几个 Worker。 */
   maxAttempts: z.number().int().min(1).max(10).default(3),
+  /**
+   * **本机直连**出口最近一次实测到的公网 IP（缺口 #28）。
+   *
+   * 为什么它要有个地方存：`proxyId: null` 的 Worker 走本机网络出口，
+   * 而**它与某个代理 NAT 到同一个公网 IP 恰好是「看起来隔离其实没隔离」
+   * 的那种形态** —— 所以它必须参与隔离分组。
+   *
+   * 先前探测会真的跑（结果映射到合成 id `__direct__`），但 `config.proxies`
+   * 里没有那一行，于是测量被丢弃：每次批测白发一次网络请求，
+   * 而直连 Worker 在隔离报告里永远是「未探测」。
+   *
+   * 放在 `gateway` 而不是造一条假的 `Proxy`：本机直连**不是**一个代理
+   * （没有 host/port/协议可言），硬塞成 Proxy 会让 `resolveProxy`、
+   * dispatcher 缓存、UI 列表都要为这个特例开分支。
+   */
+  directEgressIp: EgressIpSchema.nullable().default(null),
 });
 export type Gateway = z.infer<typeof GatewaySchema>;
 

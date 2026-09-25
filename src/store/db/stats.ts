@@ -123,11 +123,37 @@ export type DerivedRates = {
  * （实测：`Value is too large to be represented as a JavaScript number`）——
  * 不是静默失真，是整个查询失败。于是一个跑久了的库会让统计页直接报错。
  *
- * 在 SQL 里用 `MIN(SUM(...), ?)` 夹住，与 `usage.ts` 的 `clampTokens`
+ * 用 `CAST(MIN(total(...), ?) AS INTEGER)` 夹住，与 `usage.ts` 的 `clampTokens`
  * 同一个策略（那里也是「宁可饱和，不要溢出」）。放在 SQL 而不是读出来再夹：
  * 读出来那一步就已经抛了。
+ *
+ * ## 为什么是 `total()` 而不是 `SUM()`（缺口 #18，第九轮补上）
+ *
+ * `MIN(SUM(x), MAX_SAFE)` 只挡住了「JS 转换阶段的越界」—— **`SUM` 的累加
+ * 本身是 int64**，所以在它溢出的那一刻 `MIN` 还没拿到值。实测 **1025 个
+ * 饱和行**（每行 MAX_SAFE = 2^53，2^53 × 1024 = 2^63）时 SQLite 直接抛
+ * `integer overflow`，整条查询失败 —— 也就是先前那个注释声称的性质
+ * **比实际强**：它只在 int64 还没溢出的区间内成立。
+ *
+ * SQLite 的 `total()` 与 `SUM()` 的差别正在这里：它**恒返回 REAL**，
+ * 而 IEEE754 双精度不会溢出（超出范围只会损失精度，最坏到 Infinity）。
+ * 于是 `MIN` 拿得到值，夹完再 `CAST ... AS INTEGER` 回整数。
+ * 实测 1025 个饱和行下返回 9007199254740991（即 MAX_SAFE），不再抛。
+ *
+ * 代价是 REAL 的精度：超过 2^53 之后累加会丢低位。但那**恰好是我们夹掉的
+ * 区间** —— 到那里已经饱和成 MAX_SAFE 了，低位本来就不会被显示。
  */
 const MAX_SAFE = Number.MAX_SAFE_INTEGER;
+
+/**
+ * 累加并饱和到 `MAX_SAFE` 的 SQL 片段。
+ *
+ * 抽成函数而不是在六处各写一遍 —— 那六处必须同时改，而"改了五处漏一处"
+ * 的症状是「统计页在某个聚合上报错而别的正常」（纪律 #4）。
+ */
+function saturatingSum(column: string): string {
+  return `CAST(MIN(total(${column}), ${MAX_SAFE}) AS INTEGER)`;
+}
 
 /**
  * UTC 日期键。
@@ -377,13 +403,13 @@ export class StatsStore {
     const stmt = this.#db.prepare(`
       SELECT
         model,
-        MIN(SUM(input_tokens),       ${MAX_SAFE}) AS input_tokens,
-        MIN(SUM(output_tokens),      ${MAX_SAFE}) AS output_tokens,
-        MIN(SUM(cache_read_tokens),  ${MAX_SAFE}) AS cache_read_tokens,
-        MIN(SUM(cache_write_tokens), ${MAX_SAFE}) AS cache_write_tokens,
-        MIN(SUM(requests_with_usage),    ${MAX_SAFE}) AS requests_with_usage,
-        MIN(SUM(requests_without_usage), ${MAX_SAFE}) AS requests_without_usage,
-        MIN(SUM(requests_dropped_usage), ${MAX_SAFE}) AS requests_dropped_usage
+        ${saturatingSum("input_tokens")} AS input_tokens,
+        ${saturatingSum("output_tokens")} AS output_tokens,
+        ${saturatingSum("cache_read_tokens")} AS cache_read_tokens,
+        ${saturatingSum("cache_write_tokens")} AS cache_write_tokens,
+        ${saturatingSum("requests_with_usage")} AS requests_with_usage,
+        ${saturatingSum("requests_without_usage")} AS requests_without_usage,
+        ${saturatingSum("requests_dropped_usage")} AS requests_dropped_usage
       FROM model_usage
       ${where}
       GROUP BY model
@@ -433,11 +459,11 @@ export class StatsStore {
     const where = sinceDay === undefined ? "" : "WHERE day >= ?";
     const stmt = this.#db.prepare(`
       SELECT
-        MIN(SUM(input_tokens),      ${MAX_SAFE}) AS input_tokens,
-        MIN(SUM(cache_read_tokens), ${MAX_SAFE}) AS cache_read_tokens,
-        MIN(SUM(requests_with_usage),    ${MAX_SAFE}) AS with_usage,
-        MIN(SUM(requests_without_usage), ${MAX_SAFE}) AS without_usage,
-        MIN(SUM(requests_dropped_usage), ${MAX_SAFE}) AS dropped_usage
+        ${saturatingSum("input_tokens")} AS input_tokens,
+        ${saturatingSum("cache_read_tokens")} AS cache_read_tokens,
+        ${saturatingSum("requests_with_usage")} AS with_usage,
+        ${saturatingSum("requests_without_usage")} AS without_usage,
+        ${saturatingSum("requests_dropped_usage")} AS dropped_usage
       FROM model_usage
       ${where}
     `);
@@ -470,7 +496,7 @@ export class StatsStore {
     const where = sinceDay === undefined ? "" : "WHERE day >= ?";
     const stmt = this.#db.prepare(`
       SELECT reason, protocol, model,
-             MIN(SUM(count), ${MAX_SAFE}) AS count
+             ${saturatingSum("count")} AS count
       FROM gateway_rejections
       ${where}
       GROUP BY reason, protocol, model

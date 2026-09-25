@@ -58,9 +58,33 @@ export type AttemptRecord = {
    * 允许 NULL 正是为此）。
    */
   readonly status: number | null;
-  /** 这次尝试耗时。从发起到拿到响应头（或抛错）为止，不含读体。 */
+  /**
+   * 这次尝试耗时。从发起到拿到响应头（或抛错）为止，不含读体。
+   *
+   * **非负整数** —— 由 `elapsedMs()` 保证，见那里的说明（缺口 #19）。
+   */
   readonly latencyMs: number;
 };
+
+/**
+ * 计算耗时，并保证它是**非负整数**（缺口 #19，第九轮补上）。
+ *
+ * 两个都不是理论问题，是实测过的：
+ *
+ * - **非整数会丢掉整行记录。** `upstream_attempts.latency_ms` 是 STRICT 表的
+ *   INTEGER 列，喂 `1.5` 会被拒（`cannot store REAL value in INTEGER column`）
+ *   → `recordAttempt` **整条事务回滚** → 明细与累计两条记录一起丢，
+ *   只留一个 `writeFailures` 计数。
+ * - **负数会照常写进库**，于是"平均延迟"被一个负值拉偏，而没有任何地方会喊。
+ *
+ * 生产上 `clock` 恒为 `Date.now` 所以两者都不可达 —— 但 `clock` 是**可注入的**
+ * （测试要控时钟），而"这个参数只有测试会传奇怪的值"不是一个能长期依赖的前提。
+ * 代价是一行，理由与 `usage.ts` 的 `clampTokens` 同源：宁可夹住，不要让一个
+ * 上游/调用方能控制的数值把存储层搞坏。
+ */
+function elapsedMs(clock: () => number, startedAt: number): number {
+  return Math.max(0, Math.round(clock() - startedAt));
+}
 
 export type RetryResult =
   | {
@@ -197,7 +221,7 @@ export async function runRetryChain(input: RetryInput): Promise<RetryResult> {
         retryAfter: null,
         // 建连之前就失败 —— 没有状态码。见 AttemptRecord.status 的说明。
         status: null,
-        latencyMs: clock() - startedAt,
+        latencyMs: elapsedMs(clock, startedAt),
       };
       attempts.push(record);
       input.onAttempt?.(record);
@@ -223,7 +247,7 @@ export async function runRetryChain(input: RetryInput): Promise<RetryResult> {
         blameWorker: false,
         retryAfter: null,
         status: response.status,
-        latencyMs: clock() - startedAt,
+        latencyMs: elapsedMs(clock, startedAt),
       };
       attempts.push(record);
       input.onAttempt?.(record);
@@ -242,7 +266,7 @@ export async function runRetryChain(input: RetryInput): Promise<RetryResult> {
       blameWorker,
       retryAfter: response.headers.get("retry-after"),
       status: response.status,
-      latencyMs: clock() - startedAt,
+      latencyMs: elapsedMs(clock, startedAt),
     };
     attempts.push(record);
     input.onAttempt?.(record);

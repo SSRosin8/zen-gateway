@@ -681,3 +681,79 @@ describe("两个脚本都不回显凭证", () => {
     expect(result.stdout).not.toContain(token);
   }, 40_000);
 });
+
+/* ================================================================== *
+ * doctor 第 4 层报运行期就绪态（缺口 #24）
+ * ================================================================== */
+
+describe("doctor 第 4 层问服务要就绪态，而不是自己算", () => {
+  it("服务在跑时报的是**就绪**数，不只是配置形态", async () => {
+    /*
+     * 这一层先前只报配置形态，并在输出里写着「是否就绪 doctor 查不到」——
+     * 而 Phase 9 之后那句话不再成立：`GET /api/overview` 带 `ready` 与
+     * `cooldownRemainingMs`，且 doctor 本来就已经在问服务（第 6 层查 /v1/models）。
+     *
+     * **关键是"问"而不是"算"**：在 doctor 里重新实现一遍冷却判定会是第二份
+     * 并行真相（纪律 #4），且必然与调度器分叉 —— 那时 doctor 说「就绪」
+     * 而转发说「在冷却」，两句话都出自本项目。
+     */
+    await writeConfig({
+      workers: [{ id: "w1", kind: "authenticated", apiKey: "fake-key-not-real", proxyId: null }],
+    });
+    await startServer();
+
+    const result = await run(DOCTOR);
+
+    // 先确认真的走到了第 4 层 —— 否则下面的断言测的是「没跑过」。
+    expect(result.stdout).toContain("── 4. Worker ──");
+    // 就绪数（新）而不是「N 个 Worker 可用」（旧的纯配置形态措辞）。
+    expect(result.stdout).toMatch(/\d+\/\d+ 个 Worker 就绪/);
+    // 那句「doctor 查不到」的免责声明不该再出现 —— 它现在查得到了。
+    expect(result.stdout).not.toContain("是否**就绪**(不在冷却中)\n   doctor 查不到");
+  }, 40_000);
+
+  it("拿不到运行期状态时**降级**成只报形态，而不是失败", async () => {
+    /*
+     * 服务可能刚好在重启，或 `/api/overview` 因某个原因不可用。
+     * 那时配置形态本身仍然是有效信息 —— 报不出就绪态不该让整层变红。
+     *
+     * ## 这个 fixture 花了两次
+     *
+     * 第一版用一个**假服务器**冒充（只答 /health，其余 404）。不成立：
+     * 第 2 层的身份判定**正确地**把它报成「端口被另一个进程占用」，
+     * 于是第 4 层根本不执行 —— 那是「路径不存在」那一类，断言测不到降级。
+     * 而那个拒绝恰好证明了身份判定是承重的。
+     *
+     * 改用**真实服务 + 立刻杀掉**：doctor 的第 2 层读状态文件与 `/health`，
+     * 它在服务刚死时仍可能通过（状态文件还在），而 `/api/overview` 已经不应答。
+     * 若第 2 层也失败，断言 `4. Worker` 不出现同样是对的结论 ——
+     * 所以这里断言的是「要么降级、要么第 4 层没跑」，而**绝不是** fail。
+     */
+    await writeConfig({
+      workers: [{ id: "w1", kind: "authenticated", apiKey: "fake-key-not-real", proxyId: null }],
+    });
+    const pid = await startServer();
+
+    // 杀掉服务 —— 状态文件留着，而端点不再应答。
+    process.kill(pid, "SIGKILL");
+    await new Promise((r) => setTimeout(r, 300));
+
+    const result = await run(DOCTOR);
+
+    /*
+     * 关键断言：**第 4 层绝不因为"拿不到运行期状态"而报 fail**。
+     *
+     * 两种可接受的结局：第 2 层就停了（服务确实没了），或第 4 层降级成
+     * 只报形态。不可接受的是第 4 层红着 —— 那会把「服务重启中」
+     * 报成「Worker 配置有问题」，指向一个完全错误的方向。
+     */
+    const reachedLayer4 = result.stdout.includes("── 4. Worker ──");
+    if (reachedLayer4) {
+      expect(result.stdout).toContain("仅配置形态");
+      expect(result.stdout).toContain("未检查");
+    } else {
+      // 第 2 层先失败 —— 那是对的，而且它必须是"服务未在运行"一类。
+      expect(result.stdout).toContain("2. 服务");
+    }
+  }, 40_000);
+});

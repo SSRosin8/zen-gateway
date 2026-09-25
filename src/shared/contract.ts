@@ -497,6 +497,59 @@ export const SubscriptionRefreshSchema = z.object({
 });
 export type SubscriptionRefresh = z.infer<typeof SubscriptionRefreshSchema>;
 
+/**
+ * 一次出口探测的逐条结果（缺口 #25，第九轮补上）。
+ *
+ * ## 为什么这个端点也要有 schema
+ *
+ * 其余管理端点都是 `XxxSchema.parse(...)` + 由 `admin/project.ts` 构造，
+ * 而 `POST /api/probe` 先前手工拼装 `ProbeOutcome` 的字段 —— 它是唯一
+ * 绕过投影层与 schema 的管理响应。
+ *
+ * 今天不泄漏凭证（`reason` 来自 `safeErrorMessage`/`describeResolveFailure`，
+ * 而 `probe.ts` 明确拒绝把响应正文放进 `reason`），**但那条纪律的全部价值
+ * 在于"新增端点时漏掉一个字段没有任何症状"** —— 一个在纪律之外的端点
+ * 恰好就是那种漏洞会出现的地方。
+ *
+ * `via` 是回显服务的 URL（`api.ipify.org` 这类），不是凭证 —— 它要能显示，
+ * 因为「是不是某个回显服务挂了」只有它能回答。
+ *
+ * ## 为什么用 `strictObject`
+ *
+ * zod 默认的 `z.object` 对未知键是**剥掉**而不是拒绝 —— 那会让"往响应里
+ * 多塞一个字段"静默通过（实测：加一个 `proxyPassword` 字段后 schema
+ * 照常 parse，只是把它 strip 掉了）。剥掉确实挡住了泄漏，
+ * 但**挡不住"下一个人以为自己加的字段生效了"** —— 他会去查为什么前端读不到。
+ *
+ * `strictObject` 让它在**构造响应时**就抛，与 `schema.ts` 里
+ * 「全部用 strictObject，拼错字段名必须立刻报错」同一条理由。
+ */
+export const ProbeResultSchema = z.union([
+  z.strictObject({
+    proxyId: z.string(),
+    ok: z.literal(true),
+    egressIp: z.string(),
+    latencyMs: z.number().int().nonnegative(),
+    via: z.string(),
+  }),
+  z.strictObject({
+    proxyId: z.string(),
+    ok: z.literal(false),
+    failureKind: z.string(),
+    /** 已脱敏。`probe.ts` 保证它不含响应正文。 */
+    reason: z.string(),
+  }),
+]);
+export type ProbeResult = z.infer<typeof ProbeResultSchema>;
+
+export const ProbeReportSchema = z.strictObject({
+  ok: z.literal(true),
+  /** 是否真的改了配置（有代理的 `egressIp` 发生变化）。 */
+  changed: z.boolean(),
+  results: z.array(ProbeResultSchema),
+});
+export type ProbeReport = z.infer<typeof ProbeReportSchema>;
+
 export const ProxyListSchema = z.object({
   proxies: z.array(ProxyViewSchema),
   clash: OverviewSchema.shape.clash,
@@ -537,7 +590,47 @@ export const BatchProgressSchema = z.object({
   cancelRequested: z.boolean(),
   addedWorkerIds: z.array(z.string()),
   failureKind: z.string().nullable(),
+  /**
+   * 本批已跑多久（毫秒）。未开始过时为 null。
+   *
+   * 由服务端从 `started_at` 算 —— 前端算不了：它不知道这一批是什么时候
+   * 开始的（刷新页面后内存里那份就没了，而进度本身归服务端所有）。
+   *
+   * 这也给了 `batch_probe_jobs.started_at` 第一个读者（缺口 #28）。
+   * 先前它**建行之后永不更新**，于是第一次批测写下的值会存一辈子 ——
+   * 没有读者所以不出症状，而那正是"死信息"的形态。
+   */
+  elapsedMs: z.number().int().nonnegative().nullable(),
 });
+
+/**
+ * 批测进度的**线上形态** —— 比 reducer 的 `BatchProgress` 多一个 `elapsedMs`。
+ *
+ * 两者刻意不同：reducer 是纯函数，**没有时钟**，所以"已跑多久"不可能是
+ * 它状态的一部分（那会让同一个状态在不同时刻不相等，穷举测试立刻失效）。
+ * 耗时由服务端在**读**的时候算（`Date.now() - started_at`）。
+ *
+ * 前端用这个类型，不用 reducer 那个 —— 它拿到的是线上形态。
+ */
+export type BatchProgressView = z.infer<typeof BatchProgressSchema>;
+
+/**
+ * 前端的初始值 —— 线上形态的"从未跑过"。
+ *
+ * 不复用 reducer 的 `INITIAL`：那个少一个 `elapsedMs`（reducer 没有时钟）。
+ * `elapsedMs: null` 而不是 0 —— 「没开始」与「刚开始」是两件事。
+ */
+export const INITIAL_BATCH_VIEW: BatchProgressView = {
+  state: "idle",
+  screenTotal: 0,
+  screenDone: 0,
+  mainTotal: 0,
+  mainDone: 0,
+  cancelRequested: false,
+  addedWorkerIds: [],
+  failureKind: null,
+  elapsedMs: null,
+};
 
 
 

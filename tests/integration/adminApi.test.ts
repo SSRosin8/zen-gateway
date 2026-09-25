@@ -9,7 +9,13 @@ import { EgressService } from "../../src/core/proxy/egress.ts";
 import { ModelCatalog } from "../../src/core/models/catalog.ts";
 import { Scheduler } from "../../src/core/routing/scheduler.ts";
 import { ConfigSchema, CONFIG_VERSION, type Config } from "../../src/shared/schema.ts";
-import { ModelListSchema, OverviewSchema, ProxyListSchema, StatsViewSchema } from "../../src/shared/contract.ts";
+import {
+  ModelListSchema,
+  OverviewSchema,
+  ProbeReportSchema,
+  ProxyListSchema,
+  StatsViewSchema,
+} from "../../src/shared/contract.ts";
 import { applyConfigPatch } from "../../src/server/admin/patch.ts";
 import { allSecretValues, displayFingerprint } from "../../src/server/admin/project.ts";
 
@@ -580,6 +586,48 @@ describe("写入失败分类", () => {
     if (!result.ok) expect(result.failure.kind).toBe("invalid_config");
   });
 
+  it("**同一请求里 `delete X` + `create X` 净效果是新建**（缺口 #27）", () => {
+    /*
+     * 文件头承诺「删掉一个又同名新建的净效果是新建，而不是建完又被删掉」，
+     * 而先前的重复 id 检查看的是 `next.workers`（那里还有待删的那个）——
+     * 于是这个请求被拒，**注释与行为相反**。用户想换一个 Worker 的 id/key
+     * 时必须发两次请求，而中间那一刻配置里少了一个 Worker。
+     */
+    const config = makeConfig();
+    const result = applyConfigPatch(config, {
+      workers: {
+        create: [{ id: "w1", name: "换过的", apiKey: "brand-new-key-value", proxyId: null, enabled: true }],
+        delete: ["w1"],
+      },
+    });
+
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+
+    // 只剩一个 w1，且是**新的**那个 —— 删掉的是旧的（create 追加、delete 取首个匹配）。
+    const w1 = result.config.workers.filter((w) => w.id === "w1");
+    expect(w1).toHaveLength(1);
+    expect(w1[0]!.name).toBe("换过的");
+    expect(w1[0]!.apiKey).toBe("brand-new-key-value");
+    expect(result.changed).toBe(true);
+  });
+
+  it("不在 delete 里的重复 id 仍然被拒", () => {
+    /*
+     * 上一条放开的只是"同请求内要删的那个"。单纯的重复新建必须照旧报错 ——
+     * 否则那条检查就等于没有了。
+     */
+    const result = applyConfigPatch(makeConfig(), {
+      workers: {
+        create: [{ id: "w1", name: "撞了", apiKey: "k-some-value", proxyId: null, enabled: true }],
+        delete: ["w2"],
+      },
+    });
+    expect(result.ok).toBe(false);
+    if (result.ok) return;
+    expect(result.failure.kind).toBe("invalid_config");
+  });
+
   it("空 patch 不写盘", async () => {
     let applied = 0;
     const { app } = makeApp(makeConfig(), { onApply: () => (applied += 1) });
@@ -589,6 +637,79 @@ describe("写入失败分类", () => {
     expect(body["changed"]).toBe(false);
     // 无谓的写盘会顺带跑一次 Worker 池 re-sync,只增加出错机会。
     expect(applied).toBe(0);
+  });
+
+  it("**把字段写成当前值不算改** —— 表单式保存不该每次都写盘（缺口 #26）", async () => {
+    /*
+     * 先前 `changed` 是按"这个字段有没有出现在 patch 里"判定的，
+     * 于是把一个字段写成它**当前的值**也算改了。而管理 UI 提交的是整张表单
+     * —— 网关页每次「保存」都会触发一次原子写 + Worker 池 re-sync，
+     * 即使用户什么都没动。`admin.ts` 的注释承诺的正是相反的行为。
+     *
+     * `config.json` 是唯一一份凭证存储，写它不是免费的；而 re-sync 会让
+     * 池重建一次，只增加出错机会。
+     */
+    const config = makeConfig();
+    let applied = 0;
+    const { app } = makeApp(config, { onApply: () => (applied += 1) });
+
+    // 一、写成当前值 → 不算改，不写盘。
+    const same = await patch(app, { gateway: { maxAttempts: config.gateway.maxAttempts } });
+    expect(same.status).toBe(200);
+    expect(same.body["changed"]).toBe(false);
+    expect(applied).toBe(0);
+
+    // 二、真的改一个值 → 算改，写盘。
+    const diff = await patch(app, { gateway: { maxAttempts: config.gateway.maxAttempts + 1 } });
+    expect(diff.status).toBe(200);
+    expect(diff.body["changed"]).toBe(true);
+    expect(applied).toBe(1);
+  });
+
+  it("整张表单原样回传（多字段全等于当前值）也不算改", () => {
+    /*
+     * 这是上一条的真实形态 —— UI 提交的不是单个字段。
+     * 用纯函数直接验，不经 HTTP：要钉的是合并层的判定。
+     */
+    const config = makeConfig();
+    const result = applyConfigPatch(config, {
+      gateway: {
+        maxAttempts: config.gateway.maxAttempts,
+        headersTimeoutMs: config.gateway.headersTimeoutMs,
+        bodyTimeoutMs: config.gateway.bodyTimeoutMs,
+      },
+      models: {
+        freeSuffix: config.models.freeSuffix,
+        extraFreeIds: [...config.models.extraFreeIds],
+        catalogTtlMs: config.models.catalogTtlMs,
+        enforceCatalog: config.models.enforceCatalog,
+      },
+    });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.changed).toBe(false);
+  });
+
+  it("`{set}` 成同一个凭证值也不算改", () => {
+    /*
+     * 凭证是三态写入里最容易误判的：前端拿不到原值，所以它**不会**回传
+     * —— 但一个脚本可能会。写成同一个值仍然不该触发写盘。
+     */
+    const config = makeConfig();
+    const result = applyConfigPatch(config, {
+      gateway: { relayToken: { set: config.gateway.relayToken } },
+    });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.changed).toBe(false);
+
+    // 换一个值就该算改。
+    const other = applyConfigPatch(config, {
+      gateway: { relayToken: { set: "a-different-relay-token-value" } },
+    });
+    expect(other.ok).toBe(true);
+    if (!other.ok) return;
+    expect(other.changed).toBe(true);
   });
 
   it("请求体超过 1 MiB 被拒（管理面的 body 上限）", async () => {
@@ -837,6 +958,93 @@ describe("POST /api/probe 把实测 IP 写回配置", () => {
     expect(res.status).toBe(403);
     expect(JSON.stringify(getConfig())).toBe(before);
   });
+
+  it("**本机直连的实测 IP 也要落盘并参与隔离分组**（缺口 #28）", async () => {
+    /*
+     * `proxyId: null` 的 Worker 走本机网络出口，而**它与某个代理 NAT 到
+     * 同一个公网 IP 恰好是「看起来隔离其实没隔离」的形态** ——
+     * 所以它必须参与分组。
+     *
+     * 先前探测会真的跑（结果挂在合成 id `__direct__` 下），但落盘时两个
+     * 写入点都只并 `config.proxies`，而那里没有直连这一行 ——
+     * 于是每次批测白发一次网络请求，直连 Worker 在隔离报告里永远是「未探测」。
+     */
+    const config = makeConfig({
+      workers: [
+        { id: "w-direct", kind: "authenticated", apiKey: KEY_A, proxyId: null },
+        { id: "w-proxy", kind: "authenticated", apiKey: KEY_B, proxyId: "p1" },
+      ],
+      proxies: [
+        {
+          id: "p1", name: "直连代理", type: "socks5", host: "127.0.0.1", port: echoPort,
+          source: "manual", direct: true, bridgeable: false, egressIp: null,
+        },
+      ],
+      clash: { enabled: false, bridges: [] },
+    });
+    const { app, getConfig } = makeApp(config, {
+      probeServices: [{ url: `http://127.0.0.1:${echoPort}/`, extract: (t) => t.trim() }],
+    });
+
+    // 探测前：直连 Worker 的出口是未知的。
+    const before = ProxyListSchema.parse((await get(app, "/api/proxies")).body);
+    expect(before.isolation.unknownWorkerIds).toContain("w-direct");
+
+    const res = await app.request("http://127.0.0.1/api/probe", { method: "POST" });
+    expect(res.status).toBe(200);
+
+    // 落盘了 —— 这是先前被丢掉的那一半。
+    expect(getConfig().gateway.directEgressIp).not.toBeNull();
+
+    // 而且它参与了分组：直连 Worker 不再是「未探测」。
+    const after = ProxyListSchema.parse((await get(app, "/api/proxies")).body);
+    expect(after.isolation.unknownWorkerIds).not.toContain("w-direct");
+    const directGroup = after.isolation.groups.find((g) => g.workerIds.includes("w-direct"));
+    expect(directGroup).toBeDefined();
+  }, 20_000);
+
+  it("**响应过 schema，且不泄漏凭证**（缺口 #25）", async () => {
+    /*
+     * 这一条先前是唯一绕过 schema 与投影层的管理响应 —— 它手工拼装
+     * `ProbeOutcome` 的字段。今天不泄漏（`reason` 来自
+     * `safeErrorMessage`/`describeResolveFailure`，而 `probe.ts` 明确拒绝
+     * 把响应正文放进 `reason`），**但那条纪律的全部价值在于
+     * "新增端点时漏掉一个字段没有任何症状"** —— 一个在纪律之外的端点
+     * 恰好就是那种漏洞会出现的地方。
+     *
+     * 断言两件事：形状真的过了 `ProbeReportSchema`（多一个字段会被
+     * strip 或拒），以及整段响应里没有任何真实凭证。
+     */
+    const config = makeConfig({
+      workers: [{ id: "w1", kind: "authenticated", apiKey: KEY_A, proxyId: "p1" }],
+      proxies: [
+        {
+          id: "p1", name: "直连", type: "socks5", host: "127.0.0.1", port: echoPort,
+          password: "proxy-password-not-real", source: "manual",
+          direct: true, bridgeable: false, egressIp: null,
+        },
+      ],
+      clash: { enabled: false, bridges: [] },
+    });
+    const { app } = makeApp(config, {
+      probeServices: [{ url: `http://127.0.0.1:${echoPort}/`, extract: (t) => t.trim() }],
+    });
+
+    const res = await app.request("http://127.0.0.1/api/probe", { method: "POST" });
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as unknown;
+
+    // 一、形状：直接喂 schema —— 它是响应的唯一契约。
+    expect(() => ProbeReportSchema.parse(body)).not.toThrow();
+
+    // 二、凭证：清单从 Config 的实际结构推导，不是手写一份（纪律 #4）。
+    const text = JSON.stringify(body);
+    for (const secret of allSecretValues(config)) {
+      expect(text).not.toContain(secret);
+      // 8 位前缀也不行 —— 查整段挡不住部分泄漏。
+      expect(text).not.toContain(secret.slice(0, 8));
+    }
+  }, 20_000);
 });
 
 /* ================================================================== *
