@@ -39,6 +39,8 @@
 ```bash
 npm install
 npm start          # 构建 → 后台启动 → 健康等待 → 打印 URL
+npm run setup      # 可选：自动探测本机 Clash Controller 并导入节点
+npm run doctor     # 出问题先跑它 —— 分层诊断，只报第一个失败的层
 ```
 
 首次启动会生成 `data/config.json`（0600 权限）并自动生成 Relay Token。
@@ -46,8 +48,10 @@ npm start          # 构建 → 后台启动 → 健康等待 → 打印 URL
 > **所在网络对 `opencode.ai` 做 TLS 中间人的话**（内网 DNS + 企业 CA），
 > Node 不读系统 CA 库，要改成
 > `NODE_EXTRA_CA_CERTS=/etc/ssl/certs/ca-certificates.crt npm start` ——
-> 否则症状是 `/v1/models` 返回 200 加一个**空列表**而不报错。
-> 判断方式与原理见 [`docs/usage.md`](docs/usage.md)（别用 `curl` 判断，它读的是系统 CA）。
+> 否则症状是 `/v1/models` 返回 **502 `upstream_unreachable`**。
+> `npm run doctor` 的第 6 层会直接指出这一条（它查的是**服务进程**的环境变量，
+> 不是你当前 shell 的）。别用 `curl` 判断 —— 它读系统 CA，会正常返回 200
+> 而网关同时是失败的。原理见 [`docs/usage.md`](docs/usage.md)。
 
 然后把 OpenCode 指向本网关 —— 在项目或 `~/.config/opencode/opencode.json` 里
 **覆盖内置 `opencode` provider**：

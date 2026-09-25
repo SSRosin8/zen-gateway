@@ -25,6 +25,7 @@ import { chmod, mkdir, open, readFile, readlink, rm, stat, writeFile } from "nod
 import { fileURLToPath } from "node:url";
 import { dirname, join, resolve } from "node:path";
 import { resolvePort } from "../src/store/port.ts";
+import { createInstance, dataDirOf } from "./lib/instance.mjs";
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
 
@@ -36,7 +37,7 @@ const ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
  * 双启动留下孤儿)。要让这些缺陷有常驻回归测试,就必须能把状态文件与端口
  * 一起隔离,否则测试之间、以及测试与用户真实实例之间会互相踩。
  */
-const DATA_DIR = process.env.ZG_DATA_DIR ? resolve(process.env.ZG_DATA_DIR) : join(ROOT, "data");
+const DATA_DIR = dataDirOf(ROOT);
 const STATE_FILE = join(DATA_DIR, "zen-gateway.state.json");
 const LOCK_FILE = join(DATA_DIR, "zen-gateway.lock");
 const LOG_FILE = join(DATA_DIR, "zen-gateway.log");
@@ -86,6 +87,18 @@ try {
 }
 const BASE = `http://127.0.0.1:${PORT}`;
 
+/**
+ * 身份判定从 `lib/instance.mjs` 取,**本文件不再自己写一份**。
+ *
+ * `doctor.mjs` 要回答同一个问题(端口上那个进程是不是我们的),而两份手写的
+ * 判断必然分叉 —— 分叉的后果是 `doctor` 说「服务正常」而本脚本说「无法确认
+ * 身份,未发送信号」,两句互相矛盾的话都出自本项目。端口解析在 Phase 3 就是
+ * 这样炸过一次的(三处并行手写),所以这次在第二个消费者出现的**同时**收口,
+ * 而不是等它分叉之后。
+ */
+const instance = createInstance({ dataDir: DATA_DIR, port: PORT, entry: ENTRY });
+const { readState, pidAlive, probeHealth, inspect } = instance;
+
 const HEALTH_TIMEOUT_MS = 20_000;
 const HEALTH_INTERVAL_MS = 250;
 const STOP_TIMEOUT_MS = 10_000;
@@ -114,16 +127,9 @@ async function ensureDataDir() {
   }
 }
 
-async function readState() {
-  try {
-    const raw = JSON.parse(await readFile(STATE_FILE, "utf8"));
-    const pid = Number.parseInt(raw?.pid, 10);
-    if (!Number.isInteger(pid) || pid <= 0) return null;
-    return { pid, port: Number(raw?.port) || PORT, startedAt: raw?.startedAt ?? null };
-  } catch {
-    return null;
-  }
-}
+/* ------------------------------------------------------------------ *
+ * 锁
+ * ------------------------------------------------------------------ */
 
 async function writeState(pid) {
   await writeFile(
@@ -131,78 +137,6 @@ async function writeState(pid) {
     `${JSON.stringify({ pid, port: PORT, startedAt: new Date().toISOString() })}\n`,
     { mode: FILE_MODE },
   );
-}
-
-function pidAlive(pid) {
-  try {
-    process.kill(pid, 0);
-    return true;
-  } catch (err) {
-    // EPERM = 进程存在但不属于当前用户 —— 存活,但绝不是我们启的。
-    return err?.code === "EPERM";
-  }
-}
-
-/**
- * 身份验证途径 2:进程的 cmdline 是否指向我们的入口。
- *
- * 服务卡死不应答 /health 时,这是唯一还能用的证明。没有它就只能在
- * 「拒绝停止一个卡死的服务」和「盲杀一个 PID」之间二选一。
- */
-async function pidLooksLikeOurs(pid) {
-  try {
-    const cmdline = await readFile(`/proc/${pid}/cmdline`, "utf8");
-    return cmdline.split("\0").some((arg) => arg === ENTRY);
-  } catch {
-    // 非 Linux 或无权读取 → 这条途径不可用,交给调用方判断。
-    return null;
-  }
-}
-
-async function probeHealth(timeoutMs = 1000) {
-  try {
-    const res = await fetch(`${BASE}/health`, { signal: AbortSignal.timeout(timeoutMs) });
-    if (!res.ok) return null;
-    const body = await res.json();
-    return body?.ok === true ? body : null;
-  } catch {
-    return null;
-  }
-}
-
-/**
- * 把「端口上在跑什么」「状态文件指向什么」「它是不是我们的」一次问清。
- *
- * 只读,不做任何清理 —— 先前的实现顺手删陈旧状态文件,结果在
- * 「本服务存活但不健康」这条路径上删掉了**活着的**实例的状态文件,
- * 之后 stop 与 status 都报「未在运行」,只能手工 ss/kill 收场。
- */
-async function inspect() {
-  const state = await readState();
-  const health = await probeHealth();
-  const alive = state !== null && pidAlive(state.pid);
-
-  let identity = "unknown";
-  if (alive) {
-    if (health !== null) {
-      // 能应答我们端口的进程就是占着这个端口的进程。
-      identity = health.pid === state.pid ? "ours" : "foreign";
-    } else {
-      const byCmdline = await pidLooksLikeOurs(state.pid);
-      if (byCmdline === true) identity = "ours";
-      else if (byCmdline === false) identity = "foreign";
-    }
-  }
-
-  return {
-    state,
-    health,
-    alive,
-    identity,
-    healthy: health !== null,
-    /** 端口上有服务,但不是状态文件记录的那个(或根本没有状态文件)。 */
-    foreignOnPort: health !== null && (state === null || health.pid !== state.pid),
-  };
 }
 
 /**
@@ -328,6 +262,69 @@ async function acquireLock() {
 const releaseLock = () => rm(LOCK_FILE, { force: true });
 
 /* ------------------------------------------------------------------ *
+ * 打开浏览器
+ * ------------------------------------------------------------------ */
+
+/**
+ * 在默认浏览器里打开管理后台。
+ *
+ * ## 为什么只在**显式要求**时才打开
+ *
+ * `npm start` 常在脚本、ssh 会话、CI 式的串联里被调用,而那些环境里
+ * 弹一个浏览器是骚扰(ssh 下更会失败或挂住)。所以默认不开,
+ * 由 `npm start -- --open` 与 `npm run open` 显式触发。
+ *
+ * ## 为什么不用 `open`/`opener` 这类包
+ *
+ * 一个调 `xdg-open` 的依赖不值得 —— 本项目对新增依赖的态度见规划。
+ *
+ * ## 安全:命令与参数分开传,URL 绝不进 shell
+ *
+ * 用 `spawn(cmd, [url])` 且**不带 `shell: true`**。URL 里含
+ * `gateway.port`(配置可控的数字)和固定路径,但即便如此也不做字符串拼接 ——
+ * 一个 `; rm -rf` 形态的值在 shell 模式下会被执行,而这里根本不给它机会。
+ * 这与 `clash/controller.ts` 拒绝纯点段是同一条思路:在边界上就不可能。
+ *
+ * 失败**不影响启动的退出码**:服务已经起来了,浏览器打不开只是不便。
+ * 但要打一行 —— 静默失败会让用户以为命令没生效。
+ */
+function openBrowser(url) {
+  const command =
+    process.platform === "darwin" ? "open" : process.platform === "win32" ? "start" : "xdg-open";
+  try {
+    const child = spawn(command, [url], { stdio: "ignore", detached: true });
+    // 不让它把父进程吊住 —— 浏览器进程通常活得比本脚本久。
+    child.unref();
+    child.on("error", (err) => {
+      console.error(`无法打开浏览器(${err.code ?? "未知错误"}),请手工访问:${url}`);
+    });
+    return true;
+  } catch (err) {
+    console.error(`无法打开浏览器(${err?.code ?? "未知错误"}),请手工访问:${url}`);
+    return false;
+  }
+}
+
+/**
+ * 管理后台的 URL。
+ *
+ * ## 这里必须指向 **dev server**,而不是网关端口
+ *
+ * 实测:网关**不**伺服 `dist/admin`(`GET /` 返回 404),只有 `/health`、
+ * `/v1/*`、`/api/*` 三组路由。管理后台在 Phase 9 才真正成形,眼下它跑在
+ * Vite dev server(`npm run dev`,固定 5173)上,由 vite 代理把
+ * `/health` 与 `/api` 转回网关。
+ *
+ * 所以 `--open` 打开 5173 而不是 9877 —— 指向后者会得到一个 404 页面,
+ * 那比不打开更让人困惑。这条与 `vite.config.ts` 的 `strictPort: true`
+ * 配套:端口固定,不会漂。
+ *
+ * Phase 9 若让网关自己伺服静态产物,这里要跟着改成网关端口 ——
+ * 届时那是一处真实的修改,不是遗漏。
+ */
+const ADMIN_URL = "http://127.0.0.1:5173";
+
+/* ------------------------------------------------------------------ *
  * 命令
  * ------------------------------------------------------------------ */
 
@@ -345,6 +342,7 @@ async function start() {
 
     if (st.identity === "ours" && st.healthy) {
       console.log(`已在运行(pid ${st.state.pid}) → ${BASE}`);
+      if (WANT_OPEN) openBrowser(ADMIN_URL);
       return 0;
     }
 
@@ -415,6 +413,7 @@ async function start() {
       const health = await probeHealth();
       if (health?.pid === child.pid) {
         console.log(`zen-gateway 已启动(pid ${child.pid}) → ${BASE}`);
+        if (WANT_OPEN) openBrowser(ADMIN_URL);
         return 0;
       }
       if (!pidAlive(child.pid)) {
@@ -522,6 +521,22 @@ async function restart() {
   return start();
 }
 
+/**
+ * 只打开浏览器,不启动服务。
+ *
+ * 服务没在跑时**报错而不静默打开** —— 打开一个连不上后端的页面会让用户
+ * 去排查前端,而真实原因是服务没起。这与 `models.ts` 那条「502 而非空列表」
+ * 同一个理由:不要给出一个指向错误方向的症状。
+ */
+async function open_() {
+  const st = await inspect();
+  if (!(st.identity === "ours" && st.healthy)) {
+    console.error("服务未在运行,先 npm start。");
+    return 1;
+  }
+  return openBrowser(ADMIN_URL) ? 0 : 1;
+}
+
 /* ------------------------------------------------------------------ *
  * 分发
  * ------------------------------------------------------------------ */
@@ -539,9 +554,23 @@ const ACTIONS = new Map([
   ["stop", stop],
   ["status", status],
   ["restart", restart],
+  ["open", open_],
 ]);
 
-const cmd = process.argv[2] ?? "status";
+/**
+ * `--open` 从参数里摘掉,剩下的第一个才是命令。
+ *
+ * 顺序不敏感:`start --open` 与 `--open start` 都成立 —— 用户不该记住旗标
+ * 该放哪。`npm start -- --open` 传进来的正是后者之外的形态。
+ *
+ * **摘掉之后再取命令**,否则 `--open` 会被当成命令名而得到「未知命令」——
+ * 那是最容易犯的那个错。
+ */
+const argv = process.argv.slice(2);
+const WANT_OPEN = argv.includes("--open");
+const positional = argv.filter((a) => !a.startsWith("--"));
+
+const cmd = positional[0] ?? "status";
 const action = ACTIONS.get(cmd);
 if (!action) {
   console.error(`未知命令:${cmd}(可用:${[...ACTIONS.keys()].join(" / ")})`);
