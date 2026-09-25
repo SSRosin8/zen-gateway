@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { isUsable, WorkerPool } from "../../src/core/routing/workerPool.ts";
+import { isWorkerReady, isUsable, WorkerPool } from "../../src/core/routing/workerPool.ts";
 import { ConfigSchema, type Config } from "../../src/shared/schema.ts";
 import { FAILURE_KINDS, shouldCooldown } from "../../src/core/failures.ts";
 
@@ -405,5 +405,66 @@ describe("snapshot", () => {
     const pool = new WorkerPool(cfg);
     pool.markFailure({ workerId: "w1", kind: "auth", retryAfter: null, config: cfg, now: NOW, jitter: 0 });
     expect(pool.snapshot(NOW)[0]?.lastFailure).toBe("auth");
+  });
+});
+
+/* ================================================================== *
+ * 非有限输入的守卫（第十轮审核）
+ * ================================================================== */
+
+describe("isWorkerReady 对非有限输入保守处理", () => {
+  /*
+   * 这两行 `Number.isFinite` 先前**零覆盖** —— 全仓没有任何测试给
+   * `isWorkerReady` 喂过非有限值，删掉它们后 122 条相关测试全绿。
+   *
+   * 而它是**承重的**：穷举 `{NaN, ±Infinity, 0, 1, 1e15}` 的 36 种组合，
+   * 与裸 `cooldownUntil <= now` 有 9 处分歧，其中
+   * `cooldownUntil = -Infinity` 会让裸比较返回 `true` ——
+   * 一个脏值把 Worker **误判成就绪**，那是不安全的方向。
+   */
+
+  const VALUES = [Number.NaN, Number.POSITIVE_INFINITY, Number.NEGATIVE_INFINITY, 0, 1, 1e15];
+
+  it("**没有任何非有限输入会被判成就绪**", () => {
+    let checked = 0;
+    const wrong: string[] = [];
+
+    for (const until of VALUES) {
+      for (const now of VALUES) {
+        const bothFinite = Number.isFinite(until) && Number.isFinite(now);
+        const ready = isWorkerReady(until, now);
+        // 只要有一侧非有限，就必须判成不就绪。
+        if (!bothFinite && ready) wrong.push(`until=${until} now=${now}`);
+        checked += 1;
+      }
+    }
+
+    expect(checked).toBe(VALUES.length * VALUES.length);
+    expect(wrong, "这些非有限组合被误判成就绪").toEqual([]);
+  });
+
+  it("与裸比较**确实有分歧** —— 证明守卫不是装饰", () => {
+    /*
+     * 与上一条配对。少了它，一个「裸比较恰好也从不误判」的世界里
+     * 上面那条会通过，而我们无从知道守卫有没有在做事。
+     */
+    const divergences = VALUES.flatMap((until) =>
+      VALUES.filter((now) => isWorkerReady(until, now) !== until <= now).map(
+        (now) => `until=${until} now=${now}`,
+      ),
+    );
+
+    expect(divergences.length).toBeGreaterThan(0);
+    // 最要紧的那个形态：裸比较说就绪，守卫说不就绪。
+    expect(Number.NEGATIVE_INFINITY <= 0).toBe(true);
+    expect(isWorkerReady(Number.NEGATIVE_INFINITY, 0)).toBe(false);
+  });
+
+  it("有限输入的行为与裸比较完全一致 —— 守卫不改变正常路径", () => {
+    for (const until of [0, 1, 1e15]) {
+      for (const now of [0, 1, 1e15]) {
+        expect(isWorkerReady(until, now)).toBe(until <= now);
+      }
+    }
   });
 });

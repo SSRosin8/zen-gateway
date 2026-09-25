@@ -78,9 +78,14 @@ export function WorkersPage({
       header: "连续失败",
       numeric: true,
       /*
-       * 这一列回答一个 Overview 答不了的问题:「连续失败 12 次却从未冷却」
-       * 正是「客户端一直在发坏请求」这个结论的证据（`bad_request` 不冷却，
-       * 但计数照加 —— 见 `markFailure` 的说明）。
+       * 这一列回答一个 Overview 答不了的问题:**一个 Worker 是在偶发失败还是
+       * 在持续失败**。冷却剩余只说「现在不能用」，而连续次数说「它退避到第几级」
+       * —— 一个 `consecutiveFails: 6` 的 Worker 即使此刻冷却已过期，
+       * 下一次失败也会直接退到分钟级。
+       *
+       * ⚠️ 这里先前写的是「连续失败 12 次却从未冷却 = 客户端在发坏请求」，
+       * 而那个场景**在 UI 上永远显示不出来**：`bad_request` 走
+       * `markNotBlamed`（清零），压根到不了计数那一步。第十轮审核实测确认。
        */
       render: (w) => (
         <span className={w.consecutiveFails > 0 ? "text-warn" : "text-text-muted"}>

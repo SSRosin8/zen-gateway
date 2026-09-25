@@ -281,11 +281,19 @@ export class WorkerPool {
     if (worker === null) return null;
 
     /*
-     * 失败计数**无论是否冷却**都要加。
+     * 失败计数**无论传入哪种 kind** 都要加 —— 这是本方法的局部不变量。
      *
-     * `bad_request` 不冷却,但它仍是一次失败 —— 诊断里"连续失败 12 次却
-     * 从未冷却"正是"客户端一直在发坏请求"这个结论的证据,而把计数也跳过
-     * 就把这条线索抹掉了。
+     * ⚠️ **这里先前描述了一个 UI 上看不到的诊断场景**（第十轮审核查出）：
+     * 原文说「连续失败 12 次却从未冷却」是「客户端一直在发坏请求」的证据。
+     * 但 `Scheduler.record()` 的分支是
+     * `if (!blameWorker || !shouldCooldown(failure)) → markNotBlamed`（**清零**），
+     * 而 `shouldCooldown` 恰好就是 `kind !== "bad_request" && kind !== "unknown"`
+     * —— 也就是**所有不冷却的类别都走不到这里**。实测 12 次 `bad_request`
+     * 之后连续失败数仍是 0（两种 `blameWorker` 都试过）。
+     *
+     * 所以这段计数对 `bad_request` 是**防御性冗余**：不归咎的类别由 `record`
+     * 拦在前面。`WorkersPage` 的「连续失败」一列仍然有用 —— 它显示的是
+     * 真实故障（限流、传输失败、上游 5xx）的连续次数，那些都会走到这里。
      */
     const consecutiveFails = worker.consecutiveFails + 1;
 
