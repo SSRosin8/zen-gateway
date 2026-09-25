@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { createServer, type Server } from "node:http";
 import { mkdtemp, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -91,6 +91,8 @@ function makeApp(
     address?: string;
     /** 注入假 IP 回显服务 —— 不打真实网络。 */
     probeServices?: Array<{ url: string; extract: (text: string) => string | null }>;
+    /** 注入假订阅 fetch —— 不打真实网络（Phase 10）。 */
+    subscriptionFetch?: { fetchImpl?: typeof fetch; now?: () => number; userAgent?: string };
   } = {},
 ) {
   let current = config;
@@ -160,6 +162,7 @@ function makeApp(
         storeWriteFailures: 0,
       }),
       ...(opts.stats === false ? {} : { stats }),
+      ...(opts.subscriptionFetch === undefined ? {} : { subscriptionFetch: opts.subscriptionFetch }),
     },
   });
 
@@ -971,5 +974,236 @@ describe("/api/batch-probe", () => {
     const { app } = makeApp(makeConfig(), { address: "203.0.113.9" });
     expect((await app.request("http://127.0.0.1/api/proxies")).status).toBe(403);
     expect((await app.request("http://127.0.0.1/api/models")).status).toBe(403);
+  });
+});
+
+/* ================================================================== *
+ * 订阅（Phase 10）
+ * ================================================================== */
+
+const SUB_TOKEN = "sub-token-not-real-abcdef123456";
+const SUB_URL = `https://sub.example.invalid/link?token=${SUB_TOKEN}`;
+
+const SUB_YAML = `proxies:
+  - { name: 订阅节点一, type: vless, server: s1.example.invalid, port: 443 }
+  - { name: 订阅节点二, type: hysteria2, server: s2.example.invalid, port: 8443 }
+`;
+
+function withSubscription(): Config {
+  return makeConfig({
+    subscriptions: [{ id: "sub1", name: "机场一", url: SUB_URL }],
+  });
+}
+
+async function refresh(app: Hono, id: string) {
+  const res = await app.request(`http://127.0.0.1/api/subscriptions/${id}/refresh`, {
+    method: "POST",
+  });
+  return { status: res.status, body: (await res.json()) as Record<string, unknown> };
+}
+
+describe("订阅列表", () => {
+  it("**URL 只给脱敏串** —— token 绝不出现在响应里", async () => {
+    /*
+     * 订阅 URL 的 token 通常带在 query 或 path 里，它本身就是付费凭证。
+     * 一个"订阅列表"接口若原样回显 URL，就等于把所有机场的凭证公开在回环上。
+     */
+    const { app } = makeApp(withSubscription());
+    const { status, body } = await get(app, "/api/proxies");
+    expect(status).toBe(200);
+
+    const text = JSON.stringify(body);
+    expect(text).not.toContain(SUB_TOKEN);
+    // 8 位前缀也不行 —— 查整段挡不住部分泄漏。
+    expect(text).not.toContain(SUB_TOKEN.slice(0, 8));
+
+    const subs = body.subscriptions as Array<Record<string, unknown>>;
+    expect(subs).toHaveLength(1);
+    // 但要能认出是哪个订阅。
+    expect(String(subs[0]!.urlRedacted)).toContain("sub.example.invalid");
+    expect(subs[0]!.name).toBe("机场一");
+  });
+
+  it("proxyCount 由服务端算 —— 不受前端筛选影响", async () => {
+    const base = withSubscription();
+    const config: Config = {
+      ...base,
+      proxies: [
+        ...base.proxies,
+        {
+          id: "sub_x", name: "订阅来的", type: "vless", host: "s.example.invalid", port: 443,
+          enabled: true, source: "subscription", subscriptionId: "sub1",
+          direct: false, bridgeable: true, egressIp: null,
+        },
+      ],
+    };
+    const { app } = makeApp(config);
+    const { body } = await get(app, "/api/proxies");
+    const subs = body.subscriptions as Array<Record<string, unknown>>;
+    expect(subs[0]!.proxyCount).toBe(1);
+  });
+});
+
+describe("订阅刷新", () => {
+  it("拉取 → 解析 → 并进配置，并写回元信息", async () => {
+    const fetchImpl = vi.fn(async () => new Response(SUB_YAML, { status: 200 })) as unknown as typeof fetch;
+    const { app, getConfig } = makeApp(withSubscription(), { subscriptionFetch: { fetchImpl } });
+
+    const { status, body } = await refresh(app, "sub1");
+    expect(status).toBe(200);
+    expect(body).toMatchObject({ ok: true, format: "clash", added: 2, updated: 0, removed: 0 });
+
+    const after = getConfig();
+    const imported = after.proxies.filter((p) => p.subscriptionId === "sub1");
+    expect(imported).toHaveLength(2);
+    // 元信息写回了 —— 界面要显示"最后一次成功拉取"。
+    const sub = after.subscriptions[0]!;
+    expect(sub.lastFetchedAt).not.toBeNull();
+    expect(sub.lastErrorKind).toBeNull();
+    expect(sub.lastFormat).toBe("clash");
+    expect(sub.lastImportCount).toBe(2);
+  });
+
+  it("**幂等**：连刷两次不产生重复，且 id 不变", async () => {
+    const fetchImpl = vi.fn(async () => new Response(SUB_YAML, { status: 200 })) as unknown as typeof fetch;
+    const { app, getConfig } = makeApp(withSubscription(), { subscriptionFetch: { fetchImpl } });
+
+    await refresh(app, "sub1");
+    const firstIds = getConfig().proxies.map((p) => p.id);
+    const second = await refresh(app, "sub1");
+
+    expect(second.body).toMatchObject({ added: 0, updated: 2, removed: 0 });
+    expect(getConfig().proxies.map((p) => p.id)).toEqual(firstIds);
+  });
+
+  it("**失败也写回 lastErrorKind** —— 否则连续失败三天看起来一切正常", async () => {
+    const fetchImpl = vi.fn(async () => new Response("", { status: 503 })) as unknown as typeof fetch;
+    const { app, getConfig } = makeApp(withSubscription(), { subscriptionFetch: { fetchImpl } });
+
+    const { status, body } = await refresh(app, "sub1");
+    // 拉取失败不是"请求错误" —— 端点本身工作正常，所以 200 带 ok:false。
+    expect(status).toBe(200);
+    expect(body).toMatchObject({ ok: false, failureKind: "http_error" });
+
+    const sub = getConfig().subscriptions[0]!;
+    expect(sub.lastErrorKind).toBe("http_error");
+    // `lastFetchedAt` 的语义是"最后一次**成功**"，失败不该动它。
+    expect(sub.lastFetchedAt).toBeNull();
+  });
+
+  it("失败的 reason 里不含订阅 token", async () => {
+    const fetchImpl = vi.fn(async () => {
+      throw new Error(`connect failed for ${SUB_URL}`);
+    }) as unknown as typeof fetch;
+    const { app } = makeApp(withSubscription(), { subscriptionFetch: { fetchImpl } });
+
+    const { body } = await refresh(app, "sub1");
+    const text = JSON.stringify(body);
+    expect(text).not.toContain(SUB_TOKEN);
+    expect(text).not.toContain(SUB_TOKEN.slice(0, 8));
+  });
+
+  it("未知订阅 id 得 404，不是静默成功", async () => {
+    const { app } = makeApp(withSubscription());
+    const { status, body } = await refresh(app, "nope");
+    expect(status).toBe(404);
+    expect((body.error as Record<string, unknown>).type).toBe("not_found");
+  });
+
+  it("**并发刷新同一订阅得 409** —— 两个并发会互相覆盖配置", async () => {
+    /*
+     * 成因与批量探测不同：这里两个刷新各读一份旧 config、各算合并、
+     * 后写的赢 —— 于是先写的那批新增节点凭空消失。
+     */
+    const holder: { release: (() => void) | null } = { release: null };
+    const gate = new Promise<void>((r) => {
+      holder.release = r;
+    });
+    const fetchImpl = vi.fn(async () => {
+      await gate;
+      return new Response(SUB_YAML, { status: 200 });
+    }) as unknown as typeof fetch;
+
+    const { app } = makeApp(withSubscription(), { subscriptionFetch: { fetchImpl } });
+
+    const first = refresh(app, "sub1");
+    // 第二个在第一个还卡着的时候进来。
+    const second = await refresh(app, "sub1");
+    expect(second.status).toBe(409);
+
+    holder.release?.();
+    const done = await first;
+    expect(done.status).toBe(200);
+
+    // 锁释放后还能再刷 —— 不是永久卡住。
+    const third = await refresh(app, "sub1");
+    expect(third.status).toBe(200);
+  });
+
+  it("Clash 未启用时只能桥接的节点以停用状态导入并报出来", async () => {
+    /*
+     * schema 有一条 superRefine：已启用且只能桥接的代理在 clash.enabled 为
+     * false 时是配置矛盾。订阅里绝大多数节点恰好都是只能桥接的，
+     * 所以不处理的话这个端点会在 saveConfig 那步炸一长串校验错误。
+     */
+    const base = makeConfig({
+      subscriptions: [{ id: "sub1", name: "机场一", url: SUB_URL }],
+      proxies: [],
+      workers: [],
+      clash: { enabled: false, bridges: [] },
+    });
+    const fetchImpl = vi.fn(async () => new Response(SUB_YAML, { status: 200 })) as unknown as typeof fetch;
+    const { app, getConfig } = makeApp(base, { subscriptionFetch: { fetchImpl } });
+
+    const { status, body } = await refresh(app, "sub1");
+    expect(status).toBe(200);
+    expect(body).toMatchObject({ ok: true, added: 2, disabledNeedBridge: 2 });
+    // 关键：写盘成功了（否则这里会是 write_failed）。
+    expect(getConfig().proxies.every((p) => !p.enabled)).toBe(true);
+  });
+
+  it("**拉取期间用户改了配置，不会被刷新覆盖掉**", async () => {
+    /*
+     * 变异测试逼出来的：把 `deps.configOf()` 换回拉取**之前**那份 config，
+     * 全部测试依然全绿 —— 没有一条覆盖"拉取期间配置变了"这个窗口。
+     *
+     * 而那个窗口是真实的：多 UA 协商最坏要 40 秒，用户在那几十秒里点一次
+     * 保存完全正常。用旧 config 算合并 = 把他的改动静默回滚。
+     */
+    const holder: { release: (() => void) | null } = { release: null };
+    const gate = new Promise<void>((r) => {
+      holder.release = r;
+    });
+    const fetchImpl = vi.fn(async () => {
+      await gate;
+      return new Response(SUB_YAML, { status: 200 });
+    }) as unknown as typeof fetch;
+
+    const { app, getConfig } = makeApp(withSubscription(), { subscriptionFetch: { fetchImpl } });
+
+    const pending = refresh(app, "sub1");
+
+    // 拉取还卡着 —— 此时用户停用了一个 Worker（一次正常的保存）。
+    const patched = await patch(app, { workers: { update: { w1: { enabled: false } } } });
+    expect(patched.status).toBe(200);
+    expect(getConfig().workers.find((w) => w.id === "w1")!.enabled).toBe(false);
+
+    holder.release?.();
+    expect((await pending).status).toBe(200);
+
+    // 刷新做完之后，用户那次改动**仍然在**。
+    expect(getConfig().workers.find((w) => w.id === "w1")!.enabled).toBe(false);
+    // 而订阅节点也确实导进来了（不是靠"什么都没写"通过的）。
+    expect(getConfig().proxies.filter((p) => p.subscriptionId === "sub1")).toHaveLength(2);
+  });
+
+  it("刷新端点也在回环闸门之内", async () => {
+    /*
+     * 新增路由最容易漏掉的就是这一条。装配期断言会在构造时抛，
+     * 但这里再从行为上确认一次 —— 管理面不设 Relay Token。
+     */
+    const { app } = makeApp(withSubscription(), { address: "203.0.113.9" });
+    const { status } = await refresh(app, "sub1");
+    expect(status).toBe(403);
   });
 });

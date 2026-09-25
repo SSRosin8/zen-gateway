@@ -7,6 +7,7 @@ import {
   OverviewSchema,
   ProxyListSchema,
   StatsViewSchema,
+  SubscriptionRefreshSchema,
   type Overview,
   type StatsView,
 } from "../../shared/contract.ts";
@@ -27,10 +28,13 @@ import {
   poolCounts,
   proxySummary,
   proxyViews,
+  subscriptionViews,
   workerViews,
   type RuntimeWorkerState,
 } from "../admin/project.ts";
 import type { BatchProbeRunner } from "../admin/batchRunner.ts";
+import { fetchSubscription, type FetchDeps } from "../../core/proxy/subscription/fetch.ts";
+import { importSubscriptionNodes } from "../../core/proxy/subscription/import.ts";
 
 /**
  * 管理 API。
@@ -100,6 +104,14 @@ export type AdminDeps = {
   readonly batch?: BatchProbeRunner;
   readonly health: () => Overview["health"];
   readonly stats?: AdminStatsSource;
+  /**
+   * 订阅拉取的注入点（Phase 10）。测试用它喂一个假 fetch。
+   *
+   * 生产不传 —— 走 `globalThis.fetch`。**刻意不经 dispatcher 池**:
+   * 订阅是从机场拉配置，不是发上游请求，不该占用出口代理，
+   * 也不该因为某个 Worker 的出口坏了就拉不到订阅。
+   */
+  readonly subscriptionFetch?: FetchDeps;
   readonly log?: (message: string) => void;
 };
 
@@ -120,6 +132,14 @@ function adminError(
 
 export function createAdminRoutes(deps: AdminDeps): Hono {
   const app = new Hono();
+
+  /**
+   * 正在刷新的订阅 id —— 进程内互斥，见 `/subscriptions/:id/refresh`。
+   *
+   * 按 id 而不是全局：两个不同订阅并发刷新是安全的（它们只动自己的节点），
+   * 而全局锁会让"刷新全部"变成串行，那没必要。
+   */
+  const refreshing = new Set<string>();
 
   /**
    * 探针。Phase 3 就有，保留 —— `assertEveryRouteGuarded` 的测试依赖它，
@@ -412,6 +432,123 @@ export function createAdminRoutes(deps: AdminDeps): Hono {
   });
 
   /**
+   * 刷新一个订阅（Phase 10）。
+   *
+   * 三层各司其职：`fetchSubscription` 负责多 UA 协商（网络），
+   * `parseSubscription` 负责认格式（纯函数），`importSubscriptionNodes`
+   * 负责并进配置（纯函数）。这里只接线，并把结果写盘。
+   *
+   * ## 单飞：同一个订阅不允许两个刷新并发
+   *
+   * 与批量探测同一个理由，但成因不同：这里两个并发刷新会**互相覆盖**
+   * 配置（各自读一份旧 config、各自算合并、后写的赢），于是先写的那批
+   * 新增节点凭空消失。用一个进程内的 id 集合做互斥 —— 与 `BatchProbeRunner`
+   * 的 `#running` 同构。
+   *
+   * ## 失败也要写回 `lastErrorKind`
+   *
+   * 否则用户点一次"刷新"看到一个报错弹窗，刷新页面后订阅行看起来一切正常
+   * —— 而它其实已经连续失败三天了。`lastFetchedAt` 只在成功时更新
+   * （它的语义是"最后一次成功拉到"），失败只记 kind。
+   */
+  app.post("/subscriptions/:id/refresh", async (c) => {
+    const id = c.req.param("id");
+    const config = deps.configOf();
+    const subscription = config.subscriptions.find((s) => s.id === id);
+    if (subscription === undefined) {
+      return adminError(c, "not_found", `没有 id 为 ${id} 的订阅`);
+    }
+
+    if (refreshing.has(id)) {
+      // 409：与批量探测的并发 start 同一个语义 —— 不排队，让调用方重试。
+      return c.json({ error: { type: "conflict", message: "该订阅正在刷新中" } }, 409);
+    }
+    refreshing.add(id);
+
+    try {
+      const outcome = await fetchSubscription(subscription.url, deps.subscriptionFetch ?? {});
+
+      /*
+       * 无论成功失败都要更新订阅行的元信息 —— 见上文。
+       * 注意这里**重新读一次** `configOf()`：拉取期间用户可能改过配置
+       * （那几秒足够点一次保存），用启动时那份会把他的改动覆盖掉。
+       */
+      const fresh = deps.configOf();
+      const touch = (extra: Partial<(typeof fresh.subscriptions)[number]>) => ({
+        ...fresh,
+        subscriptions: fresh.subscriptions.map((s) => (s.id === id ? { ...s, ...extra } : s)),
+      });
+
+      if (!outcome.ok) {
+        try {
+          await deps.applyConfig(touch({ lastErrorKind: outcome.kind }));
+        } catch (err) {
+          deps.log?.(`订阅状态写入失败: ${safeErrorMessage(err)}`);
+        }
+        deps.log?.(`订阅刷新失败(${id}): ${outcome.kind}`);
+        return c.json(
+          SubscriptionRefreshSchema.parse({
+            ok: false,
+            failureKind: outcome.kind,
+            reason: outcome.reason,
+            format: null,
+            added: 0,
+            updated: 0,
+            removed: 0,
+            keptBecauseInUse: 0,
+            disabledNeedBridge: 0,
+            skipped: 0,
+          }),
+        );
+      }
+
+      const merged = importSubscriptionNodes(fresh, id, outcome.result.nodes);
+      const withMeta = {
+        ...merged.config,
+        subscriptions: merged.config.subscriptions.map((s) =>
+          s.id === id
+            ? {
+                ...s,
+                lastFetchedAt: new Date().toISOString(),
+                lastErrorKind: null,
+                lastImportCount: outcome.result.nodes.length,
+                lastFormat: outcome.result.format,
+              }
+            : s,
+        ),
+      };
+
+      try {
+        await deps.applyConfig(withMeta);
+      } catch (err) {
+        deps.log?.(`订阅导入写入失败: ${safeErrorMessage(err)}`);
+        return adminError(c, "write_failed", `拉取成功但写入失败：${safeErrorMessage(err)}`);
+      }
+
+      deps.log?.(
+        `订阅刷新(${id}): ${outcome.result.format} · +${merged.summary.added} ~${merged.summary.updated} -${merged.summary.removed} · UA=${outcome.userAgent}`,
+      );
+
+      return c.json(
+        SubscriptionRefreshSchema.parse({
+          ok: true,
+          failureKind: null,
+          reason: null,
+          format: outcome.result.format,
+          added: merged.summary.added,
+          updated: merged.summary.updated,
+          removed: merged.summary.removed,
+          keptBecauseInUse: merged.summary.keptBecauseInUse.length,
+          disabledNeedBridge: merged.summary.disabledNeedBridge,
+          skipped: outcome.result.skipped,
+        }),
+      );
+    } finally {
+      refreshing.delete(id);
+    }
+  });
+
+  /**
    * 代理池（批次 2）。
    *
    * 与 Overview 一样是**聚合**端点：这一页要同时显示代理列表、Clash 内核状态
@@ -433,6 +570,7 @@ export function createAdminRoutes(deps: AdminDeps): Hono {
           sharedGroups: report.sharedGroups,
           isolated: report.isolated,
         },
+        subscriptions: subscriptionViews(config),
       }),
     );
   });

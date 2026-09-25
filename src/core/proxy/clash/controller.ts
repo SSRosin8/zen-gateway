@@ -1,5 +1,6 @@
 import type { ClashBridge } from "../../../shared/schema.ts";
 import { safeErrorMessage } from "../../../shared/redact.ts";
+import { isGroupType } from "../../../shared/clashNodeTypes.ts";
 
 /**
  * Clash / Mihomo External Controller 客户端。
@@ -251,7 +252,7 @@ export class ClashController {
       const node = value as { type?: unknown; history?: unknown };
       const type = typeof node.type === "string" ? node.type : "";
       // 分组与内置策略不是可出口的节点。
-      if (GROUP_TYPES.has(type)) continue;
+      if (isGroupType(type)) continue;
 
       const history = Array.isArray(node.history) ? node.history : [];
       const last = history.at(-1) as { delay?: unknown } | undefined;
@@ -314,17 +315,3 @@ export class ClashController {
   }
 }
 
-/** 分组与内置策略的 type —— 这些不是可出口的节点。 */
-const GROUP_TYPES = new Set([
-  "Selector",
-  "URLTest",
-  "Fallback",
-  "LoadBalance",
-  "Relay",
-  "Direct",
-  "Reject",
-  "RejectDrop",
-  "Pass",
-  "Compatible",
-  "Dns",
-]);

@@ -446,11 +446,64 @@ export const ModelViewSchema = z.object({
 });
 export type ModelView = z.infer<typeof ModelViewSchema>;
 
+/**
+ * 订阅的投影（Phase 10）。
+ *
+ * **URL 是凭证**（token 通常带在 query 或 path 里），所以这里**绝不**给原值
+ * —— 只给一个脱敏后的展示串加一个"配没配"的标记，与 apiKey 同一条规则。
+ * 少了这一条，一个订阅列表接口就等于把所有机场的付费凭证公开在回环上。
+ */
+export const SubscriptionViewSchema = z.object({
+  id: z.string(),
+  name: z.string(),
+  /**
+   * 已脱敏的 URL —— 形如 `https://sub.example.com/link?token=***`。
+   * 用户要能认出"这是哪个订阅"，但不该从界面上把 token 抄走。
+   */
+  urlRedacted: z.string(),
+  enabled: z.boolean(),
+  lastFetchedAt: z.string().nullable(),
+  /** 只有分类，没有上游原文（原文可能回显 URL 里的 token）。 */
+  lastErrorKind: z.string().nullable(),
+  lastImportCount: z.number().int().nonnegative(),
+  lastFormat: z.string().nullable(),
+  /** 当前有多少个代理来自这个订阅。 */
+  proxyCount: z.number().int().nonnegative(),
+});
+export type SubscriptionView = z.infer<typeof SubscriptionViewSchema>;
+
+export const SubscriptionListSchema = z.object({
+  subscriptions: z.array(SubscriptionViewSchema),
+});
+export type SubscriptionList = z.infer<typeof SubscriptionListSchema>;
+
+/** 一次刷新的结果 —— 与 `ImportSummary` 对应。 */
+export const SubscriptionRefreshSchema = z.object({
+  ok: z.boolean(),
+  /** 失败时的分类（`unreachable`/`http_error`/`timeout`/`too_large`/`unparseable`）。 */
+  failureKind: z.string().nullable(),
+  /** 已脱敏的可读原因。 */
+  reason: z.string().nullable(),
+  format: z.string().nullable(),
+  added: z.number().int().nonnegative(),
+  updated: z.number().int().nonnegative(),
+  removed: z.number().int().nonnegative(),
+  /** 仍被 Worker 绑着、因此没被删掉的过期节点数。 */
+  keptBecauseInUse: z.number().int().nonnegative(),
+  /** 因 Clash 未启用而以停用状态导入的节点数。 */
+  disabledNeedBridge: z.number().int().nonnegative(),
+  /** 解析时被丢弃的条目数（缺 host、端口越界、分组等）。 */
+  skipped: z.number().int().nonnegative(),
+});
+export type SubscriptionRefresh = z.infer<typeof SubscriptionRefreshSchema>;
+
 export const ProxyListSchema = z.object({
   proxies: z.array(ProxyViewSchema),
   clash: OverviewSchema.shape.clash,
   /** 出口隔离报告 —— 与 Overview 同一份逻辑，按实测 IP 分组。 */
   isolation: IsolationViewSchema,
+  /** 订阅列表（Phase 10）—— 代理池页要能看到"这些节点从哪来"。 */
+  subscriptions: z.array(SubscriptionViewSchema),
 });
 export type ProxyList = z.infer<typeof ProxyListSchema>;
 

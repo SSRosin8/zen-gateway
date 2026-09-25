@@ -1,5 +1,11 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { BatchProgressSchema, OverviewSchema, type Overview } from "../../shared/contract.ts";
+import {
+  BatchProgressSchema,
+  OverviewSchema,
+  SubscriptionRefreshSchema,
+  type Overview,
+  type SubscriptionRefresh,
+} from "../../shared/contract.ts";
 import { INITIAL, pollIntervalMs, type BatchProgress } from "../../shared/batchProbe.ts";
 
 /**
@@ -353,4 +359,75 @@ export function useBatchProbe(): {
   }, []);
 
   return { progress, error, send };
+}
+
+/* ------------------------------------------------------------------ *
+ * 订阅（Phase 10）
+ * ------------------------------------------------------------------ */
+
+export type RefreshState =
+  | { status: "idle" }
+  | { status: "running" }
+  | { status: "done"; result: SubscriptionRefresh }
+  | { status: "error"; message: string };
+
+/**
+ * 刷新订阅。
+ *
+ * ## 按 id 记状态，不是一个全局 running
+ *
+ * 界面上每个订阅行各有一个"刷新"按钮。用一个全局 `running` 的话，点一个
+ * 会让**所有**按钮都转圈 —— 用户分不清是哪个在跑，而服务端的互斥也是按 id 的
+ * （两个不同订阅并发刷新是安全的，它们只动自己的节点）。
+ *
+ * ## 不轮询
+ *
+ * 刷新是一次请求一个答案，与批量探测不同（那个是长任务、进度归服务端）。
+ * 多 UA 协商最坏 40 秒，所以按钮要一直禁用到响应回来 —— 否则用户
+ * 会重复点，而服务端会回 409，看起来像是出错了。
+ */
+export function useSubscriptionRefresh(): {
+  stateOf: (id: string) => RefreshState;
+  refresh: (id: string) => Promise<void>;
+} {
+  const [states, setStates] = useState<Record<string, RefreshState>>({});
+
+  const refresh = useCallback(async (id: string) => {
+    setStates((prev) => ({ ...prev, [id]: { status: "running" } }));
+    try {
+      const res = await fetch(`/api/subscriptions/${encodeURIComponent(id)}/refresh`, {
+        method: "POST",
+      });
+      const body: unknown = await res.json();
+      if (!res.ok) {
+        const message =
+          typeof body === "object" && body !== null && "error" in body
+            ? String((body as { error: { message?: string } }).error.message ?? `HTTP ${res.status}`)
+            : `HTTP ${res.status}`;
+        setStates((prev) => ({ ...prev, [id]: { status: "error", message } }));
+        return;
+      }
+      const parsed = SubscriptionRefreshSchema.safeParse(body);
+      if (!parsed.success) {
+        setStates((prev) => ({
+          ...prev,
+          [id]: { status: "error", message: "响应与契约不匹配（试 npm run build）" },
+        }));
+        return;
+      }
+      setStates((prev) => ({ ...prev, [id]: { status: "done", result: parsed.data } }));
+    } catch (err) {
+      setStates((prev) => ({
+        ...prev,
+        [id]: { status: "error", message: err instanceof Error ? err.message : String(err) },
+      }));
+    }
+  }, []);
+
+  const stateOf = useCallback(
+    (id: string): RefreshState => states[id] ?? { status: "idle" },
+    [states],
+  );
+
+  return { stateOf, refresh };
 }
