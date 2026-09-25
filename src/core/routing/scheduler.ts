@@ -146,7 +146,18 @@ export class Scheduler {
     this.#ensureSynced(config);
 
     if (record.failure === null) {
-      this.#pool.markSuccess(record.workerId);
+      /*
+       * 发起时刻 = 记账时刻 − 这次尝试的耗时。
+       *
+       * `markSuccess` 需要它来判断「这次成功对『现在能用』是否有信息」——
+       * 一次在冷却生效**之前**就已发出的成功（并发下很常见）不该清掉冷却。
+       * 理由写在 `markSuccess` 上。
+       *
+       * `latencyMs` 非有限时退回 `now`，那退化成原来的无条件清除 ——
+       * 对「发出时没有冷却」这个最常见的情形结果一致。
+       */
+      const startedAt = Number.isFinite(record.latencyMs) ? now - record.latencyMs : now;
+      this.#pool.markSuccess(record.workerId, startedAt);
       return;
     }
 

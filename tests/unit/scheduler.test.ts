@@ -37,8 +37,12 @@ function attempt(over: Partial<AttemptRecord> & { workerId: string }): AttemptRe
     failure: over.failure ?? null,
     blameWorker: over.blameWorker ?? false,
     retryAfter: over.retryAfter ?? null,
-    // 类型要求的占位：调度只读 failure/blameWorker/retryAfter，不读这两个。
     status: over.status ?? null,
+    /*
+     * `latencyMs` **是被读的**（第十轮起）：`record` 用 `now - latencyMs` 算出
+     * 这次尝试的发起时刻，`markSuccess` 据此判断这次成功对「现在能用」是否
+     * 有信息。默认 0 表示「刚发出就拿到结果」，于是发起时刻等于记账时刻。
+     */
     latencyMs: over.latencyMs ?? 0,
   };
 }
@@ -112,8 +116,13 @@ describe("record:不变量 #4", () => {
     const cfg = config(["w1", "w2"]);
     const s = scheduler();
     s.record(attempt({ workerId: "w1", failure: "transport", blameWorker: true }), cfg, NOW);
-    s.record(attempt({ workerId: "w1" }), cfg, NOW);
-    expect(s.snapshot(cfg, NOW).workers[0]).toMatchObject({
+    /*
+     * 记账时刻取到冷却之后 —— transport 的基准退避是 2 秒，而 `latencyMs: 0`
+     * 让发起时刻等于记账时刻。这次成功确实是"冷却结束后再试，通了"，
+     * 所以它既清计数也解除冷却。
+     */
+    s.record(attempt({ workerId: "w1" }), cfg, NOW + 10_000);
+    expect(s.snapshot(cfg, NOW + 10_000).workers[0]).toMatchObject({
       ready: true,
       consecutiveFails: 0,
       lastFailure: null,
@@ -214,11 +223,49 @@ describe("record:不变量 #4", () => {
       cfg,
       NOW,
     );
-    s.record(attempt({ workerId: "w1" }), cfg, NOW + 5_000);
+    /*
+     * `latencyMs: 900_001_000` 让发起时刻落在 900 秒冷却**之后** ——
+     * 即"冷却到期后再试，通了"。这才是「上游用行为否定了先前的判断」。
+     * 一次发出于冷却生效之前的成功不算（见下一条）。
+     */
+    s.record(attempt({ workerId: "w1", latencyMs: -900_001_000 }), cfg, NOW + 5_000);
     expect(s.snapshot(cfg, NOW + 5_000).workers[0]).toMatchObject({
       ready: true,
       cooldownRemainingMs: 0,
     });
+  });
+
+  it("**发出于冷却生效之前的成功不解除冷却** —— 并发下这是常态", () => {
+    /*
+     * 第十轮审核实测的严重缺陷，走的是 `record` 这条正路（先前几轮修的是
+     * `markNotBlamed` 那条旁路）。记账顺序由**上游响应到达顺序**决定：
+     *
+     *   请求A 发出 ── 上游慢 300ms ──→ 200      ← 记账在后
+     *   请求B 发出 → 立刻 429 Retry-After: 900  ← 记账在前
+     *
+     * 而 429 通常是账号级的，多轮对话客户端天然并发（title 生成与主对话
+     * 同时在飞），所以「一个 in-flight 请求恰好在 429 之前发出」不是边界。
+     */
+    const cfg = config(["w1", "w2"]);
+    const s = scheduler();
+
+    // B：立刻 429。
+    s.record(
+      attempt({ workerId: "w1", failure: "rate_limit", blameWorker: true, retryAfter: "900", latencyMs: 50 }),
+      cfg,
+      NOW + 50,
+    );
+    expect(s.snapshot(cfg, NOW + 60).workers[0]).toMatchObject({ ready: false });
+
+    // A：在 NOW 就发出了（耗时 300ms），记账在 NOW+300 —— 早于冷却生效。
+    s.record(attempt({ workerId: "w1", latencyMs: 300 }), cfg, NOW + 300);
+
+    const after = s.snapshot(cfg, NOW + 310).workers[0]!;
+    // 上游说的 900 秒必须还在。
+    expect(after.ready).toBe(false);
+    expect(after.cooldownRemainingMs).toBeGreaterThan(800_000);
+    // 计数照样清零 —— 那部分与 markNotBlamed 同处置。
+    expect(after).toMatchObject({ consecutiveFails: 0, lastFailure: null });
   });
 
   it("`unknown` 不冷却时也不得让失败计数膨胀", () => {

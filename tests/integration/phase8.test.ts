@@ -976,3 +976,95 @@ describe("doctor 第 4 层问服务要就绪态，而不是自己算", () => {
     }
   }, 40_000);
 });
+
+/* ================================================================== *
+ * 未识别的参数（第十轮审核实际踩到的那个）
+ * ================================================================== */
+
+describe("两个脚本都拒绝未识别的参数", () => {
+  /*
+   * 这不是假想的形态 —— 第十轮审核的一个子 agent 想看用法，敲了
+   * `npm run setup - --help`，而 setup 把两个参数都静默忽略并**执行了完整的
+   * 真实导入**：写 `data/config.json`（代理 3→72、桥接 2→3）加一个 `.bak`。
+   * `data/config.json` 是唯一一份凭证存储（Worker apiKey、Relay Token、
+   * Controller secret），所以「想读用法反而改写了凭证」是最坏的一种误用后果。
+   *
+   * 那个脚本自己有 `--dry-run`，也就是它承认「写盘前该让人先看一眼」——
+   * 而未识别参数被忽略恰好绕过了那个机会。
+   */
+
+  it("**`setup --help` 打印用法且一个字节都不写**", async () => {
+    const result = await run(SETUP, ["--help"]);
+
+    expect(result.code).toBe(0);
+    expect(result.stdout).toContain("用法");
+    expect(result.stdout).toContain("--dry-run");
+    // 这条是全部要点：读用法不该有副作用。
+    await expect(stat(configFile())).rejects.toThrow();
+  });
+
+  it("**`setup` 对未识别参数退出码非 0 且不写盘**", async () => {
+    const result = await run(SETUP, ["--typo"]);
+
+    expect(result.code).not.toBe(0);
+    expect(result.stdout).toContain("未识别的参数");
+    expect(result.stdout).toContain("--typo");
+    await expect(stat(configFile())).rejects.toThrow();
+  });
+
+  it("裸 `-` 也算未识别 —— 那正是审核踩到的写法", async () => {
+    const result = await run(SETUP, ["-", "--help"]);
+
+    /*
+     * `--help` 在第二位。校验按顺序走，先撞上 `-` 就停 —— 报错优先于帮助，
+     * 因为「参数写错了」比「这是帮助」更需要被看见。
+     */
+    expect(result.code).not.toBe(0);
+    expect(result.stdout).toContain("未识别的参数: -");
+    await expect(stat(configFile())).rejects.toThrow();
+  });
+
+  it("带值的 flag 缺值时报错，而不是把下一个参数当值吃掉", async () => {
+    const result = await run(SETUP, ["--api"]);
+
+    expect(result.code).not.toBe(0);
+    expect(result.stdout).toContain("--api 需要一个值");
+    await expect(stat(configFile())).rejects.toThrow();
+  });
+
+  it("带值的 flag **正常传值时不被误判**为未识别", async () => {
+    /*
+     * 与上一条配对：少了它，一个「把所有带值 flag 都当未识别」的实现
+     * 也能让前面几条通过。这里只要求它**走过了参数校验**（错误信息不是
+     * 「未识别」），后续探测失败与否无关。
+     */
+    const result = await run(SETUP, ["--api", "http://127.0.0.1:1", "--secret", "x"]);
+
+    expect(result.stdout).not.toContain("未识别的参数");
+    expect(result.stdout).not.toContain("需要一个值");
+  });
+
+  it("`doctor` 同样拒绝，而合法的 `--deep` 不受影响", async () => {
+    const bad = await run(DOCTOR, ["--typo"]);
+    expect(bad.code).not.toBe(0);
+    expect(bad.stdout).toContain("未识别的参数");
+
+    /*
+     * `--deep` 只验**没有被参数校验拦下**（它会真发网络请求，这里不跑到那步）。
+     * 判据是错误信息不含「未识别」—— 第 1 层配置不存在会让它早早退出。
+     */
+    const good = await run(DOCTOR, ["--deep"]);
+    expect(good.stdout).not.toContain("未识别的参数");
+  });
+
+  it("`--help` 提示 npm 调用要加 `--` —— 那是这个陷阱的高频入口", async () => {
+    /*
+     * `npm run setup --dry-run` 会被 npm 自己吃掉 flag，脚本收不到，
+     * 于是「我加了 --dry-run 它却写盘了」。症状与未识别参数被忽略完全一样，
+     * 所以用法里必须写清。
+     */
+    const result = await run(SETUP, ["--help"]);
+    expect(result.stdout).toContain("--");
+    expect(result.stdout).toMatch(/npm run setup -- /);
+  });
+});

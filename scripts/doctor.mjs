@@ -53,10 +53,19 @@ import { probeBridges, selectBridge } from "../src/core/proxy/clash/select.ts";
 import { ClashController } from "../src/core/proxy/clash/controller.ts";
 import { createInstance, dataDirOf } from "./lib/instance.mjs";
 import { detail, heading, humanMs, line, nextStep } from "./lib/report.mjs";
+import { checkArgs } from "./lib/args.mjs";
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
 const DATA_DIR = dataDirOf(ROOT);
 const ENTRY = join(ROOT, "dist", "server", "server", "index.js");
+
+// 与 setup 共用一份校验（纪律 #4）。这里后果轻（白跑一趟），但陷阱同构。
+checkArgs({
+  command: "npm run doctor",
+  summary: "zen-gateway 分层诊断：只报第一个失败的层 + 下一步建议。",
+  flags: [{ flag: "--deep", help: "额外实测每个出口的公网 IP（会真发请求并切 Clash 节点）" }],
+});
+
 const DEEP = process.argv.includes("--deep");
 
 /*

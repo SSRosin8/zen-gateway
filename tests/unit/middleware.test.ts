@@ -3,7 +3,7 @@ import { readFileSync } from "node:fs";
 import { Hono } from "hono";
 import { extractBearer, relayAuth, secureCompare } from "../../src/server/middleware/relayAuth.ts";
 import { isLoopbackAddress, loopbackOnly } from "../../src/server/middleware/loopbackOnly.ts";
-import { assertAdminRoutesLoopbackOnly } from "../../src/server/app.ts";
+import { assertAdminRoutesLoopbackOnly, assertEveryRouteGuarded } from "../../src/server/app.ts";
 
 const TOKEN = "test-relay-token-not-real";
 
@@ -217,6 +217,69 @@ describe("loopbackOnly 中间件", () => {
 /* ================================================================== *
  * 装配期断言本身要有测试
  * ================================================================== */
+
+describe("assertEveryRouteGuarded 真的会拦住裸路由", () => {
+  /*
+   * 第十轮审核实测:这条断言**自己没有任何东西守着**。首行插一句 `return`
+   * 之后全量测试依然全绿,而 `app.ts` 的注释当时写着「见
+   * `tests/integration/relay.test.ts` 里对它做的变异测试」—— **那个测试不存在**。
+   * 一条指向不存在的测试的注释比没有注释更糟:它让下一个人以为这里有守卫。
+   *
+   * 唯一碰到它的是 `auditRound4.test.ts` 对一个**正确**的 app 断言
+   * `.not.toThrow()`,那只能发现误报,发现不了断言被阉掉。
+   *
+   * 这与隔壁 `assertAdminRoutesLoopbackOnly` 是同一个洞 —— 第八轮在那条上
+   * 修好了而没有把同一手法应用到这条。下面喂的都是**故意装错的 app**。
+   */
+  it("一条完全没有中间件覆盖的路由要抛错", () => {
+    const app = new Hono();
+    app.get("/debug-bare", (c) => c.json({ ok: true }));
+    expect(() => assertEveryRouteGuarded(app)).toThrow(/没有任何守卫中间件覆盖/);
+  });
+
+  it("漏掉的那条要被**点名**,否则用户不知道该看哪里", () => {
+    const app = new Hono();
+    app.use("/v1/*", async (_c, next) => {
+      await next();
+    });
+    app.post("/v1/chat/completions", (c) => c.json({ ok: true }));
+    // 这条不在 /v1 下 —— 没有任何中间件盖它。
+    app.get("/leaked", (c) => c.json({ ok: true }));
+
+    expect(() => assertEveryRouteGuarded(app)).toThrow(/GET \/leaked/);
+  });
+
+  it("通配前缀确实算覆盖 —— 否则正确的装配也会被误报", () => {
+    /*
+     * 与上面两条配对:少了它,一个「无条件抛错」的实现也能让它们通过,
+     * 而那会让服务根本起不来。
+     */
+    const app = new Hono();
+    app.use("/v1/*", async (_c, next) => {
+      await next();
+    });
+    app.post("/v1/chat/completions", (c) => c.json({ ok: true }));
+    expect(() => assertEveryRouteGuarded(app)).not.toThrow();
+  });
+
+  it("`/health` 在豁免名单里 —— 它是唯一一条刻意免鉴权的", () => {
+    /*
+     * 豁免是真实需求（service.mjs 的健康等待与 doctor 都靠它），
+     * 但豁免名单本身也要能被测到:把它改成空集后这条会红,
+     * 说明那个名单承重而不是装饰。
+     */
+    const app = new Hono();
+    app.get("/health", (c) => c.json({ ok: true }));
+    expect(() => assertEveryRouteGuarded(app)).not.toThrow();
+  });
+
+  it("豁免**只**盖 `/health`,别的裸路由照样抛", () => {
+    const app = new Hono();
+    app.get("/health", (c) => c.json({ ok: true }));
+    app.get("/healthz", (c) => c.json({ ok: true }));
+    expect(() => assertEveryRouteGuarded(app)).toThrow(/\/healthz/);
+  });
+});
 
 describe("assertAdminRoutesLoopbackOnly 真的会拦住装配错误", () => {
   /*

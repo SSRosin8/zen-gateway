@@ -7,6 +7,7 @@ import { judgeFree } from "../../core/models/free.ts";
 import { ModelCatalog, catalogIdentityOf, slotOf } from "../../core/models/catalog.ts";
 import { createUsageCollector, describeUsage, type TokenUsage } from "../../core/models/usage.ts";
 import { redactText } from "../../shared/redact.ts";
+import { BodyTooLargeError, readBoundedBody } from "../boundedBody.ts";
 /*
  * 拒绝原因的联合类型从 `store/db/stats.ts` 取，不在这里另定义一份 ——
  * 两份并行的字符串联合脱节方向必然是漏一个（纪律 #4）。
@@ -188,17 +189,24 @@ async function handleRelay(
   /* ---- 1. 读原始字节(只读一次) ---- */
   let raw: Uint8Array;
   try {
-    raw = new Uint8Array(await c.req.arrayBuffer());
+    /*
+     * **有界读取**，不是 `arrayBuffer()` 然后量长度。
+     *
+     * 后者下整个体已经进了内存，上限只限制转发而不限制占用 ——
+     * 第十轮审核实测 64 MiB 的闸门下发 200 MiB，网关照旧读入 200 MiB。
+     * 理由与实现见 `server/boundedBody.ts`。
+     */
+    raw = await readBoundedBody(c.req.raw, MAX_RELAY_BODY_BYTES);
   } catch (err) {
+    if (err instanceof BodyTooLargeError) {
+      reject("body_too_large", null);
+      return c.json(gatewayError("invalid_request", "请求体超过上限"), 413);
+    }
     deps.log?.(`读取请求体失败: ${logMessageFor(err)}`);
     reject("body_unreadable", null);
     return c.json(gatewayError("invalid_request", "无法读取请求体"), 400);
   }
 
-  if (raw.byteLength > MAX_RELAY_BODY_BYTES) {
-    reject("body_too_large", null);
-    return c.json(gatewayError("invalid_request", "请求体超过上限"), 413);
-  }
   if (raw.byteLength === 0) {
     reject("body_empty", null);
     return c.json(gatewayError("invalid_request", "请求体为空"), 400);
