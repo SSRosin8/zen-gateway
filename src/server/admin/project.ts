@@ -1,9 +1,16 @@
 import { createHash } from "node:crypto";
 import type { Config, Proxy, Worker } from "../../shared/schema.ts";
-import type { ModelView, ProxyView, SecretPresence, WorkerView } from "../../shared/contract.ts";
+import type {
+  ModelView,
+  ProxyView,
+  SecretPresence,
+  SubscriptionView,
+  WorkerView,
+} from "../../shared/contract.ts";
 import { isUsable, isWorkerReady } from "../../core/routing/workerPool.ts";
 import { describeResolveFailure, resolveProxy } from "../../core/proxy/pool.ts";
 import { judgeFree, surfacesFor } from "../../core/models/free.ts";
+import { redactUrl } from "../../shared/redact.ts";
 import type { CatalogSnapshot } from "../../core/models/catalog.ts";
 
 /**
@@ -202,6 +209,20 @@ export function poolCounts(views: readonly WorkerView[]): { ready: number; total
  * 放在生产代码里而不是测试里，理由是纪律 #4：测试若自己手写一份
  * 「哪些字段算凭证」的名单，schema 加一个凭证字段时那份名单不会更新，
  * 而**脱节方向必然是漏**。这里从 `Config` 的实际结构推导。
+ *
+ * ## 订阅 URL 只取**token 部分**，不取整条
+ *
+ * 第八轮审核查出：先前 push 的是整条 `https://host/path?token=SECRET`，
+ * 而测试断言的是 `not.toContain(secret.slice(0, 8))` —— 对每个订阅来说
+ * 那 8 个字符都是 `"https://"`。于是
+ *
+ * - 真正是凭证的那段 token **完全没被检查**；
+ * - 而任何含订阅的配置都会让断言**误报**，因为 `gateway.baseUrl`
+ *   正当地以 `https://` 开头。
+ *
+ * 所以这里把 URL 拆开，只交出"看起来像凭证"的那几段：query 的各个值、
+ * 以及路径的最后一段（`/sub/abc123def` 这种形态）。粒度必须与缺陷的
+ * 粒度一致 —— 查整条 URL 挡不住"只泄漏 token"。
  */
 export function allSecretValues(config: Config): string[] {
   const out: string[] = [config.gateway.relayToken];
@@ -210,8 +231,24 @@ export function allSecretValues(config: Config): string[] {
   for (const p of config.proxies) {
     if (p.password !== undefined) out.push(p.password);
   }
-  for (const s of config.subscriptions) out.push(s.url);
-  return out.filter((v) => v.trim() !== "");
+  for (const s of config.subscriptions) out.push(...subscriptionSecrets(s.url));
+  // 太短的片段会造成误报（`/v1`、`a=1`），它们也不可能是真凭证。
+  return out.filter((v) => v.trim().length >= 8);
+}
+
+/** 从订阅 URL 里取出"像凭证"的片段 —— 见 `allSecretValues` 的说明。 */
+function subscriptionSecrets(raw: string): string[] {
+  const out: string[] = [];
+  try {
+    const url = new URL(raw);
+    for (const [, value] of url.searchParams) out.push(value);
+    const lastSegment = url.pathname.split("/").filter((s) => s !== "").at(-1);
+    if (lastSegment !== undefined) out.push(lastSegment);
+  } catch {
+    // 不是合法 URL 时退回整条 —— schema 本该挡住，但这里不能因此漏检。
+    out.push(raw);
+  }
+  return out;
 }
 
 /** 判定一个 Worker 现在是否就绪 —— 转出以便 handler 不必认识 workerPool。 */
@@ -301,4 +338,34 @@ export function modelViews(config: Config, snapshot: CatalogSnapshot | null): Mo
       listed: snapshot.ids.has(entry.id),
     };
   });
+}
+
+/**
+ * 订阅列表的投影（Phase 10）。
+ *
+ * **URL 过 `redactUrl` 后才出去** —— 订阅 URL 的 token 通常带在 query 或
+ * path 里，它本身就是付费凭证。这与 apiKey 只给指纹是同一条规则：
+ * 界面要回答"这是哪个订阅"，不该让人从界面把 token 抄走。
+ *
+ * `proxyCount` 由服务端算 —— 前端拿到的 `proxies` 是分页/筛选后的，
+ * 让它自己数会得到一个随筛选变化的数字。
+ */
+export function subscriptionViews(config: Config): SubscriptionView[] {
+  const counts = new Map<string, number>();
+  for (const p of config.proxies) {
+    if (p.subscriptionId === undefined) continue;
+    counts.set(p.subscriptionId, (counts.get(p.subscriptionId) ?? 0) + 1);
+  }
+
+  return config.subscriptions.map((s) => ({
+    id: s.id,
+    name: s.name,
+    urlRedacted: redactUrl(s.url),
+    enabled: s.enabled,
+    lastFetchedAt: s.lastFetchedAt,
+    lastErrorKind: s.lastErrorKind,
+    lastImportCount: s.lastImportCount,
+    lastFormat: s.lastFormat,
+    proxyCount: counts.get(s.id) ?? 0,
+  }));
 }

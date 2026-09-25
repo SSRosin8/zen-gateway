@@ -1,11 +1,11 @@
 import { useCallback, useEffect, useState } from "react";
-import type { ProxyList, ProxyView } from "../../shared/contract.ts";
+import type { ProxyList, ProxyView, SubscriptionRefresh } from "../../shared/contract.ts";
 import { isActive, percentages, type BatchProgress } from "../../shared/batchProbe.ts";
 import { StatusIndicator, type StatusTone } from "../components/StatusIndicator.tsx";
 import { Metric, Mono, Panel, PrimaryButton, Strong } from "../components/Panel.tsx";
 import { DataTable, TableFilters, type Column } from "../components/DataTable.tsx";
 import type { ViewState } from "../lib/router.ts";
-import { useBatchProbe } from "../lib/api.ts";
+import { useBatchProbe, useSubscriptionRefresh } from "../lib/api.ts";
 
 /**
  * 代理池页。
@@ -279,6 +279,152 @@ function IsolationTab({ data }: { data: ProxyList }) {
   );
 }
 
+/**
+ * 订阅标签（Phase 10）。
+ *
+ * ## 为什么 URL 只显示脱敏串
+ *
+ * 订阅 URL 的 token 通常带在 query 或 path 里，它本身就是付费凭证 ——
+ * 与 API key 同一条规则：界面要回答"这是哪个订阅"，不该让人从界面抄走 token。
+ * 服务端的 `subscriptionViews` 已经过了 `redactUrl`，前端拿不到原值。
+ *
+ * ## 「从没拉过」与「拉过但失败了」要分开显示
+ *
+ * 两者的下一步完全不同：前者是"点一下刷新"，后者是"看看 token 过期了没"。
+ * 合成一句"未就绪"会让用户从头猜 —— 与 doctor 分层同一个理由。
+ */
+function SubscriptionTab({ data }: { data: ProxyList }) {
+  const { stateOf, refresh } = useSubscriptionRefresh();
+
+  if (data.subscriptions.length === 0) {
+    return (
+      <Panel title="订阅">
+        <p className="text-text-muted">
+          还没有订阅。订阅是批量导入节点的来源 —— 手工添加代理也可以，
+          但一个机场几十个节点逐个填不现实。
+        </p>
+        <p className="mt-2 text-text-muted">
+          眼下需要直接编辑 <Mono>data/config.json</Mono> 的{" "}
+          <Mono>subscriptions</Mono> 数组（<Mono>id</Mono> / <Mono>name</Mono> /{" "}
+          <Mono>url</Mono>），然后回到这里点刷新。
+        </p>
+      </Panel>
+    );
+  }
+
+  return (
+    <Panel title={`订阅（${data.subscriptions.length}）`}>
+      <ul className="space-y-3">
+        {data.subscriptions.map((s) => {
+          const state = stateOf(s.id);
+          const running = state.status === "running";
+          return (
+            <li
+              key={s.id}
+              className="rounded-md border border-border-strong p-4"
+              data-subscription={s.id}
+            >
+              <div className="flex flex-wrap items-center justify-between gap-3">
+                <div>
+                  <div className="font-medium">{s.name}</div>
+                  {/* 已脱敏 —— 服务端过了 redactUrl，这里只是显示。 */}
+                  <div className="text-text-muted">
+                    <Mono>{s.urlRedacted}</Mono>
+                  </div>
+                </div>
+                <PrimaryButton onClick={() => void refresh(s.id)} disabled={running}>
+                  {running ? "刷新中…" : "刷新"}
+                </PrimaryButton>
+              </div>
+
+              <div className="mt-3 flex flex-wrap items-center gap-4">
+                <StatusIndicator {...subscriptionStatus(s)} />
+                <span className="text-text-muted">
+                  当前 <Mono>{s.proxyCount}</Mono> 个节点
+                  {s.lastFormat === null ? null : (
+                    <>
+                      {" · 格式 "}
+                      <Mono>{s.lastFormat}</Mono>
+                    </>
+                  )}
+                </span>
+              </div>
+
+              {state.status === "done" && <RefreshReport result={state.result} />}
+              {state.status === "error" && <p className="mt-2 text-error">{state.message}</p>}
+            </li>
+          );
+        })}
+      </ul>
+    </Panel>
+  );
+}
+
+/**
+ * 订阅的状态标签。
+ *
+ * 四态而不是两态 —— 见 `SubscriptionTab` 的说明。注意**停用**时也要把
+ * 失败原因带上（如果有）：那是第八轮在 `proxyStatus` 上踩过的 early return
+ * 形态，一条 `return` 会让最常见的那类输入看不到原因。
+ */
+export function subscriptionStatus(s: ProxyList["subscriptions"][number]): {
+  tone: StatusTone;
+  icon: string;
+  label: string;
+} {
+  if (!s.enabled) {
+    const suffix = s.lastErrorKind === null ? "" : ` · 上次失败（${s.lastErrorKind}）`;
+    return { tone: "neutral", icon: "○", label: `已停用${suffix}` };
+  }
+  if (s.lastErrorKind !== null) {
+    return { tone: "error", icon: "✕", label: `上次拉取失败（${s.lastErrorKind}）` };
+  }
+  if (s.lastFetchedAt === null) {
+    // 「从没拉过」不是错误 —— 但也绝不能显示成成功。
+    return { tone: "warn", icon: "?", label: "从未拉取" };
+  }
+  return { tone: "success", icon: "✓", label: `上次拉取 ${s.lastFetchedAt.slice(0, 19).replace("T", " ")}` };
+}
+
+/** 一次刷新的结果明细。 */
+function RefreshReport({ result }: { result: SubscriptionRefresh }) {
+  if (!result.ok) {
+    return (
+      <p className="mt-2 text-error">
+        刷新失败（{result.failureKind}）：{result.reason}
+      </p>
+    );
+  }
+  return (
+    <div className="mt-2">
+      <p>
+        新增 <Mono>{result.added}</Mono> · 更新 <Mono>{result.updated}</Mono> · 移除{" "}
+        <Mono>{result.removed}</Mono>
+        {result.skipped > 0 ? (
+          <>
+            {" · 跳过 "}
+            <Mono>{result.skipped}</Mono>
+          </>
+        ) : null}
+      </p>
+      {result.keptBecauseInUse > 0 && (
+        <p className="mt-1 text-text-muted">
+          有 <Mono>{result.keptBecauseInUse}</Mono> 个节点已不在订阅里，但仍被 Worker
+          绑着，所以<Strong>没有删除</Strong> —— 删了配置会过不了引用完整性校验。
+          先把那些 Worker 改绑到别的出口。
+        </p>
+      )}
+      {result.disabledNeedBridge > 0 && (
+        <p className="mt-1 text-text-muted">
+          有 <Mono>{result.disabledNeedBridge}</Mono> 个节点只能经 Clash 桥接，
+          而桥接当前未启用，所以它们以<Strong>停用</Strong>状态导入。
+          开启 Clash 桥接后再启用它们。
+        </p>
+      )}
+    </div>
+  );
+}
+
 export function ProxyPage({
   data,
   view,
@@ -402,10 +548,17 @@ export function ProxyPage({
           onClick={() => navigate({ tab: "isolation" })}
           label="出口隔离"
         />
+        <TabButton
+          active={tab === "subscriptions"}
+          onClick={() => navigate({ tab: "subscriptions" })}
+          label={`订阅${data.subscriptions.length > 0 ? `（${data.subscriptions.length}）` : ""}`}
+        />
       </div>
 
       {tab === "isolation" ? (
         <IsolationTab data={data} />
+      ) : tab === "subscriptions" ? (
+        <SubscriptionTab data={data} />
       ) : (
         <Panel title={`节点（${filtered.length}/${data.proxies.length}）`}>
           <TableFilters

@@ -1,6 +1,6 @@
 import { describe, expect, it, vi, afterEach } from "vitest";
 import { render, screen } from "@testing-library/react";
-import { ProxyPage } from "../../src/admin/pages/ProxyPage.tsx";
+import { ProxyPage, subscriptionStatus } from "../../src/admin/pages/ProxyPage.tsx";
 import { OverviewPage } from "../../src/admin/pages/OverviewPage.tsx";
 import { ModelsPage } from "../../src/admin/pages/ModelsPage.tsx";
 import { UsagePage } from "../../src/admin/pages/UsagePage.tsx";
@@ -59,6 +59,7 @@ function proxyList(proxies: ProxyView[], overrides: Partial<ProxyList> = {}): Pr
     proxies,
     clash: { enabled: false, activeBridgeId: null, bridges: [] },
     isolation: { groups: [], unknownWorkerIds: [], sharedGroups: [], isolated: false },
+    subscriptions: [],
     ...overrides,
   };
 }
@@ -608,5 +609,110 @@ describe("文案不渲染字面 markdown", () => {
     expect(strongs.length).toBeGreaterThan(0);
     // 用 font-medium 而不是默认的 font-bold —— 14px 正文下粗体会造成视觉断层。
     expect(strongs[0]!.className).toContain("font-medium");
+  });
+});
+
+/* ================================================================== *
+ * 订阅标签（Phase 10）
+ * ================================================================== */
+
+function subView(over: Partial<ProxyList["subscriptions"][number]> = {}): ProxyList["subscriptions"][number] {
+  return {
+    id: "sub1",
+    name: "机场一",
+    urlRedacted: "https://sub.example.invalid/link?token=***",
+    enabled: true,
+    lastFetchedAt: "2026-09-25T10:00:00.000Z",
+    lastErrorKind: null,
+    lastImportCount: 12,
+    lastFormat: "clash",
+    proxyCount: 12,
+    ...over,
+  };
+}
+
+describe("订阅标签", () => {
+  it("只显示脱敏后的 URL —— 界面上抄不到 token", () => {
+    stubIdleBatch();
+    const { container } = render(
+      <ProxyPage
+        data={proxyList([], { subscriptions: [subView()] })}
+        view={parseHash("#proxy?tab=subscriptions")}
+        navigate={noop}
+      />,
+    );
+    const text = container.textContent ?? "";
+    expect(text).toContain("sub.example.invalid");
+    expect(text).toContain("***");
+    // 前端拿不到原值（服务端就没给），这里钉住"界面上没有裸 token"。
+    expect(text).not.toMatch(/token=[A-Za-z0-9]{8,}/);
+  });
+
+  it("**「从没拉过」与「拉过但失败了」显示不同** —— 下一步不同", () => {
+    /*
+     * 前者的下一步是"点一下刷新"，后者是"看看 token 过期了没"。
+     * 合成一句"未就绪"会让用户从头猜 —— 与 doctor 分层同一个理由。
+     */
+    expect(subscriptionStatus(subView({ lastFetchedAt: null }))).toMatchObject({
+      tone: "warn",
+      label: "从未拉取",
+    });
+    expect(subscriptionStatus(subView({ lastErrorKind: "http_error" }))).toMatchObject({
+      tone: "error",
+    });
+    expect(subscriptionStatus(subView())).toMatchObject({ tone: "success" });
+  });
+
+  it("停用时也把失败原因带上 —— 不是一条 early return 就完事", () => {
+    /*
+     * 第八轮在 `proxyStatus` 上踩过这个形态：`if (!enabled) return "已停用"`
+     * 让最常见的那类输入永远看不到原因。这里是同一个教训的预防。
+     */
+    const s = subscriptionStatus(subView({ enabled: false, lastErrorKind: "timeout" }));
+    expect(s.tone).toBe("neutral");
+    expect(s.label).toContain("已停用");
+    expect(s.label).toContain("timeout");
+  });
+
+  it("空订阅列表给出下一步，而不只是说「空」", () => {
+    stubIdleBatch();
+    render(
+      <ProxyPage
+        data={proxyList([], { subscriptions: [] })}
+        view={parseHash("#proxy?tab=subscriptions")}
+        navigate={noop}
+      />,
+    );
+    expect(screen.getByText(/还没有订阅/)).toBeInTheDocument();
+    // 眼下没有"添加订阅"的表单，所以必须告诉用户去哪加。
+    expect(screen.getByText(/subscriptions/)).toBeInTheDocument();
+  });
+
+  it("刷新按钮在请求在途时禁用 —— 否则重复点会得到 409", async () => {
+    // 永挂的 fetch：模拟"正在刷新"。
+    vi.stubGlobal("fetch", vi.fn(() => new Promise(() => {})));
+    const { container } = render(
+      <ProxyPage
+        data={proxyList([], { subscriptions: [subView()] })}
+        view={parseHash("#proxy?tab=subscriptions")}
+        navigate={noop}
+      />,
+    );
+
+    const button = [...container.querySelectorAll("button")].find((b) =>
+      (b.textContent ?? "").includes("刷新"),
+    )!;
+    expect(button.hasAttribute("disabled")).toBe(false);
+
+    const { act } = await import("react");
+    await act(async () => {
+      button.click();
+    });
+
+    const after = [...container.querySelectorAll("button")].find((b) =>
+      (b.textContent ?? "").includes("刷新"),
+    )!;
+    expect(after.hasAttribute("disabled")).toBe(true);
+    expect(after.textContent).toContain("刷新中");
   });
 });

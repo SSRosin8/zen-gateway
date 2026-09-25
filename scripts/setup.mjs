@@ -52,6 +52,7 @@ import { dirname, join } from "node:path";
 import { configExists, configPath, loadConfig, saveConfig, ConfigError } from "../src/store/config.ts";
 import { ConfigSchema } from "../src/shared/schema.ts";
 import { safeErrorMessage } from "../src/shared/redact.ts";
+import { isGroupType } from "../src/shared/clashNodeTypes.ts";
 import { dataDirOf } from "./lib/instance.mjs";
 import { detail, heading, line, nextStep } from "./lib/report.mjs";
 
@@ -171,20 +172,6 @@ async function discoverControllers({ explicitApi, explicitSecret, knownSecrets }
  * 从 Controller 取出要写进配置的东西
  * ------------------------------------------------------------------ */
 
-/** 分组与内置策略的 type —— 这些不是可出口的节点。与 controller.ts 同一份清单。 */
-const GROUP_TYPES = new Set([
-  "Selector",
-  "URLTest",
-  "Fallback",
-  "LoadBalance",
-  "Relay",
-  "Direct",
-  "Reject",
-  "RejectDrop",
-  "Pass",
-  "Compatible",
-  "Dns",
-]);
 
 async function readController(ctrl) {
   const secret = ctrl.secret;
@@ -246,7 +233,7 @@ async function readController(ctrl) {
       });
       continue;
     }
-    if (GROUP_TYPES.has(type)) continue;
+    if (isGroupType(type)) continue;
     const history = Array.isArray(value.history) ? value.history : [];
     const last = history.at(-1);
     nodes.push({
