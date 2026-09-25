@@ -1,8 +1,11 @@
 import { Hono, type Context } from "hono";
 import type { Config } from "../../shared/schema.ts";
 import {
+  BatchProgressSchema,
   ConfigPatchSchema,
+  ModelListSchema,
   OverviewSchema,
+  ProxyListSchema,
   StatsViewSchema,
   type Overview,
   type StatsView,
@@ -20,11 +23,14 @@ import {
   displayFingerprint,
   isolationEntries,
   isUsable,
+  modelViews,
   poolCounts,
   proxySummary,
+  proxyViews,
   workerViews,
   type RuntimeWorkerState,
 } from "../admin/project.ts";
+import type { BatchProbeRunner } from "../admin/batchRunner.ts";
 
 /**
  * 管理 API。
@@ -85,6 +91,13 @@ export type AdminDeps = {
    * 用的那个不一致，而隔离报告正是按实测 IP 分组。不传则 `/probe` 不可用。
    */
   readonly egress?: EgressService;
+  /**
+   * 批量探测的执行器（批次 2）。不传则那两个端点报不可用。
+   *
+   * 它需要一个打开的数据库（进度要持久化），所以与 `stats` 同理由
+   * **不在装配层兜底造一个**。
+   */
+  readonly batch?: BatchProbeRunner;
   readonly health: () => Overview["health"];
   readonly stats?: AdminStatsSource;
   readonly log?: (message: string) => void;
@@ -396,6 +409,135 @@ export function createAdminRoutes(deps: AdminDeps): Hono {
           : { ok: false as const, failureKind: r.outcome.failureKind, reason: r.outcome.reason }),
       })),
     });
+  });
+
+  /**
+   * 代理池（批次 2）。
+   *
+   * 与 Overview 一样是**聚合**端点：这一页要同时显示代理列表、Clash 内核状态
+   * 与隔离报告，而三者必须来自同一时刻 —— 分开拿会让「这个节点没出口 IP」
+   * 与「隔离不成立」描述两个不同瞬间，而它们是同一件事的两面。
+   */
+  app.get("/proxies", (c) => {
+    const config = deps.configOf();
+    const views = workerViews(config, deps.runtimeWorkers());
+    const report = buildIsolationReport(isolationEntries(config, views));
+
+    return c.json(
+      ProxyListSchema.parse({
+        proxies: proxyViews(config),
+        clash: clashView(config),
+        isolation: {
+          groups: report.groups,
+          unknownWorkerIds: report.unknownWorkerIds,
+          sharedGroups: report.sharedGroups,
+          isolated: report.isolated,
+        },
+      }),
+    );
+  });
+
+  /**
+   * 模型列表（批次 2）。
+   *
+   * **只读缓存,绝不发请求** —— 与 Overview 同一条规则。目录拿不到时
+   * `catalogAvailable: false` 且列表为空，而**不是**返回一个空列表就完事:
+   * 「拿不到目录」与「目录里一个模型都没有」的下一步完全不同。
+   */
+  app.get("/models", (c) => {
+    const config = deps.configOf();
+    const snapshot = deps.catalog.cached(slotOf(catalogIdentityOf(config)));
+
+    return c.json(
+      ModelListSchema.parse({
+        models: modelViews(config, snapshot),
+        catalogAvailable: snapshot !== null,
+        rules: {
+          freeSuffix: config.models.freeSuffix,
+          extraFreeIds: config.models.extraFreeIds,
+          defaultSurfaces: config.models.defaultSurfaces,
+          catalogTtlMs: config.models.catalogTtlMs,
+          enforceCatalog: config.models.enforceCatalog,
+        },
+      }),
+    );
+  });
+
+  /* ---------------- 批量探测（长任务） ---------------- */
+
+  /**
+   * 当前进度。前端轮询这个（运行中 500ms / 空闲 5000ms）。
+   *
+   * 进度归**服务端**所有 —— 刷新页面或关掉再开都能接着看。理由不只是便利:
+   * 探测**已经在跑**（在切 selector、在发真实请求），而前端内存里的进度只是
+   * 它的倒影。真相放前端意味着刷新之后真相就没了，而那批探测还在跑 ——
+   * 用户此时看到「空闲」并再点开始，就会有两批并发互相换出口节点。
+   */
+  app.get("/batch-probe", (c) => {
+    if (deps.batch === undefined) {
+      return adminError(c, "internal_error", "批量探测不可用(统计库未就绪)");
+    }
+    return c.json(BatchProgressSchema.parse(deps.batch.snapshot()));
+  });
+
+  /**
+   * 控制批量探测。
+   *
+   * 四个动作走同一个端点而不是四个:它们是**同一个状态机**的输入，
+   * 而把状态机的字母表拆成四条路由会让「哪些动作在当前状态下合法」
+   * 散落在四个 handler 里。合法性判断在 reducer 一处（不合法的转移
+   * 返回原状态，不抛异常 —— 事件来自轮询与点击两个源，可以乱序到达）。
+   */
+  app.post("/batch-probe", async (c) => {
+    if (deps.batch === undefined) {
+      return adminError(c, "internal_error", "批量探测不可用(统计库未就绪)");
+    }
+
+    let action: string;
+    try {
+      const body = (await c.req.json()) as { action?: unknown };
+      action = String(body.action ?? "");
+    } catch {
+      return adminError(c, "invalid_request", "请求体不是合法 JSON");
+    }
+
+    switch (action) {
+      case "start": {
+        const started = deps.batch.start();
+        if (!started) {
+          /*
+           * 409 而不是静默排队。
+           *
+           * 两批并发会互相切 selector（进程外全局状态），于是实测到的出口
+           * 不是转发实际会用的那个 —— 而隔离报告正按那个 IP 分组。
+           * 也可能是「没有可用 Worker」，两种都用 409 但文案不同。
+           */
+          return c.json(
+            {
+              error: {
+                type: "invalid_config",
+                message: "已有一批探测在进行中，或没有可用的 Worker",
+              },
+            },
+            409,
+          );
+        }
+        break;
+      }
+      case "pause":
+        deps.batch.pause();
+        break;
+      case "resume":
+        deps.batch.resume();
+        break;
+      case "cancel":
+        deps.batch.cancel();
+        break;
+      default:
+        return adminError(c, "invalid_request", "action 必须是 start / pause / resume / cancel");
+    }
+
+    return c.json(BatchProgressSchema.parse(deps.batch.snapshot()));
   });
 
   return app;

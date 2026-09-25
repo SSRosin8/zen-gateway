@@ -1,5 +1,6 @@
-import { useCallback, useEffect, useState } from "react";
-import { OverviewSchema, type Overview } from "../../shared/contract.ts";
+import { useCallback, useEffect, useRef, useState } from "react";
+import { BatchProgressSchema, OverviewSchema, type Overview } from "../../shared/contract.ts";
+import { INITIAL, pollIntervalMs, type BatchProgress } from "../../shared/batchProbe.ts";
 
 /**
  * 管理 API 的客户端。
@@ -163,4 +164,157 @@ export function useProbe(): {
   }, []);
 
   return { running, results, error, run };
+}
+
+/* ------------------------------------------------------------------ *
+ * 批次 2 的端点
+ * ------------------------------------------------------------------ */
+
+/**
+ * 通用的「拉一个端点并过 schema」。
+ *
+ * 与 `useOverview` 同一套三态（loading / offline / error），只是端点与 schema
+ * 可变。抽出来是因为 4 个页面要做同一件事 —— 而复制 4 遍会让「契约不匹配
+ * 与网关没在跑必须分开报」这条规则在其中某一份里被漏掉。
+ */
+export function useEndpoint<T>(
+  path: string,
+  schema: { safeParse: (v: unknown) => { success: true; data: T } | { success: false; error: { issues: Array<{ message: string }> } } },
+  intervalMs = 5000,
+): { state: FetchState<T>; refresh: () => void } {
+  const [state, setState] = useState<FetchState<T>>({ status: "loading" });
+  const [tick, setTick] = useState(0);
+  const refresh = useCallback(() => setTick((t) => t + 1), []);
+
+  useEffect(() => {
+    let cancelled = false;
+
+    const load = async () => {
+      try {
+        const raw = await getJson(path);
+        if (cancelled) return;
+        const parsed = schema.safeParse(raw);
+        if (!parsed.success) {
+          setState({
+            status: "error",
+            message: `响应与契约不匹配（前后端版本可能不一致，试 npm run build）：${parsed.error.issues[0]?.message ?? "未知字段"}`,
+          });
+          return;
+        }
+        setState({ status: "ready", data: parsed.data });
+      } catch (err) {
+        if (cancelled) return;
+        if (err instanceof TypeError) setState({ status: "offline" });
+        else setState({ status: "error", message: err instanceof Error ? err.message : String(err) });
+      }
+    };
+
+    void load();
+    const timer = setInterval(() => {
+      if (!document.hidden) void load();
+    }, intervalMs);
+
+    return () => {
+      cancelled = true;
+      clearInterval(timer);
+    };
+    // `schema` 是模块级常量，不入依赖 —— 否则每次渲染都会重建轮询。
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [path, intervalMs, tick]);
+
+  return { state, refresh };
+}
+
+/**
+ * 批量探测的轮询与控制。
+ *
+ * ## 轮询按 generation 编号防竞态
+ *
+ * 规划明确要求这一条。场景：用户点「取消」，而一个**取消之前**发出的
+ * `GET /api/batch-probe` 正在途中。它带回来的是 `running` —— 若照收，
+ * 界面会从「正在取消」跳回「探测中」，然后下一次轮询又跳回来。
+ *
+ * 每次**用户动作**都递增 generation，而轮询响应到达时若 generation 已变
+ * 就丢弃。这不是防御性代码：一次桥接探测几秒，而轮询间隔 500ms，
+ * 所以「动作与在途响应交错」是常态而不是边角。
+ *
+ * ## 间隔随状态变化 + `document.hidden` 降频
+ *
+ * 运行中 500ms / 空闲 5000ms（规划的两个值）。后台标签页不轮询 ——
+ * 刷新一个没人看的页面只是浪费。
+ */
+export function useBatchProbe(): {
+  progress: BatchProgress;
+  error: string | null;
+  send: (action: "start" | "pause" | "resume" | "cancel") => Promise<void>;
+} {
+  const [progress, setProgress] = useState<BatchProgress>(INITIAL);
+  const [error, setError] = useState<string | null>(null);
+  /** 见文档:每次用户动作递增,在途的旧响应据此作废。 */
+  const generation = useRef(0);
+
+  useEffect(() => {
+    let cancelled = false;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+
+    const tick = async () => {
+      const myGeneration = generation.current;
+      try {
+        const res = await fetch("/api/batch-probe");
+        if (cancelled) return;
+        if (res.ok) {
+          const parsed = BatchProgressSchema.safeParse(await res.json());
+          /*
+           * generation 变了 = 这条响应描述的是一个已经过时的世界。丢掉它。
+           * 否则「点了取消又跳回探测中」这种闪烁会反复出现。
+           */
+          if (parsed.success && generation.current === myGeneration) {
+            setProgress(parsed.data);
+          }
+        }
+      } catch {
+        /* 轮询失败静默 —— 页面上其他地方会报「未连接」 */
+      } finally {
+        if (!cancelled) {
+          // 间隔由**当前**状态决定，所以每轮重新排 —— 不用固定 interval。
+          timer = setTimeout(() => void tick(), document.hidden ? 5000 : pollIntervalMs(progress));
+        }
+      }
+    };
+
+    void tick();
+    return () => {
+      cancelled = true;
+      if (timer !== undefined) clearTimeout(timer);
+    };
+  }, [progress]);
+
+  const send = useCallback(async (action: "start" | "pause" | "resume" | "cancel") => {
+    // 动作发出即作废所有在途轮询 —— 见文档。
+    generation.current += 1;
+    setError(null);
+    try {
+      const res = await fetch("/api/batch-probe", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ action }),
+      });
+      const body: unknown = await res.json();
+      if (!res.ok) {
+        const message =
+          typeof body === "object" && body !== null && "error" in body
+            ? String((body as { error: { message?: string } }).error.message ?? `HTTP ${res.status}`)
+            : `HTTP ${res.status}`;
+        setError(message);
+        return;
+      }
+      const parsed = BatchProgressSchema.safeParse(body);
+      // 动作的响应**总是**采纳：它就是这次动作的结果，generation 已经是最新的。
+      if (parsed.success) setProgress(parsed.data);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
+    }
+  }, []);
+
+  return { progress, error, send };
 }

@@ -388,4 +388,103 @@ export const ConfigPatchSchema = z.object({
 });
 export type ConfigPatch = z.infer<typeof ConfigPatchSchema>;
 
+/* ------------------------------------------------------------------ *
+ * 其余页面的视图（Phase 9 批次 2）
+ * ------------------------------------------------------------------ */
+
+/**
+ * 代理的展示形态。
+ *
+ * `password` 换成 `SecretPresence`（代理口令是凭证）。其余字段原样 ——
+ * `host`/`port`/`clashNodeName` 都是排查时要逐字符看的东西。
+ */
+export const ProxyViewSchema = z.object({
+  id: z.string(),
+  name: z.string(),
+  type: z.string(),
+  host: z.string(),
+  port: z.number().int(),
+  enabled: z.boolean(),
+  source: z.enum(["manual", "subscription", "controller"]),
+  bridgeId: z.string().nullable(),
+  clashNodeName: z.string().nullable(),
+  direct: z.boolean(),
+  bridgeable: z.boolean(),
+  /** 最近一次**实测**的公网出口 IP。null = 未探测（**不是**「没有出口」）。 */
+  egressIp: z.string().nullable(),
+  password: SecretPresenceSchema,
+  /**
+   * 引用它的 Worker id。
+   *
+   * 由服务端算好而不是让前端 join：前端要按它显示「删掉这个代理会影响谁」，
+   * 而那个判断若在前端做，两处（这里与 `patch.ts` 的引用完整性校验）
+   * 就有两份实现，而分叉后界面会允许一个服务端必拒的操作。
+   */
+  usedBy: z.array(z.string()),
+  /** 能否被解析成一条可用出口路径（纯本地判断）。 */
+  resolvable: z.boolean(),
+  /** 不可解析时的原因（已是人可读文案）。 */
+  unresolvableReason: z.string().nullable(),
+});
+export type ProxyView = z.infer<typeof ProxyViewSchema>;
+
+/** 模型的展示形态。免费判定的**依据**要能看到，否则「为什么这个不能用」没答案。 */
+export const ModelViewSchema = z.object({
+  id: z.string(),
+  /** 是否放行。 */
+  free: z.boolean(),
+  /**
+   * 判定依据：`suffix`（后缀命中）/ `extra`（在 extraFreeIds 里）/
+   * `not_free`（两者都不满足）/ `retired`（依据成立但已下架）/
+   * `*_unverified`（依据成立但目录拿不到，没做交集）。
+   */
+  reason: z.string(),
+  /** 该模型在本网关上声明支持的协议面（来自 `surfacesFor`）。 */
+  surfaces: z.array(z.string()),
+  /** 在上游在架目录里。 */
+  listed: z.boolean(),
+});
+export type ModelView = z.infer<typeof ModelViewSchema>;
+
+export const ProxyListSchema = z.object({
+  proxies: z.array(ProxyViewSchema),
+  clash: OverviewSchema.shape.clash,
+  /** 出口隔离报告 —— 与 Overview 同一份逻辑，按实测 IP 分组。 */
+  isolation: IsolationViewSchema,
+});
+export type ProxyList = z.infer<typeof ProxyListSchema>;
+
+export const ModelListSchema = z.object({
+  /**
+   * 在架目录里的全部模型（含付费的）—— Models 页要能回答
+   * 「为什么这个模型不能用」，而那需要看到被拒的那些。
+   *
+   * 目录拿不到时是空数组，且 `catalogAvailable` 为 false ——
+   * 「拿不到目录」与「目录里一个模型都没有」是两件事。
+   */
+  models: z.array(ModelViewSchema),
+  catalogAvailable: z.boolean(),
+  rules: z.object({
+    freeSuffix: z.string(),
+    extraFreeIds: z.array(z.string()),
+    defaultSurfaces: z.array(z.string()),
+    catalogTtlMs: z.number().int(),
+    enforceCatalog: z.boolean(),
+  }),
+});
+export type ModelList = z.infer<typeof ModelListSchema>;
+
+/** 批量探测进度 —— 形状与 `shared/batchProbe.ts` 的 `BatchProgress` 一致。 */
+export const BatchProgressSchema = z.object({
+  state: z.enum(["idle", "screening", "running", "paused", "cancelling", "done"]),
+  screenTotal: z.number().int().nonnegative(),
+  screenDone: z.number().int().nonnegative(),
+  mainTotal: z.number().int().nonnegative(),
+  mainDone: z.number().int().nonnegative(),
+  cancelRequested: z.boolean(),
+  addedWorkerIds: z.array(z.string()),
+  failureKind: z.string().nullable(),
+});
+
+
 
