@@ -344,10 +344,11 @@ schema：实测 +57ms，而 `service.mjs status` 全程只有 51ms。
 | 7 | 统计 SQL 聚合 + 亲和持久化 | ✅ |
 | 8 | `setup.mjs`（一键配置）、`doctor.mjs`（分层诊断）、`service.mjs` 打开浏览器 | ✅ |
 | 9 | 管理后台 6 页 + 首启向导 + 管理 API + 批量探测长任务状态机 | ✅ |
-| 10 | 订阅拉取与多格式解析、多 Clash 内核择优 | 待做 |
-| 11 | 精简 `AGENTS.md`、4 个 skill、`docs/` 补全 | 文档已交付；`.claude/skills/` 下的 4 个 skill 待做 |
+| 10 | 订阅拉取与多格式解析、多 Clash 内核择优 | ✅ |
+| 11 | `AGENTS.md`/`CLAUDE.md`/`README.md`/`docs/` + `.claude/skills/` 下 4 个 skill | ✅ |
 
 经**八轮**独立子 agent 审核（一轮审规划 + 七轮审代码/文档）。
+**全部 12 个 phase 已交付。**
 
 > 规模数字（测试条数、文件数、代码行数）刻意不写在文档里 —— 它们每次提交
 > 都变，而第七轮审核发现这里的五个数字全部过期（测试数差 62、源码行差 1176）。
@@ -410,6 +411,51 @@ Phase 8 把它留到 Phase 9，理由是「那时管理 API 会真正增加转�
 所以那个理由是**预测而不是观察**。801 行本身不构成依据（1000 行硬上限那条
 属于 **opencode-manager**，本项目从未有过），而「为了行数而拆」恰好是旧项目
 记在案的痛点。**结论：不拆，直到出现真实的第二调用者或职责边界真的变了。**
+
+### 订阅与多内核（Phase 10）
+
+三层分开，与 `routing/` 那几块同源 —— 判断能被穷举测试，执行层只验证「接得对」：
+
+| 层 | 文件 | 职责 |
+|---|---|---|
+| 解析 | `core/proxy/subscription/parse.ts` | 纯函数：Clash YAML/JSON、SIP008、分享链、多层 Base64 |
+| 拉取 | `core/proxy/subscription/fetch.ts` | 多 UA 协商（网络） |
+| 合并 | `core/proxy/subscription/import.ts` | 纯函数：并进配置，幂等 |
+
+订阅体是本项目**最不可控**的输入（格式由第三方定、随时变、同一 URL 换 UA
+换格式），所以解析必须是能拿一段文本反复喂的纯函数。
+
+**幂等靠派生 id**：`sub_` + sha256(订阅 id + 节点名) 前 24 位。随机 id 会让
+Worker 的 `proxyId` 指向不存在的代理（引用完整性直接拒绝整份配置，网关起不来），
+并丢掉已实测的 `egressIp`（隔离报告归零）。**身份用 `name` 而不是 `host:port`**
+—— 机场普遍让十几个节点共用一个入口，按 host:port 会把它们折成一个。
+
+**Clash 没开时只能桥接的节点以停用状态导入**：`ConfigSchema` 不允许
+「已启用且只能桥接」与 `clash.enabled: false` 并存（那条规则是对的），
+而订阅里绝大多数节点恰好只能桥接 —— 不处理会造出一份**存不下去**的配置。
+
+多内核择优在 `core/proxy/clash/select.ts`，同样两层：`selectBridge`（纯函数）
+与 `probeBridges`（探活）。`pickBridge` 此前只做纯配置推导 ——
+auto 模式注释里那个"健康"**没有任何东西去测量**，实际行为是"永远用同一个"。
+
+择优判据：活着 → 分组内有可用节点 → `priority` → id 字典序。
+**刻意不按延迟**（Controller 给的是内核到节点的延迟，与"本机到内核"无关）。
+**有粘滞**（换内核会让会话亲和的语义变）。**manual 绝不自动切换**。
+**批测期间锁定单内核**（不变量 #5 的延伸）。
+
+### Skill（Phase 11）
+
+`.claude/skills/` 下四个：`dev-workflow`（变异纪律与提交流程）、
+`ui-design`（实测过的对比度与密度约束）、`protocol-surface`（七条不变量与
+转发七步）、`debug-egress`（本机三个陷阱的排查顺序）。
+
+`tests/unit/skills.test.ts` 钉住它们**引用不悬空**：frontmatter 齐全、
+引用的 npm 脚本存在、引用的纪律编号在 `AGENTS.md` 里有定义、
+提到的源码文件存在、写进去的关键常量与代码一致。
+
+理由与 `docExamples.test.ts` 同源：**一条过期的指导比没有指导更糟** ——
+它会让下一次改动建立在一个不成立的前提上，而读它的人没有理由怀疑它。
+而 skill 里写满了具体数字与符号名，最容易漂。
 
 ### 当前已知缺口
 
