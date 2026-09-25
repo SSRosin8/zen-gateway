@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { readFileSync, readdirSync, existsSync } from "node:fs";
-import { join } from "node:path";
+import { basename, join } from "node:path";
 import { PAGE_SIZE } from "../../src/admin/components/DataTable.tsx";
 
 /*
@@ -35,6 +35,49 @@ const EXPECTED_SKILLS = ["dev-workflow", "ui-design", "protocol-surface", "debug
 function skillText(name: string): string {
   return readFileSync(join(SKILLS_DIR, name, "SKILL.md"), "utf8");
 }
+
+/**
+ * 仓库里全部源码文件的路径（相对 ROOT）。
+ *
+ * 供两条关卡用：裸文件名按 basename 解析、符号名在拼起来的正文里查。
+ * 两者刻意共用一次遍历 —— 分别遍历会让"扫了哪些目录"存两份（纪律 #4）。
+ */
+const SCAN_DIRS = ["src", "scripts", "tests"] as const;
+
+function walkSources(dir: string): string[] {
+  const out: string[] = [];
+  for (const entry of readdirSync(join(ROOT, dir), { withFileTypes: true })) {
+    const rel = `${dir}/${entry.name}`;
+    if (entry.isDirectory()) out.push(...walkSources(rel));
+    else if (/\.(ts|tsx|mjs|css)$/.test(entry.name)) out.push(rel);
+  }
+  return out;
+}
+
+const sourceFiles = SCAN_DIRS.flatMap(walkSources);
+/** 文件名解析用全部目录 —— skill 里会提 `service.test.ts` 这类测试文件。 */
+const basenames = new Set(sourceFiles.map((f) => basename(f)));
+
+/**
+ * 符号查找的正文 —— **只看 `src/` 与 `scripts/`，且排除本文件**。
+ *
+ * 两条排除各有理由：
+ *
+ * - 不看 `tests/`：一个只存在于测试里的名字不算"产品代码里有这个符号"，
+ *   而 skill 是指路用的。
+ * - 排除本文件：这里的注释举了 `applyProbeResultGONE` 当反例，于是关卡会把
+ *   **自己的注释**当成符号来源 —— 那个变异因此存活过一次。
+ *   `exportsReferenced.test.ts` 用 `SELF` 排除自己，同一个理由。
+ */
+const SELF = "tests/unit/skills.test.ts";
+const sourceHaystack = ["src", "scripts"]
+  .flatMap(walkSources)
+  .filter((f) => f !== SELF)
+  .map((f) => readFileSync(join(ROOT, f), "utf8"))
+  .join("\n");
+
+/** 四个 skill 引用过的全部纪律编号 —— 供整组的元断言用。 */
+const citedAcrossSkills: number[] = [];
 
 describe("skill 文档齐全且格式正确", () => {
   it("四个 skill 都存在", () => {
@@ -89,8 +132,13 @@ describe("skill 里的引用不悬空", () => {
        * 一个 `npm run xxx` 打成错的 skill 会让读者以为自己环境坏了。
        */
       const text = skillText(name);
+      /*
+       * 字符类要含**连字符**（第十轮审核）：`[a-z:]+` 会把
+       * `npm run build-nonexistent` 截成 `build`（存在）→ 静默通过。
+       * 末尾的 `\b` 防止把更长的名字截短后误判成存在的前缀。
+       */
       const scripts = new Set(
-        [...text.matchAll(/npm run ([a-z:]+)/g)].map((m) => m[1]!),
+        [...text.matchAll(/npm run ([a-z][a-z:-]*)\b/g)].map((m) => m[1]!),
       );
       for (const script of scripts) {
         expect(pkg.scripts[script], `${name} 引用了不存在的 npm run ${script}`).toBeDefined();
@@ -105,7 +153,18 @@ describe("skill 里的引用不悬空", () => {
        * —— 编号存在两套且已分叉。这条防止 skill 重蹈覆辙。
        */
       const text = skillText(name);
-      const cited = [...text.matchAll(/纪律 #(\d+)/g)].map((m) => Number(m[1]));
+      /*
+       * 先抓「纪律 #...」整段再从里面抽全部编号（第十轮审核）：
+       * `/纪律 #(\d+)/g` 对 `纪律 #8/#4` 只拿到 8 —— 而
+       * `dev-workflow/SKILL.md:107` 正在用这个写法，也就是那里的 `#4`
+       * 此前根本没被检查过。
+       */
+      const cited = [...text.matchAll(/纪律 #\d+(?:\s*[/、]\s*#\d+)*/g)].flatMap((m) =>
+        [...m[0].matchAll(/#(\d+)/g)].map((x) => Number(x[1])),
+      );
+      // 逐个 skill 不要求必须引用纪律（ui-design / protocol-surface 讲的是别的）。
+      // 整组的"确实抓到了引用"那条元断言在本 describe 之后单独一条。
+      citedAcrossSkills.push(...cited);
       for (const n of cited) {
         expect(definedDisciplines.has(n), `${name} 引用了未定义的纪律 #${n}`).toBe(true);
       }
@@ -117,16 +176,88 @@ describe("skill 里的引用不悬空", () => {
        * 文件被重命名后，那条指路会把人带到一个不存在的地方。
        */
       const text = skillText(name);
-      const paths = new Set(
-        [...text.matchAll(/`((?:src\/|scripts\/|tests\/)[\w./-]+\.(?:ts|tsx|mjs|css))`/g)].map(
-          (m) => m[1]!,
-        ),
+      /*
+       * **裸文件名也要检查**（第十轮审核）。先前正则要求 `src/`/`scripts/`/
+       * `tests/` 前缀，而实测四个 skill 里带前缀的引用只有 **1 处**，
+       * 另有 10 处是 `` `clash/select.ts` ``、`` `pipe.ts` ``、`` `retry.ts` ``
+       * 这类裸名 —— 全部在视野外，改坏它们全绿。那是「输入集为空」的形态。
+       *
+       * 裸名按 basename 在仓库里解析：唯一命中就算存在，命中多个也算
+       * （skill 里写裸名本就是"读者自己找得到"的意思），零命中才算失实。
+       */
+      const refs = new Set(
+        [...text.matchAll(/`([\w./-]+\.(?:ts|tsx|mjs|css))`/g)].map((m) => m[1]!),
       );
-      for (const p of paths) {
-        expect(existsSync(join(ROOT, p)), `${name} 提到的 ${p} 不存在`).toBe(true);
+
+      // 关卡自己不能是空的：正则改坏、围栏语法变了都会让下面在零个引用上通过。
+      expect(refs.size, `${name} 一个源码文件都没提到？正则可能改坏了`).toBeGreaterThan(0);
+
+      const missing: string[] = [];
+      let checked = 0;
+      for (const ref of refs) {
+        const ok = ref.includes("/") && existsSync(join(ROOT, ref)) ? true : basenames.has(basename(ref));
+        if (!ok) missing.push(ref);
+        // 算在判定之后 —— 放在循环开头的话 `continue` 也能让计数对上而检查没做。
+        checked += 1;
       }
+
+      expect(checked).toBe(refs.size);
+      expect(missing, `${name} 提到的这些文件在仓库里找不到`).toEqual([]);
+    });
+
+    it(`${name} 提到的源码符号都存在`, () => {
+      /*
+       * 本文件头声称「提到的源码符号真的还在（重命名后 skill 会指向一个
+       * 不存在的东西）」，而第十轮审核实测**这条从来没有实现** ——
+       * 只有路径检查那一条 it，`applyProbeResult → applyProbeResultGONE`
+       * 全绿。那是「注释声称的覆盖 > 实际覆盖」，即给自己写假的强保证。
+       *
+       * 判据：反引号里形如标识符的词（含 `Xxx.yyy()` 的两段形式），
+       * 在 `src/` + `scripts/` 的源码里必须出现过。刻意只认**看起来像符号**
+       * 的（驼峰、或全大写下划线），不认普通英文单词与中文 —— 否则会把
+       * 散文里的词也当符号查。
+       */
+      const text = skillText(name);
+      const candidates = new Set<string>();
+      for (const m of text.matchAll(/`([A-Za-z_$][\w$]*(?:\.[A-Za-z_$][\w$]*)?)(?:\(\))?`/g)) {
+        const raw = m[1]!;
+        // 取最后一段：`ModelCatalog.status` → 查 `status` 也能命中定义处。
+        const parts = raw.split(".");
+        for (const part of parts) {
+          const looksLikeSymbol = /[a-z][A-Z]/.test(part) || /^[A-Z][a-z]/.test(part) || /^[A-Z0-9_]{4,}$/.test(part);
+          if (looksLikeSymbol && part.length >= 4) candidates.add(part);
+        }
+      }
+
+      // 关卡自己不能是空的。
+      expect(candidates.size, `${name} 一个符号都没提到？正则可能改坏了`).toBeGreaterThan(3);
+
+      const missing: string[] = [];
+      let checked = 0;
+      for (const sym of candidates) {
+        if (!sourceHaystack.includes(sym)) missing.push(sym);
+        checked += 1;
+      }
+
+      expect(checked).toBe(candidates.size);
+      expect(missing, `${name} 提到的这些符号在源码里找不到`).toEqual([]);
     });
   }
+
+  it("**整组确实抓到了纪律引用** —— 否则上面那条在空集上通过", () => {
+    /*
+     * 逐个 skill 不要求必须引用纪律：`ui-design` 与 `protocol-surface`
+     * 讲的是设计与协议面，本来就一条都不引（实测 0 / 0，而 `dev-workflow` 5、
+     * `debug-egress` 1）。所以元断言只能落在整组上。
+     *
+     * 这条防的是纪律正则改坏：那时四个 skill 全部抓到 0 条，
+     * 「引用的编号都有定义」会在空集上静默通过。
+     */
+    expect(citedAcrossSkills.length).toBeGreaterThan(3);
+    // 顺带钉住那个多编号写法真的被展开了（`纪律 #8/#4` 要抓到两个）。
+    expect(citedAcrossSkills).toContain(4);
+    expect(citedAcrossSkills).toContain(8);
+  });
 });
 
 describe("skill 里的关键常量与代码一致", () => {

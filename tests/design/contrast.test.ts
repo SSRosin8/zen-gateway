@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { readFileSync } from "node:fs";
+import { readFileSync, readdirSync } from "node:fs";
 import {
   contrastRatio,
   parseThemeMappings,
@@ -255,17 +255,47 @@ describe("禁用态仍然可读", () => {
     /*
      * 直接扫源码。这条断言的对象不是颜色而是**手法**:只要有人再写
      * `disabled:opacity-*`，合成后的对比度就脱离了上面所有 token 断言的视野。
+     *
+     * ## 遍历目录，不枚举文件（第十轮审核）
+     *
+     * 先前这里手写了三个文件名，而 `src/admin/` 下有十余个 tsx ——
+     * 实测给名单外的 `UsagePage.tsx` 加一个 `disabled:opacity-60` 后全绿。
+     * 那是纪律 #4 的标准形态：手写名单与「admin 下所有组件」这个真相并行，
+     * 而脱节方向是漏。这条断言守的是**手法**，所以范围必须是"所有会写
+     * 类名的地方"，不是某几个恰好当时写过它的文件。
      */
-    const files = [
-      "../../src/admin/components/Panel.tsx",
-      "../../src/admin/components/DataTable.tsx",
-      "../../src/admin/pages/ProxyPage.tsx",
-    ];
-    for (const rel of files) {
-      const src = readFileSync(new URL(rel, import.meta.url), "utf8");
+    const root = new URL("../../src/admin/", import.meta.url);
+
+    const walk = (dir: URL): string[] => {
+      const out: string[] = [];
+      for (const entry of readdirSync(dir, { withFileTypes: true })) {
+        const child = new URL(`${entry.name}${entry.isDirectory() ? "/" : ""}`, dir);
+        if (entry.isDirectory()) out.push(...walk(child));
+        else if (entry.name.endsWith(".tsx") || entry.name.endsWith(".ts")) out.push(child.pathname);
+      }
+      return out;
+    };
+
+    const files = walk(root);
+
+    /*
+     * 关卡自己不能是空的：目录改名、`readdirSync` 抛了被吞掉，都会让下面那个
+     * 循环在**零个文件**上通过（纪律 #1 的「输入集为空」）。
+     * 本机实测 11 个 tsx + 若干 ts，取一个有余量的下界。
+     */
+    expect(files.length).toBeGreaterThan(8);
+
+    const offenders: string[] = [];
+    let scanned = 0;
+    for (const abs of files) {
       // 注释里提到这个类名是允许的（那里在解释为什么不用它）。
-      const code = stripComments(src);
-      expect(code, `${rel} 又用了 disabled:opacity`).not.toMatch(/disabled:opacity-/);
+      const code = stripComments(readFileSync(abs, "utf8"));
+      if (/disabled:opacity-/.test(code)) offenders.push(abs.replace(/.*\/src\//, "src/"));
+      // 算在读完之后 —— 放在循环开头的话 `continue` 也能让计数对上而检查没做。
+      scanned += 1;
     }
+
+    expect(scanned).toBe(files.length);
+    expect(offenders, "这些文件又用了 disabled:opacity").toEqual([]);
   });
 });
