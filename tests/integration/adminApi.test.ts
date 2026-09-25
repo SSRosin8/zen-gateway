@@ -931,6 +931,74 @@ describe("POST /api/probe 把实测 IP 写回配置", () => {
     await new Promise<void>((r) => echo.close(() => r()));
   });
 
+  it("**探测期间用户改配置不会被覆盖** —— 合并前要重读", async () => {
+    /*
+     * 第十轮审核实测的丢失更新。`probeAll` 约 6 秒，那几秒足够用户在
+     * Worker 页改个名并保存。先前这里用的是探测**开始前**那份快照，
+     * 于是探测返回后写回时把用户的改动凭空覆盖 —— 响应 200、
+     * `changed: true`，没有任何症状。
+     *
+     * 同一文件的订阅刷新与 `batchRunner.#persist` 都显式防了这个并写明了
+     * 理由；三处同类路径里只有这一处漏了（纪律 #4）。
+     */
+    /*
+     * 卡住的 IP 回显服务 —— 让探测停在半路，期间发 PATCH。
+     * 这是「6 秒窗口」的可控版本。它同时当代理端口（与本块其余用例同构）。
+     */
+    let release: (() => void) | undefined;
+    const gate = new Promise<void>((r) => {
+      release = r;
+    });
+    const slow = createServer((_req, res) => {
+      void gate.then(() => {
+        res.writeHead(200, { "content-type": "text/plain" });
+        res.end("198.51.100.77");
+      });
+    });
+    await new Promise<void>((r) => slow.listen(0, "127.0.0.1", () => r()));
+    const slowPort = (slow.address() as { port: number }).port;
+
+    const config = ConfigSchema.parse({
+      version: CONFIG_VERSION,
+      gateway: { relayToken: "probe-race-token-not-real" },
+      workers: [{ id: "w1", kind: "authenticated", apiKey: "k".repeat(20), proxyId: "p1", name: "原名" }],
+      proxies: [
+        {
+          id: "p1", name: "直连", type: "http", host: "127.0.0.1", port: slowPort,
+          source: "manual", direct: true, bridgeable: false, egressIp: null,
+        },
+      ],
+      clash: { enabled: false, bridges: [] },
+    });
+
+    try {
+      const { app, getConfig } = makeApp(config, {
+        probeServices: [{ url: `http://127.0.0.1:${slowPort}/`, extract: (t) => t.trim() }],
+      });
+
+      // 探测开始，但卡在回显服务上。
+      const probing = app.request("http://127.0.0.1/api/probe", { method: "POST" });
+      await new Promise((r) => setTimeout(r, 50));
+
+      // 用户在这几秒里改了名字并保存。
+      const { status } = await patch(app, { workers: { update: { w1: { name: "用户改的名字" } } } });
+      expect(status).toBe(200);
+      expect(getConfig().workers[0]!.name).toBe("用户改的名字");
+
+      // 探测完成并写回。
+      release?.();
+      const res = await probing;
+      expect(res.status).toBe(200);
+      const after = getConfig();
+      // 这是全部要点：用户的改动必须还在。缺陷版本这里是「原名」。
+      expect(after.workers[0]!.name).toBe("用户改的名字");
+      // 而且探测结果也真的写进去了 —— 不是靠「什么都没写」通过的。
+      expect(after.proxies[0]!.egressIp).toBe("198.51.100.77");
+    } finally {
+      await new Promise<void>((r) => slow.close(() => r()));
+    }
+  }, 30_000);
+
   it("探测成功后 egressIp 落进配置,隔离视图随之成立", async () => {
     /*
      * 这条补的是一个**结构性**缺口:接上 Overview 时实测发现 `isolation`

@@ -374,3 +374,77 @@ describe("buildIsolationReport", () => {
     expect(report.isolated).toBe(false);
   });
 });
+
+/* ================================================================== *
+ * latencyMs 的边界（第十轮审核）
+ * ================================================================== */
+
+describe("probeEgress 的 latencyMs 是非负整数", () => {
+  /*
+   * 先前这里是裸的 `now() - started`，而 `elapsedMs()` 只存在于
+   * `upstream/retry.ts` 内部（两个 core 子目录各写一遍 —— 纪律 #4）。
+   *
+   * 两个后果都实测过：
+   * - `probe_results.latency_ms` 是 STRICT 表的 INTEGER 列，非整数被拒后
+   *   `recordProbe` 整条事务回滚；
+   * - `ProbeResultSchema` 要求 `.int().nonnegative()`，而 `POST /api/probe`
+   *   的那次 `parse` 排在 `applyConfig` **之后** —— 配置已写盘，
+   *   客户端只收到「网关内部错误」。
+   *
+   * 既有那条断言是 `>= 0`，对真实时钟两种实现都成立，所以测不出差别。
+   * 判据必须用**注入的时钟**。
+   */
+
+  const dispatcherOf = () => new Agent({ connect: { timeout: 2000 } });
+
+  it("**时钟回拨时夹到 0**，不产生负值", async () => {
+    const s = await serve((_req, res) => {
+      res.writeHead(200, { "content-type": "text/plain" });
+      res.end("198.51.100.9");
+    });
+    const dispatcher = dispatcherOf();
+    try {
+      // 第一次取 started，第二次取结束时刻 —— 让它比 started 小 5 秒。
+      const stamps = [1_000_000, 995_000];
+      let i = 0;
+      const out = await probeEgress({
+        dispatcher,
+        services: [{ url: s.origin, extract: plainText }],
+        now: () => stamps[Math.min(i++, stamps.length - 1)]!,
+      });
+
+      expect(out.ok).toBe(true);
+      // 裸减法这里是 -5000。
+      expect(out.ok && out.latencyMs).toBe(0);
+    } finally {
+      await dispatcher.close();
+      await s.close();
+    }
+  });
+
+  it("**非整数被取整**，否则 STRICT 表会拒掉整行", async () => {
+    const s = await serve((_req, res) => {
+      res.writeHead(200, { "content-type": "text/plain" });
+      res.end("198.51.100.9");
+    });
+    const dispatcher = dispatcherOf();
+    try {
+      const stamps = [1_000_000, 1_000_001.5];
+      let i = 0;
+      const out = await probeEgress({
+        dispatcher,
+        services: [{ url: s.origin, extract: plainText }],
+        now: () => stamps[Math.min(i++, stamps.length - 1)]!,
+      });
+
+      expect(out.ok).toBe(true);
+      const latency = out.ok ? out.latencyMs : -1;
+      // 裸减法这里是 1.5 —— 进 INTEGER 列会让整条事务回滚。
+      expect(Number.isInteger(latency)).toBe(true);
+      expect(latency).toBe(2);
+    } finally {
+      await dispatcher.close();
+      await s.close();
+    }
+  });
+});

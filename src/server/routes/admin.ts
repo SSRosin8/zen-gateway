@@ -388,6 +388,16 @@ export function createAdminRoutes(deps: AdminDeps): Hono {
      * `applyProbeResult` 对失败**不清空**已有 IP —— 一次网络抖动不该让
      * 「这个代理的出口是什么」这条已知事实消失,否则隔离视图会在每次抖动时
      * 把已确认隔离的节点退回「未知」。那条规则在纯函数里,这里只负责接线。
+     *
+     * ## 合并前必须**重读**配置（第十轮审核）
+     *
+     * `probeAll` 实测约 6 秒，那几秒足够用户在 Worker 页改个名并保存。
+     * 先前这里用的是探测**开始前**那份快照，于是探测返回后写回时把用户的
+     * 改动凭空覆盖掉 —— 响应 200、`changed: true`，没有任何症状。
+     *
+     * 同一文件的订阅刷新（`POST /subscriptions/:id/refresh`）与
+     * `batchRunner.#persist` 都显式防了这个并写明了理由；三处同类路径里
+     * 只有这一处漏了，正是纪律 #4 的形态。
      */
     const byProxy = new Map(results.map((r) => [r.proxyId, r.outcome] as const));
     /*
@@ -395,7 +405,7 @@ export function createAdminRoutes(deps: AdminDeps): Hono {
      * **本机直连**那条（合成 id `__direct__` → `gateway.directEgressIp`）。
      * 先前这里只并 proxies，于是直连的测量被静默丢弃（缺口 #28）。
      */
-    const merged = applyProbeResults(config, byProxy);
+    const merged = applyProbeResults(deps.configOf(), byProxy);
     const changed = merged.changed;
 
     if (changed) {

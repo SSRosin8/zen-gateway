@@ -1,4 +1,6 @@
 import { describe, expect, it } from "vitest";
+import { ConfigPatchSchema } from "../../src/shared/contract.ts";
+import { DIRECT_EGRESS_ID, IdSchema } from "../../src/shared/schema.ts";
 import {
   ConfigSchema,
   CONFIG_VERSION,
@@ -362,5 +364,127 @@ describe("未知字段", () => {
     expect(
       ConfigSchema.safeParse(base({ gateway: { relayToken: "A".repeat(32), prot: 1234 } })).success,
     ).toBe(false);
+  });
+});
+
+/* ================================================================== *
+ * 补丁 schema 也必须 strict（第十轮审核）
+ * ================================================================== */
+
+describe("ConfigPatchSchema 拒绝拼错的字段名", () => {
+  /*
+   * `schema.ts` 每一层都是 `strictObject`，理由是「手工编辑是预期用法，
+   * 拼错字段名必须立刻报错，而不是静默忽略后让人困惑『我明明改了』」。
+   *
+   * 而补丁那一侧先前全用 `z.object` —— 实测六种拼错**全部"成功"**，
+   * 产出一个空 patch，`applyConfigPatch` 返回 `changed: false`，
+   * 响应 `{"ok":true,"changed":false}`。用户看到成功、刷新后值没变。
+   *
+   * 后果比手工编辑更糟：手工编辑至少会在启动时被 `ConfigSchema` 拦下，
+   * 而这条路径上没有任何东西会喊。
+   */
+
+  it.each([
+    ["gateway.maxAttempt（少个 s）", { gateway: { maxAttempt: 5 } }],
+    ["models.freeSuffixes（多个 es）", { models: { freeSuffixes: "-free" } }],
+    ["workers.deletes（多个 s）", { workers: { deletes: ["w1"] } }],
+    ["worker patch 里的 enable（应为 enabled）", { workers: { update: { w1: { enable: false } } } }],
+    ["顶层 proxies（补丁不支持改代理）", { proxies: [] }],
+    ["worker create 里的多余字段", { workers: { create: [{ id: "w9", kind: "anonymous", extra: 1 }] } }],
+  ])("拒绝：%s", (_label, patch) => {
+    expect(ConfigPatchSchema.safeParse(patch).success).toBe(false);
+  });
+
+  it("**凭证不能同时 set 与 clear** —— 「以为清了其实没清」的方向不安全", () => {
+    /*
+     * union 的第一个分支先前会吃掉这个对象并把 `clear` 剥掉，于是用户想清空
+     * 却换成了新值。凭证字段上这个方向是不安全的那一侧。
+     */
+    expect(
+      ConfigPatchSchema.safeParse({
+        gateway: { relayToken: { set: "x".repeat(20), clear: true } },
+      }).success,
+    ).toBe(false);
+  });
+
+  it.each([
+    ["合法的 maxAttempts", { gateway: { maxAttempts: 5 } }],
+    ["合法的 clear", { gateway: { relayToken: { clear: true } } }],
+    ["合法的 set", { gateway: { relayToken: { set: "y".repeat(20) } } }],
+    ["合法的 worker 更新", { workers: { update: { w1: { enabled: false } } } }],
+    ["合法的 worker 删除", { workers: { delete: ["w1"] } }],
+    ["空补丁（什么都不改也合法）", {}],
+  ])("接受：%s", (_label, patch) => {
+    /*
+     * 正例与反例配对 —— 少了这几条，一个「无条件拒绝」的 schema
+     * 也能让上面全部通过，而那会让管理面完全不能写。
+     */
+    expect(ConfigPatchSchema.safeParse(patch).success).toBe(true);
+  });
+});
+
+/* ================================================================== *
+ * 保留 id（第十轮审核）
+ * ================================================================== */
+
+describe("`__direct__` 是保留 id", () => {
+  /*
+   * 它同时是「本机直连出口」的合成键。一个叫这个名字的代理会与直连
+   * 共用身份，三处失效：
+   *
+   * - `applyProbeResults` 把一次测量同时写进 `proxies[i].egressIp` 与
+   *   `gateway.directEgressIp`；
+   * - `POST /api/probe` 按 `proxyId` 建 Map，两条结果只剩一条；
+   * - `DispatcherPool.get()` 也用它做缓存 id → 两条出口共用一个
+   *   dispatcher → **出口隔离失效**，而那是这个项目存在的理由。
+   *
+   * 概率低（`setup.mjs` 生成的 id 带 `controller_` 前缀），但后果与
+   * 「隔离误报」同级，所以在 schema 层拒绝 —— 构造期抛错远好于静默共用出口。
+   */
+
+  it("代理不能用它作 id", () => {
+    const cfg = base({
+      workers: [{ id: "w1", kind: "authenticated", apiKey: "k".repeat(20), proxyId: "__direct__" }],
+      proxies: [
+        {
+          id: "__direct__", name: "冒名", type: "http", host: "127.0.0.1", port: 1080,
+          source: "manual", direct: true, bridgeable: false, egressIp: null,
+        },
+      ],
+    });
+    expect(ConfigSchema.safeParse(cfg).success).toBe(false);
+  });
+
+  it("Worker 也不能用它作 id —— 同一个 IdSchema", () => {
+    const cfg = base({
+      workers: [{ id: "__direct__", kind: "authenticated", apiKey: "k".repeat(20), proxyId: null }],
+    });
+    expect(ConfigSchema.safeParse(cfg).success).toBe(false);
+  });
+
+  it("**别的 id 照常接受** —— 不是把带下划线的都挡掉", () => {
+    /*
+     * 与上两条配对。少了它，一个「拒绝任何含 `_` 的 id」的实现也能让它们通过，
+     * 而 `setup.mjs` 生成的 id 形如 `controller_0aa76b1a…`，那样会全线报错。
+     */
+    const cfg = base({
+      workers: [{ id: "worker_11", kind: "authenticated", apiKey: "k".repeat(20), proxyId: "controller_abc123" }],
+      proxies: [
+        {
+          id: "controller_abc123", name: "正常", type: "http", host: "127.0.0.1", port: 1080,
+          source: "manual", direct: true, bridgeable: false, egressIp: null,
+        },
+      ],
+    });
+    expect(ConfigSchema.safeParse(cfg).success).toBe(true);
+  });
+
+  it("常量与 dispatcher / egress 用的是同一个值", () => {
+    /*
+     * 判据从**唯一真相**取（纪律 #4）：先前 `dispatcher.ts` 写的是字面量
+     * `"__direct__"`，与 `egress.ts` 的常量并行两份。这条钉住它们同源。
+     */
+    expect(DIRECT_EGRESS_ID).toBe("__direct__");
+    expect(IdSchema.safeParse(DIRECT_EGRESS_ID).success).toBe(false);
   });
 });
