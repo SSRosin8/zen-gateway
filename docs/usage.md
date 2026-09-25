@@ -535,9 +535,17 @@ curl -s -H "Authorization: Bearer <apiSecret>" \
 | `x-zen-gateway-attempts` | 这次一共尝试了几个 Worker（成功前重试过时 >1） |
 | `x-zen-gateway-free` | **仅在放行未经在架核验时出现**：`suffix_unverified`／`extra_unverified`。有它 = 那一刻拿不到在架目录，所以只按后缀与名单放行了（见上文「免费判定」） |
 
-前三个头在**成功与失败时都有**（第七轮审核补上了成功路径的 `attempts` ——
-在那之前这句话对第三个头是假的）。`route` 先前只在成功路径设置，而这恰好让它在
-最需要的时候缺席 —— 第五轮审核查出并修了。
+前三个头在**打过上游的请求**上成功与失败都有（第七轮审核补上了成功路径的
+`attempts`，第五轮修了只在成功路径设 `route`）。
+
+> **但网关自己拒掉的请求没有这几个头**（第十轮审核实测）。免费闸门拒绝、
+> 请求体为空／超限／不是 JSON、流式面不支持流式、全员冷却的 `no_worker` ——
+> 这些都在选 Worker 之前或之后直接返回，一个诊断头都不带（实测
+> `403 model_not_allowed` 的响应里没有任何 `x-zen-gateway-*`）。
+>
+> 那不是疏漏：`route`/`worker`/`attempts` 描述的是「这次请求怎么打上游的」，
+> 而这些请求根本没打。要查它们看 `GET /api/stats` 的**网关拒绝**计数
+> （9 个 reason 各自分开，见「运行时数据库」），或日志。
 
 `x-zen-gateway-free` 同理**两条路径都设**，而且失败时更有用：上游返回
 400 `Model is unavailable.` 时，它回答的正是「目录说它在架但上游拒了」还是
