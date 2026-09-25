@@ -11,10 +11,9 @@ import { resolvePort } from "./src/store/port.ts";
  * dev 代理的目标端口**必须与服务端实际监听的一致**，所以从 `store/port.ts`
  * 解析，不写字面量。
  *
- * 这里先前硬编码 `9876`，而服务端端口是可配的（`gateway.port`，本机当前是
- * 9877）。症状比"端口写错"更隐蔽：dev server 照常起、页面照常打开，只是
- * `/health` 与 `/api` 被转发到**另一个进程** —— 本机恰好有旧项目
- * opencode-manager 监听 9876，于是 admin 会拿到那个服务的响应，
+ * 这里先前硬编码默认端口，而服务端端口是可配的（`gateway.port`）。
+ * 症状比"端口写错"更隐蔽：dev server 照常起、页面照常打开，只是
+ * `/health` 与 `/api` 被转发到**另一个进程**，于是 admin 会拿到别的服务的响应，
  * 一个"看起来在工作但数据来自错误后端"的故障，且不报任何错。
  *
  * 用 `fileURLToPath(new URL("."))` 而不是 cwd：vite 可能从别处被调起。

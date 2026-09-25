@@ -34,15 +34,10 @@
  *   - 写盘前把原文件备份成 `config.json.bak`
  *   - `--dry-run` 只打印将要做的改动,不落盘
  *
- * ## 刻意**不**创建 Worker
+ * ## Worker 与出口分开
  *
- * 规划原文写的是「为每个可用出口建匿名 Worker」,而**匿名(免 key)通道
- * 已被上游关闭**(2026-09-16 前后,403 `FreeTierError`,官方反滥用措施)。
- * 建一批没有 key 的 Worker 只会得到一池必定失败的条目 —— `isUsable()`
- * 会把它们全过滤掉,而用户看到「已建 70 个 Worker」却一个都不能用。
- *
- * 所以 setup 只管**出口**(代理与内核),Worker 需要真实 key,由用户提供。
- * 最后会打印下一步怎么加。
+ * setup 只负责发现出口，不猜测用户要创建多少认证或匿名 Worker；已有的两种
+ * Worker 都会原样保留。管理页面和配置补丁提供完整的新增、编辑、删除、绑定。
  */
 
 import { copyFile } from "node:fs/promises";
@@ -51,6 +46,7 @@ import { createHash } from "node:crypto";
 import { dirname, join } from "node:path";
 import { configExists, configPath, loadConfig, saveConfig, ConfigError } from "../src/store/config.ts";
 import { ConfigSchema } from "../src/shared/schema.ts";
+import { isLoopbackAddress } from "../src/server/middleware/loopbackOnly.ts";
 import { safeErrorMessage } from "../src/shared/redact.ts";
 import { isGroupType } from "../src/shared/clashNodeTypes.ts";
 import { dataDirOf } from "./lib/instance.mjs";
@@ -103,6 +99,22 @@ function ensureSlash(base) {
   return u.href;
 }
 
+function isLocalControllerUrl(value) {
+  try {
+    const url = new URL(value);
+    return (
+      url.protocol === "http:" &&
+      url.username === "" &&
+      url.password === "" &&
+      url.search === "" &&
+      url.hash === "" &&
+      (url.hostname === "localhost" || isLoopbackAddress(url.hostname))
+    );
+  } catch {
+    return false;
+  }
+}
+
 async function ask(apiBase, path, secret, timeoutMs = PROBE_TIMEOUT_MS) {
   const res = await fetch(new URL(path, ensureSlash(apiBase)).href, {
     ...(secret ? { headers: { authorization: `Bearer ${secret}` } } : {}),
@@ -148,6 +160,9 @@ async function probeController(apiBase, secret) {
  */
 async function discoverControllers({ explicitApi, explicitSecret, knownSecrets }) {
   if (explicitApi !== undefined) {
+    if (!isLocalControllerUrl(explicitApi)) {
+      throw new Error("Controller 地址必须是本机 http 回环地址，不会向远程地址发送 secret");
+    }
     const r = await probeController(explicitApi, explicitSecret);
     return { found: r.kind === "ok" ? [r] : [], needAuth: r.kind === "auth" ? [r] : [], tried: [explicitApi] };
   }
@@ -723,11 +738,11 @@ async function main() {
   /* ---------- 6. 下一步 ---------- */
   console.log("\n────────────────────────");
 
-  const usableWorkers = parsed.data.workers.filter((w) => w.enabled && w.apiKey.trim() !== "");
+  const usableWorkers = parsed.data.workers.filter((w) => w.enabled && (w.kind === "anonymous" || w.apiKey.trim() !== ""));
   if (usableWorkers.length === 0) {
-    console.log("出口已配好,但还**没有可用的 Worker** —— 转发需要真实的 Zen API key。");
+    console.log("出口已配好,但还没有可用的 Worker —— 可创建认证或匿名 Worker。");
     nextStep(
-      `在 ${configPath(ROOT_ARG)} 的 workers 数组里加(每个 key 一条,绑不同出口才有隔离):\n` +
+      `在 ${configPath(ROOT_ARG)} 的 workers 数组里加(认证 Worker 每个 key 一条，匿名 Worker 可免 key，绑不同出口才有隔离):\n` +
         parsed.data.proxies
           .slice(0, 2)
           .map(
@@ -735,11 +750,11 @@ async function main() {
               `  { "id": "w${i + 1}", "kind": "authenticated", "apiKey": "<你的 key>", "proxyId": "${p.id}" }`,
           )
           .join("\n") +
+        `\n  { "id": "anon-1", "kind": "anonymous", "proxyId": "${parsed.data.proxies[0]?.id ?? "<代理 id>"}" }` +
         `\n\n然后:npm run restart && npm run doctor`,
     );
     console.log(
-      "\n说明:免 key 的匿名通道已被上游关闭(2026-09-16 前后,403 FreeTierError),\n" +
-        "所以 setup 刻意不替你建一批没有 key 的 Worker —— 那些条目一个都不能用。",
+      "\n说明:认证 Worker 需要真实 Zen API key；匿名 Worker 可以在管理页或配置中显式创建。",
     );
   } else {
     nextStep(`npm run restart && npm run doctor\n验证出口隔离:npm run doctor -- --deep`);

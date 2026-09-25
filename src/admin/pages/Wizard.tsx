@@ -57,9 +57,9 @@ export function Wizard({ data }: { data: Overview }) {
       ) : (
         <>
           <p className="text-text-muted">
-            目录拉不到的话免费判定没有依据，转发会被拒。最常见的成因是企业网络
-            对 <Mono>opencode.ai</Mono> 做 TLS 中间人，而 <Strong>Node 不读系统 CA 库</Strong>
-            （<Mono>curl</Mono> 读 —— 所以 curl 通不代表网关通）。
+            目录拉不到时页面无法确认在架模型，转发会按本地免费规则继续尝试，并在响应中标记
+            未核验。最常见的成因是企业网络对 <Mono>opencode.ai</Mono> 做 TLS 中间人，而
+            <Strong>Node 不读系统 CA 库</Strong>（<Mono>curl</Mono> 读 —— 所以 curl 通不代表网关通）。
           </p>
           <Cmd>NODE_EXTRA_CA_CERTS=/etc/ssl/certs/ca-certificates.crt npm start</Cmd>
           <p className="mt-2 text-text-muted">
@@ -99,14 +99,13 @@ export function Wizard({ data }: { data: Overview }) {
             {hasWorker
               ? "已有 Worker 条目，但没有一个在候选池里 —— 多半是缺 API key 或被停用了。"
               : "转发需要真实的 Zen API key。"}
-            <Strong>免 key 的匿名通道已被上游关闭</Strong>（403 <Mono>FreeTierError</Mono>），
-            所以没有 key 的条目一个都不能用。
+            匿名 Worker 可以不填 key；认证 Worker 必须填写真实的 Zen API key。
           </p>
           <p className="mt-2 text-text-muted">
             编辑 <Mono>data/config.json</Mono> 的 <Mono>workers</Mono> 数组，
             每个 key 一条，<Mono>proxyId</Mono> 绑不同的代理才有隔离意义：
           </p>
-          <Cmd>{`{ "id": "w1", "kind": "authenticated", "apiKey": "<你的 key>", "proxyId": "<代理 id>" }`}</Cmd>
+          <Cmd>{`{ "id": "w1", "kind": "authenticated", "apiKey": "<你的 key>", "proxyId": "<代理 id>" }\n{ "id": "anon-1", "kind": "anonymous", "proxyId": "<代理 id>" }`}</Cmd>
           <p className="mt-2 text-text-muted">
             改完跑 <Mono>npm run restart</Mono>（或用「代理池」页的批量探测实测出口）。
           </p>

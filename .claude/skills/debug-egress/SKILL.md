@@ -1,6 +1,6 @@
 ---
 name: debug-egress
-description: Use when egress isolation looks wrong, a bridged proxy fails, Clash selector switching misbehaves, the model catalog is empty, or /v1/models returns 502. Encodes the measured traps on this machine — the corporate CA interception, the GLOBAL selector trap, the mixed-port trap — and the order to check them in. Trigger on 出口, 隔离, Clash, 桥接, selector, 探测, 502, 目录拉不到, egress, bridge, proxy fails, CA.
+description: 出口隔离异常、代理桥接失败、Clash 分组切换不生效、模型目录缺失或模型接口返回 502 时使用。按依赖顺序检查配置、服务、统计库、Worker、控制面、目录和出口，核对企业 CA、实际代理端口、规则分组与真实转发链路，避免把历史本机观察当作当前配置。
 ---
 
 # 排查出口与桥接
@@ -13,11 +13,11 @@ description: Use when egress isolation looks wrong, a bridged proxy fails, Clash
 
 ## 1. 企业 CA 中间人 —— 症状是 `/v1/models` 返回 502
 
-本机 `opencode.ai` 被内网 DNS 解析到内网地址，证书由小米企业 CA 签发。
+历史排查时，`opencode.ai` 被内网 DNS 解析到内网地址，证书由企业 CA 签发。
 
 **关键的不对称：`curl` 能过，Node 不能。** curl 读系统 CA 库
 （`/etc/ssl/certs/ca-certificates.crt`，已含该 CA），而 **Node 用编译进
-二进制的 CA 集合，不读系统库**。
+二进制的 CA 集合，默认不读取该系统库**。显式启用系统 CA 或额外 CA 后行为会不同。
 
 所以「我 curl 验过上游是通的」对网关**完全不成立**（纪律 #8）。修法：
 
@@ -38,13 +38,12 @@ NODE_EXTRA_CA_CERTS=/etc/ssl/certs/ca-certificates.crt npm start
 把它当 selectorGroup 会让所有 Worker 共用一个公网 IP，而**不报任何错** ——
 切换请求成功返回，`now` 却仍是 `DIRECT`。
 
-`setup.mjs` 已按 `mode` 把 GLOBAL 降级（只在没有别的候选时用它并告警）。
-**但那是启发式不是守卫**：一个名字不叫 GLOBAL 却同样不参与选路的分组仍会
-被选中。真正的判据是"规则实际把流量导向哪个分组"，那要解析 `/configs` 的
-rules —— 眼下不做。
+`setup.mjs` 已读取 `/rules`，优先选择 MATCH 兜底指向、且含可出口节点的分组。
+拿不到规则时才退回按模式、名称与节点数择优。`doctor.mjs` 通过
+`ClashController.routedGroups()` 检查所选分组是否参与规则、是否承接兜底。
 
-**兜底手段是 `npm run doctor -- --deep`**：它按实测公网 IP 分组，
-共用出口一定会被报出来。
+`npm run doctor -- --deep` 按实测 IP 分组，可以发现探测链路的共用出口。
+探测和真实转发可能命中不同规则，仍需按第 6 节核对实际连接。
 
 ## 3. `mixed-port` 与配置不一致 —— 控制面通而数据面全挂
 
@@ -79,9 +78,9 @@ doctor 第 5 层会核对。**注意一个已登记的盲区**：它只读 `mixe
 **未探测出 IP 的不算已隔离** ——「不知道」不等于「不同」。
 
 直连出口（`proxyId: null`）也要参与：它与某个代理 NAT 到同一个 IP 恰好是
-"看起来隔离其实没隔离"的形态。**但它的探测结果结构上存不下来**
-（映射到合成 id `__direct__`，而 `config.proxies` 里没有这一行）——
-已登记为缺口 #28。
+"看起来隔离其实没隔离"的形态。`applyProbeResults` 将合成 id
+`DIRECT_EGRESS_ID` 对应的测量写入 `gateway.directEgressIp`，代理测量写入
+`proxies[].egressIp`；失败保留最后一次成功值，不代表该出口目前仍然可用。
 
 ## 6. 探测目标与转发目标不同域
 
@@ -94,8 +93,9 @@ doctor 第 5 层会核对。**注意一个已登记的盲区**：它只读 `mixe
 
 ## 7. 多内核：现在到底走哪个
 
-`npm run doctor` 第 5 层会报**择优结果**（`当前走 <bridgeId>` + 每个内核的
-可用节点数 + 理由），判据与转发路径同一份逻辑（`clash/select.ts`）。
+`npm run doctor` 第 5 层会报本次探活的择优结果、可用节点数和理由
+（`clash/select.ts`）。doctor 是只读工具，不会写回选择；实际转发按配置的
+`activeBridgeId` 与 `resolveProxy` 解析，批测择优时才会把切换结果写回。
 
 几条容易误解的行为：
 
@@ -110,11 +110,11 @@ doctor 第 5 层会核对。**注意一个已登记的盲区**：它只读 `mixe
 - **批测期间锁定单内核**（不变量 #5 的延伸）：一批探测跑到一半换了内核，
   后半批量到的是另一个内核的出口，而隔离报告把两批混在一起按 IP 分组。
 
-## 本机当前状态（会变，用 doctor 复核）
+## 本机状态只从运行环境读取
 
-Clash Verge：`127.0.0.1:9097`，secret `123.`，mixed-port 7897，
-`mode: rule`，selectorGroup `Proxy`。0dcloud 那个内核因**控制面 401 进不去**
-而 `enabled: false` —— 保留而非删除，等拿到密码可直接启用。
+内核地址、端口、secret、启用状态与分组会随本机配置改变，不在 skill 中保存副本。
+凭证只保存在本机配置；排查结果不输出原值。`setup --api` 仅接受本机 HTTP
+回环地址，实际使用以 `npm run setup -- --help` 与 doctor 输出为准。
 
 ## 排查顺序小结
 

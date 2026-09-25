@@ -251,7 +251,7 @@ export function buildUpstreamHeaders(input: BuildUpstreamHeadersInput): Record<s
    * 成本是一次字符串扫描,而收益是错误类型从 502 变成正确的 400,
    * 且消息直接指出是 apiKey 的问题。
    */
-  if (!isSafeHeaderValue(input.apiKey)) {
+  if (input.apiKey.trim() !== "" && !isSafeHeaderValue(input.apiKey)) {
     throw new HeaderValidationError(
       "authorization",
       "Worker 的 apiKey 含控制字符或换行,请检查配置中该 Worker 的 apiKey",
@@ -267,7 +267,7 @@ export function buildUpstreamHeaders(input: BuildUpstreamHeadersInput): Record<s
   }
 
   // 4. 网关掌握的头 —— 放最后,不可被上面任何一步覆盖。
-  out["authorization"] = `Bearer ${input.apiKey}`;
+  if (input.apiKey.trim() !== "") out["authorization"] = `Bearer ${input.apiKey}`;
   out["content-type"] = "application/json";
   out["accept"] = input.streaming ? "text/event-stream" : "application/json";
 

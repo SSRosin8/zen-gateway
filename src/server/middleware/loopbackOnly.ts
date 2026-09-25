@@ -51,7 +51,51 @@ export function isLoopbackAddress(address: string | undefined): boolean {
 export type LoopbackOnlyOptions = {
   /** 注入以便测试,不必起真 socket。 */
   readonly addressOf?: (c: Context) => string | undefined;
+  readonly hostOf?: (c: Context) => string | undefined;
+  readonly originOf?: (c: Context) => string | undefined;
 };
+
+function isLoopbackHost(value: string | undefined): boolean {
+  if (value === undefined || value === "") return false;
+  try {
+    const parsed = new URL(`http://${value}`);
+    // Host 头只允许 authority；拒绝 userinfo、路径与 query，避免把 URL
+    // 语法的宽松解析误当作合法的 HTTP Host。
+    if (
+      parsed.username !== "" ||
+      parsed.password !== "" ||
+      parsed.pathname !== "/" ||
+      parsed.search !== "" ||
+      parsed.hash !== ""
+    ) {
+      return false;
+    }
+    const host = parsed.hostname.replace(/^\[|\]$/g, "");
+    return host === "localhost" || isLoopbackAddress(host);
+  } catch {
+    return false;
+  }
+}
+
+function isAllowedOrigin(value: string | undefined): boolean {
+  // 没有 Origin 的同源/非浏览器请求兼容放行；显式空值是畸形来源，拒绝。
+  if (value === undefined) return true;
+  if (value === "") return false;
+  try {
+    const origin = new URL(value);
+    return (
+      (origin.protocol === "http:" || origin.protocol === "https:") &&
+      origin.username === "" &&
+      origin.password === "" &&
+      origin.pathname === "/" &&
+      origin.search === "" &&
+      origin.hash === "" &&
+      isLoopbackHost(origin.host)
+    );
+  } catch {
+    return false;
+  }
+}
 
 /**
  * 标记属性 —— 让装配期断言能**按身份**认出这道闸门。
@@ -80,6 +124,8 @@ export function isLoopbackGuard(handler: unknown): boolean {
  */
 export function loopbackOnly(options: LoopbackOnlyOptions = {}): MiddlewareHandler {
   const addressOf = options.addressOf ?? ((c: Context) => getConnInfo(c).remote.address);
+  const hostOf = options.hostOf ?? ((c: Context) => c.req.header("host"));
+  const originOf = options.originOf ?? ((c: Context) => c.req.header("origin"));
 
   const guard: MiddlewareHandler = async (c, next) => {
     let address: string | undefined;
@@ -90,7 +136,22 @@ export function loopbackOnly(options: LoopbackOnlyOptions = {}): MiddlewareHandl
       address = undefined;
     }
 
-    if (!isLoopbackAddress(address)) {
+    let host: string | undefined;
+    let origin: string | undefined;
+    try {
+      host = hostOf(c);
+      origin = originOf(c);
+    } catch {
+      // 取来源头失败时按不可信处理,不把中间件/测试注入异常变成放行。
+      host = undefined;
+      origin = "\u0000";
+    }
+
+    if (
+      !isLoopbackAddress(address) ||
+      (host !== undefined && !isLoopbackHost(host)) ||
+      !isAllowedOrigin(origin)
+    ) {
       /*
        * 不回显对端地址。
        *

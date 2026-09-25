@@ -49,12 +49,19 @@ export class SelectorLock {
    * 串行执行 `task`。
    *
    * `task` 应当只包含「切 selector + 建立连接」,不要把消费响应体也放进来。
+   * 若信号在排队期间取消,任务不会开始；这点必须在锁层处理,否则客户端断开
+   * 后排队的请求仍会切换全局 selector,造成与任何实际请求都无关的出口抖动。
    */
-  run<T>(task: () => Promise<T>): Promise<T> {
+  run<T>(task: () => Promise<T>, signal?: AbortSignal): Promise<T> {
     this.#depth += 1;
 
+    const execute = (): Promise<T> => {
+      if (signal?.aborted) return Promise.reject(signal.reason ?? new DOMException("操作已取消", "AbortError"));
+      return task();
+    };
+
     // 接在当前尾部之后;用 then 的两个分支保证前一个任务失败也不会断链。
-    const result = this.#tail.then(task, task);
+    const result = this.#tail.then(execute, execute);
 
     // 尾部换成「本任务完成」,且吞掉结果与异常 ——
     // 否则一次失败会让后续所有任务都被同一个 rejection 拖挂。

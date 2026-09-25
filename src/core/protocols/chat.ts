@@ -32,6 +32,10 @@ export const chatSurface: ProtocolSurface = {
     return undefined;
   },
 
+  responseIdFrom(): string | null {
+    return null;
+  },
+
   /** 本面无特有头;鉴权与 OpenCode 身份头由 upstream/headers.ts 统一加。 */
   extraUpstreamHeaders(): Record<string, string> {
     return {};

@@ -2,7 +2,9 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { createServer, type Server } from "node:http";
 import { once } from "node:events";
 import { createApp } from "../../src/server/app.ts";
+import { applyConfigPatch } from "../../src/server/admin/patch.ts";
 import { EgressService } from "../../src/core/proxy/egress.ts";
+import { Scheduler } from "../../src/core/routing/scheduler.ts";
 import { ConfigSchema, type Config } from "../../src/shared/schema.ts";
 import { ProtocolRegistry } from "../../src/core/protocols/registry.ts";
 import { chatSurface } from "../../src/core/protocols/chat.ts";
@@ -470,6 +472,15 @@ describe("鉴权与请求校验", () => {
     expect(upstreamCalls).toHaveLength(0);
   });
 
+  it("超长模型名的拒绝响应有界，不原样回显请求体", async () => {
+    const model = "paid-model-" + "x".repeat(2 * 1024 * 1024);
+    const res = await app().request("/v1/chat/completions", relay({ model, messages: [] }));
+    expect(res.status).toBe(403);
+    const body = await res.text();
+    expect(body.length).toBeLessThan(2_000);
+    expect(body).not.toContain(model);
+  });
+
   it("请求头含 CR/LF 时返回 400，不是 500", async () => {
     /*
      * 这类请求是**客户端**的错。让 undici 抛异常会变成 500，
@@ -499,21 +510,78 @@ describe("鉴权与请求校验", () => {
     expect(upstreamCalls).toHaveLength(0);
   });
 
-  it("Worker 缺 key 时不被选中，并如实说明", async () => {
+  it("匿名 Worker 缺 key 时仍可被选中，并且不发送 Authorization", async () => {
     /*
-     * 上游已于 2026-09-16 前后关闭免鉴权免费额度（403 FreeTierError），
-     * 没有 key 的 Worker 发出去必定失败。放进候选链只会白占一次尝试，
-     * 并把真实原因（没配 key）埋进重试日志。
+     * 匿名身份的配置归一化保证 key 为空；这条测试钉住它仍可进入候选链，
+     * 且上游请求不会携带空 Authorization。
      */
     const cfg = config({
       workers: [{ id: "w1", name: "", kind: "anonymous", apiKey: "", enabled: true, proxyId: null }],
     });
     const res = await app(cfg).request("/v1/chat/completions", relay({ model: "big-pickle", messages: [] }));
 
-    expect(res.status).toBe(503);
-    const body = (await res.json()) as { error: { message: string } };
-    expect(body.error.message).toContain("缺少上游 API key");
-    expect(upstreamCalls).toHaveLength(0);
+    expect(res.status).toBe(200);
+    expect(upstreamCalls[0]?.headers.authorization).toBeUndefined();
+    expect(upstreamCalls).toHaveLength(1);
+  });
+
+  it("Responses 首次响应的 id 会绑定实际 Worker，后续 previous_response_id 续回同一 Worker", async () => {
+    let responseCount = 0;
+    handler = (_req, res) => {
+      responseCount += 1;
+      res.setHeader("content-type", "application/json");
+      res.end(JSON.stringify({ id: responseCount === 1 ? "resp_first_not_real" : "resp_second_not_real", output: [] }));
+    };
+
+    let current = config({
+      workers: [
+        { id: "w1", name: "", kind: "authenticated", apiKey: "fake-key-w1-not-real", enabled: false, proxyId: null },
+        { id: "w2", name: "", kind: "authenticated", apiKey: "fake-key-w2-not-real", enabled: true, proxyId: null },
+      ],
+    });
+    const gateway = createApp({ configOf: () => current, egress, log: () => {} });
+
+    const first = await gateway.request("/v1/responses", relay({ model: "big-pickle", input: "first" }));
+    expect(first.status).toBe(200);
+    await first.text();
+    expect(upstreamCalls[0]?.headers.authorization).toBe("Bearer fake-key-w2-not-real");
+
+    current = ConfigSchema.parse({
+      ...current,
+      workers: current.workers.map((w) => ({ ...w, enabled: true })),
+    });
+    const second = await gateway.request(
+      "/v1/responses",
+      relay({ model: "big-pickle", input: "second", previous_response_id: "resp_first_not_real" }),
+    );
+    expect(second.status).toBe(200);
+    await second.text();
+    expect(upstreamCalls[1]?.headers.authorization).toBe("Bearer fake-key-w2-not-real");
+  });
+
+  it("Responses 流命中失效推理时不学习输出 id", async () => {
+    handler = (_req, res) => {
+      res.writeHead(200, { "content-type": "text/event-stream" });
+      res.end(
+        'data: {"type":"response.output_text.delta","delta":"encrypted_content was not issued to this caller"}\n\n' +
+          'data: {"type":"response.completed","response":{"id":"resp_stale_not_real"}}\n\n' +
+          "data: [DONE]\n\n",
+      );
+    };
+
+    const cfg = config({
+      workers: [{ id: "w1", name: "", kind: "authenticated", apiKey: "fake-key-w1-not-real", enabled: true, proxyId: null }],
+    });
+    const scheduler = new Scheduler();
+    const gateway = createApp({ configOf: () => cfg, egress, scheduler, log: () => {} });
+    const response = await gateway.request(
+      "/v1/responses",
+      relay({ model: "big-pickle", input: "first", stream: true }),
+    );
+    expect(response.status).toBe(200);
+    await response.text();
+    // 输出 id 只在完整且未命中失效推理时绑定；删除 scanner.hit() 守卫会留下 1 条会话亲和。
+    expect(scheduler.snapshot(cfg, Date.now()).affinity.sessions).toBe(0);
   });
 
   it("停用的 Worker 不被选中", async () => {
@@ -735,4 +803,40 @@ describe("请求体上限真的限制读入，不是读完再量", () => {
     const json = (await res.json()) as { error?: { message?: string } };
     expect(json.error?.message).toContain("请求体为空");
   });
+});
+
+describe("匿名身份切换的实际请求头", () => {
+  it.each(["/v1/chat/completions", "/v1/responses", "/v1/messages"])(
+    "%s 从认证切到匿名后不再发送旧 key",
+    async (path) => {
+      let current = config();
+      const gateway = createApp({ configOf: () => current, egress, log: () => {} });
+      const body = { model: "big-pickle", messages: [], input: "test", max_tokens: 8 };
+      const clientHeaders = { "x-api-key": "fake-client-key-not-real" };
+
+      const first = await gateway.request(path, relay(body, clientHeaders));
+      expect(first.status).toBe(200);
+      await first.text();
+      expect(upstreamCalls).toHaveLength(1);
+      expect(upstreamCalls[0]!.headers.authorization).toBe("Bearer fake-key-1-not-real");
+      if (path === "/v1/messages") {
+        expect(upstreamCalls[0]!.headers["x-api-key"]).toBe("fake-key-1-not-real");
+      }
+
+      // 只切 kind，保留旧 key 让生产配置归一化负责清理；不在 fixture 里先清空。
+      const changed = applyConfigPatch(current, { workers: { update: { w1: { kind: "anonymous" } } } });
+      expect(changed.ok).toBe(true);
+      if (!changed.ok) throw new Error(changed.failure.message);
+      current = changed.config;
+
+      const second = await gateway.request(path, relay(body, clientHeaders));
+      expect(second.status).toBe(200);
+      await second.text();
+      expect(upstreamCalls).toHaveLength(2);
+      expect(upstreamCalls[1]!.headers.authorization).toBeUndefined();
+      expect(upstreamCalls[1]!.headers["x-api-key"]).toBeUndefined();
+      expect(JSON.stringify(upstreamCalls[1]!.headers)).not.toContain("fake-key-1-not-real");
+      expect(JSON.stringify(upstreamCalls[1]!.headers)).not.toContain("fake-client-key-not-real");
+    },
+  );
 });

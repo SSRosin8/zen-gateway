@@ -97,6 +97,16 @@ describe("apiKey 的校验与自查消息", () => {
     // 面自己的头照常生效（它不与网关掌握的头同名）。
     expect(h["x-api-key"]).toBe(FAKE_KEY);
   });
+
+  it("匿名 Worker 的空 key 不生成空 Authorization", () => {
+    const h = buildUpstreamHeaders({ clientHeaders: {}, apiKey: "", streaming: false, newId: fixedId });
+    expect(h.authorization).toBeUndefined();
+  });
+
+  it("匿名 Worker 的空白 key 也不生成 Authorization", () => {
+    const h = buildUpstreamHeaders({ clientHeaders: {}, apiKey: "   ", streaming: false, newId: fixedId });
+    expect(h.authorization).toBeUndefined();
+  });
 });
 
 describe("剥离不可转发的头", () => {

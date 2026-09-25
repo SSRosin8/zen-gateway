@@ -64,17 +64,13 @@ export function isWorkerReady(cooldownUntil: number, now: number): boolean {
 /**
  * Worker 是否可用于转发。
  *
- * 必须有上游 key。schema 里 `kind: "anonymous"` 允许空 apiKey,那是为
- * 「免鉴权免费额度」留的形态 —— 而上游已于 2026-09-16 前后关闭该通道
- * (免 key 请求免费模型返回 403 FreeTierError)。没有 key 的 Worker 发出去
- * 必定失败,放进候选链只会白占一次尝试,并把真实原因(没配 key)埋进重试日志。
- *
- * 按「有没有 key」判断而不按 kind:kind 是用户的声明,key 是能不能用的事实,
- * 后者才是调度该依据的。
+ * 认证 Worker 必须有上游 key；匿名 Worker 的空 key 是合法的免鉴权请求。
+ * 两种类型都要先满足 `enabled`，再进入候选池。按 kind 处理是必要的：
+ * 匿名 Worker 的“无 key”正是它与认证 Worker 的行为差异。
  */
 export function isUsable(worker: Worker): boolean {
   if (!worker.enabled) return false;
-  return worker.apiKey.trim() !== "";
+  return worker.kind === "anonymous" || worker.apiKey.trim() !== "";
 }
 
 export class WorkerPool {
