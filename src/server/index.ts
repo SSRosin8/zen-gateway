@@ -15,6 +15,9 @@ import { BatchProbeRunner } from "./admin/batchRunner.ts";
 import { safeErrorMessage } from "../shared/redact.ts";
 import { probeBridges } from "../core/proxy/clash/select.ts";
 import { ClashController } from "../core/proxy/clash/controller.ts";
+import { ensureCatalog } from "./routes/models.ts";
+import { probeOpenCodeVersion, writeOpenCodeConfig } from "./admin/opencode.ts";
+import { projectRoot } from "../store/paths.ts";
 
 /**
  * 服务入口。先加载配置、后监听端口：否则坏配置会先占端口再崩，
@@ -192,6 +195,8 @@ async function main(): Promise<void> {
     });
   }
 
+  const openCodeRoot = projectRoot();
+
   const app = createApp({
     configOf: () => config,
     egress,
@@ -209,6 +214,11 @@ async function main(): Promise<void> {
       // 与转发面同一个实例（不变量 #7 的延伸）。
       egress,
       ...(batchRunner !== undefined ? { batch: batchRunner } : {}),
+      // 只读重读：诊断不能顺手修权限，否则「权限过松」永远报不出来。
+      diskConfigCheck: async () => (await loadConfig(undefined, { readOnly: true })).permissionIssues,
+      ensureCatalog: async () =>
+        (await ensureCatalog(config, catalog, (cfg) => egress.upstreamDeps(cfg))).snapshot,
+      openCode: { root: openCodeRoot, probeVersion: probeOpenCodeVersion },
       // `/health` 的体从同一处构造（纪律 #4）。
       health: () => buildHealth(storeWriteFailures()),
       ...(stats !== undefined ? { stats } : {}),
@@ -227,6 +237,17 @@ async function main(): Promise<void> {
     console.log(`zen-gateway 已启动 → http://${hostname}:${info.port}`);
     if (created) {
       console.log("已生成默认配置与 Relay Token;运行 npm run status 查看。");
+      // 首启顺带生成项目级 opencode.json；已有文件绝不覆盖。日志不含 token。
+      void writeOpenCodeConfig(
+        { root: openCodeRoot, port, relayToken: config.gateway.relayToken, probeVersion: probeOpenCodeVersion },
+        { onlyIfMissing: true },
+      )
+        .then((outcome) => {
+          if (!outcome.ok) console.error(`opencode.json 未生成:${outcome.reason}`);
+          else if (outcome.action === "created") console.log("已生成项目根 opencode.json(指向本网关)。");
+          else console.log("项目根已有 opencode.json,未改动;可在管理后台一键更新。");
+        })
+        .catch((err) => console.error(`opencode.json 未生成:${safeErrorMessage(err)}`));
     }
 
     /*

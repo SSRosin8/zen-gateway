@@ -69,7 +69,7 @@ export type RunResult = { code: number; stdout: string; stderr: string };
 export async function run(script: string, args: string[] = [], env: Record<string, string> = {}): Promise<RunResult> {
   try {
     const { stdout, stderr } = await execFileAsync(process.execPath, [script, ...args], {
-      env: { ...process.env, ZG_DATA_DIR: dataDir, ZG_PORT: String(port), ...env },
+      env: { ...process.env, ZG_DATA_DIR: dataDir, ZG_PROJECT_ROOT: dataDir, ZG_PORT: String(port), ...env },
       cwd: PROJECT,
     });
     return { code: 0, stdout, stderr };
@@ -101,7 +101,7 @@ export async function writeConfig(overrides: Record<string, unknown> = {}): Prom
 export async function startServer(env: Record<string, string> = {}): Promise<number> {
   const child = spawn(process.execPath, [ENTRY], {
     cwd: PROJECT,
-    env: { ...process.env, ZG_DATA_DIR: dataDir, ZG_PORT: String(port), ...env },
+    env: { ...process.env, ZG_DATA_DIR: dataDir, ZG_PROJECT_ROOT: dataDir, ZG_PORT: String(port), ...env },
     stdio: "ignore",
     detached: true,
   });

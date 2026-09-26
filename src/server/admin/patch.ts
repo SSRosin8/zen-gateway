@@ -1,6 +1,14 @@
 import type { Config, Worker } from "../../shared/schema.ts";
 import { ConfigSchema, WorkerSchema } from "../../shared/schema.ts";
-import type { ConfigPatch, SecretPatch } from "../../shared/contract.ts";
+import type { ConfigPatch } from "../../shared/contract.ts";
+import { generateRelayToken } from "../../store/config.ts";
+import {
+  applyClashPatch,
+  applyProxiesPatch,
+  applyRoutingPatch,
+  applySecret,
+  applySubscriptionsPatch,
+} from "./patchSections.ts";
 
 /**
  * 把 `ConfigPatch` 应用到配置上的纯函数：合并规则里「错了不报错、只悄悄丢东西」的几条
@@ -18,20 +26,15 @@ export type PatchResult =
   | { ok: false; failure: PatchFailure };
 
 /**
- * 凭证三态：缺席不动、`{set}` 换值、`{clear:true}` 清空。清空必须显式（见 `SecretPatchSchema`）：
- * 前端拿不到原值，`""` 若表示清空，未填的输入框会静默抹掉 key。`{set: ""}` 交给 schema 处理。
- */
-function applySecret(current: string, patch: SecretPatch | undefined): string {
-  if (patch === undefined) return current;
-  if ("clear" in patch) return "";
-  return patch.set;
-}
-
-/**
  * 应用配置补丁，顺序为 create → update → delete：同一请求内可新建后立刻修改，
  * 「删掉又同名新建」的净效果是新建。
  */
-export function applyConfigPatch(config: Config, patch: ConfigPatch): PatchResult {
+export function applyConfigPatch(
+  config: Config,
+  patch: ConfigPatch,
+  // 注入仅为可测；生产与首启用同一个生成器。
+  newRelayToken: () => string = generateRelayToken,
+): PatchResult {
   // 深拷贝，不改原对象：`Scheduler.#syncedFrom` 用引用比较判断配置是否变化。
   const next = structuredClone(config) as Config;
 
@@ -48,9 +51,13 @@ export function applyConfigPatch(config: Config, patch: ConfigPatch): PatchResul
       next.gateway.bodyTimeoutMs = g.bodyTimeoutMs;
     }
     if (g.relayToken !== undefined) {
-      next.gateway.relayToken = applySecret(next.gateway.relayToken, g.relayToken);
+      next.gateway.relayToken =
+        "rotate" in g.relayToken ? newRelayToken() : applySecret(next.gateway.relayToken, g.relayToken);
     }
   }
+
+  /* ---- routing ---- */
+  if (patch.routing !== undefined) applyRoutingPatch(next, patch.routing);
 
   /* ---- models ---- */
   if (patch.models !== undefined) {
@@ -144,6 +151,16 @@ export function applyConfigPatch(config: Config, patch: ConfigPatch): PatchResul
       }
     }
   }
+
+  /*
+   * 内核、代理、订阅排在 Worker 之后：同一请求里先把 Worker 改绑再删它原先的代理是合法的。
+   * 顺序为 clash → subscriptions → proxies，与引用方向相反。
+   */
+  const sectionFailure =
+    (patch.clash !== undefined ? applyClashPatch(next, patch.clash) : null) ??
+    (patch.subscriptions !== undefined ? applySubscriptionsPatch(next, patch.subscriptions) : null) ??
+    (patch.proxies !== undefined ? applyProxiesPatch(next, patch.proxies) : null);
+  if (sectionFailure !== null) return { ok: false, failure: sectionFailure };
 
   /*
    * 全量过 `ConfigSchema`：其 `superRefine` 带引用完整性，指向已删除代理的 Worker

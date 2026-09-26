@@ -1,5 +1,6 @@
 import type { Hono } from "hono";
 import { createApp } from "../../../src/server/app.ts";
+import type { AdminDeps } from "../../../src/server/routes/admin.ts";
 import { EgressService } from "../../../src/core/proxy/egress.ts";
 import { ModelCatalog } from "../../../src/core/models/catalog.ts";
 import { Scheduler } from "../../../src/core/routing/scheduler.ts";
@@ -80,6 +81,8 @@ export function makeApp(
     probeServices?: Array<{ url: string; extract: (text: string) => string | null }>;
     /** 注入假订阅 fetch —— 不打真实网络。 */
     subscriptionFetch?: { fetchImpl?: typeof fetch; now?: () => number; userAgent?: string };
+    /** 追加的管理面依赖（opencode 根目录、批测执行器、诊断钩子等）。 */
+    admin?: Partial<AdminDeps>;
   } = {},
 ) {
   let current = config;
@@ -151,10 +154,11 @@ export function makeApp(
       }),
       ...(opts.stats === false ? {} : { stats }),
       ...(opts.subscriptionFetch === undefined ? {} : { subscriptionFetch: opts.subscriptionFetch }),
+      ...opts.admin,
     },
   });
 
-  return { app, scheduler, catalog, getConfig: () => current, seenSinceDay: seen };
+  return { app, scheduler, catalog, egress, getConfig: () => current, seenSinceDay: seen };
 }
 
 export async function get(app: Hono, path: string) {
@@ -169,4 +173,13 @@ export async function patch(app: Hono, body: unknown) {
     body: JSON.stringify(body),
   });
   return { status: res.status, body: (await res.json()) as Record<string, unknown> };
+}
+
+export async function post(app: Hono, path: string, body?: unknown) {
+  const res = await app.request(`http://127.0.0.1${path}`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    ...(body === undefined ? {} : { body: typeof body === "string" ? body : JSON.stringify(body) }),
+  });
+  return { status: res.status, text: await res.clone().text(), body: (await res.json()) as Record<string, unknown> };
 }

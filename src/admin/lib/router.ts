@@ -19,22 +19,24 @@
  *
  * 需要的全部功能是「读写 hash + 订阅变化」，实现是下面这几十行。
  * 一个路由库要带来它自己的一套概念（loader、嵌套路由、Outlet），
- * 而这里只有 6 个平级页面。
+ * 而这里只有几个平级页面。
  */
 
 import { useCallback, useEffect, useState } from "react";
 
-/** 六个页面。**这份清单是唯一真相** —— 导航与路由分派都从它推导。 */
-export const PAGES = ["overview", "gateway", "proxy", "workers", "models", "usage"] as const;
+/** 全部页面，按侧栏顺序。**这份清单是唯一真相** —— 导航与路由分派都从它推导。 */
+export const PAGES = ["start", "overview", "gateway", "proxy", "workers", "models", "usage", "diagnostics"] as const;
 export type PageId = (typeof PAGES)[number];
 
 export const PAGE_LABEL: Record<PageId, string> = {
+  start: "快速开始",
   overview: "概览",
   gateway: "网关",
   proxy: "代理池",
   workers: "Worker",
   models: "模型",
   usage: "用量",
+  diagnostics: "诊断",
 };
 
 export type ViewState = {
@@ -63,7 +65,9 @@ const DEFAULTS: ViewState = {
  * 解析 hash。
  *
  * 形如 `#proxy?tab=isolation&q=hk&page=2`。**未知页面回落到 overview** ——
- * 一个手打错的 URL 不该显示空白页；而回落到第一页是用户能理解的结果。
+ * 一个手打错的 URL 不该显示空白页；而回落到概览是用户能理解的结果。
+ * 空 hash 同样解析为 overview；首启未完成时改去快速开始由 `App` 决定，
+ * 因为那取决于运行数据，不是 URL 本身的含义。
  */
 export function parseHash(hash: string): ViewState {
   const raw = hash.replace(/^#\/?/, "");

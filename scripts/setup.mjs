@@ -16,13 +16,15 @@
 
 import { copyFile } from "node:fs/promises";
 import { fileURLToPath } from "node:url";
-import { createHash } from "node:crypto";
 import { dirname, join } from "node:path";
 import { configExists, configPath, loadConfig, saveConfig, ConfigError } from "../src/store/config.ts";
-import { ConfigSchema } from "../src/shared/schema.ts";
-import { isLoopbackAddress } from "../src/server/middleware/loopbackOnly.ts";
+import {
+  discoverControllers,
+  mergeControllerImport,
+  NonLocalControllerError,
+  planController,
+} from "../src/core/proxy/clash/setupImport.ts";
 import { safeErrorMessage } from "../src/shared/redact.ts";
-import { ClashController, ControllerError } from "../src/core/proxy/clash/controller.ts";
 import { dataDirOf } from "./lib/instance.mjs";
 import { detail, heading, line, nextStep } from "./lib/report.mjs";
 import { checkArgs } from "./lib/args.mjs";
@@ -44,154 +46,7 @@ checkArgs({
 
 const DRY_RUN = process.argv.includes("--dry-run");
 
-/** 候选 Controller 端口 —— 固定白名单，仅 127.0.0.1。刻意短，探不到用 `--api` 手填。 */
-const CANDIDATE_PORTS = [9090, 9097, 9091, 9093, 6170];
-
-/** 每个候选的探测超时（本机通信）。 */
-const PROBE_TIMEOUT_MS = 1_500;
-
-function isLocalControllerUrl(value) {
-  try {
-    const url = new URL(value);
-    return (
-      url.protocol === "http:" &&
-      url.username === "" &&
-      url.password === "" &&
-      url.search === "" &&
-      url.hash === "" &&
-      (url.hostname === "localhost" || isLoopbackAddress(url.hostname))
-    );
-  } catch {
-    return false;
-  }
-}
-
-/**
- * 探一个候选地址：`ok` 连上且鉴权过、`auth` 连上但要 secret、`absent` 没人监听。
- * `auth` 不能合进 `absent`，否则配了 secret 的 Clash 会被报成「没找到」。
- */
-async function probeController(apiBase, secret) {
-  const controller = new ClashController(
-    { id: "setup-probe", apiBase, apiSecret: secret ?? "" },
-    { timeoutMs: PROBE_TIMEOUT_MS },
-  );
-  try {
-    const { version, isMeta } = await controller.version();
-    return { kind: "ok", apiBase, secret: secret ?? "", version, isMeta };
-  } catch (err) {
-    if (err instanceof ControllerError && err.kind === "auth") return { kind: "auth", apiBase };
-    return { kind: "absent", apiBase, why: safeErrorMessage(err) };
-  }
-}
-
-/** 找出本机的 Controller。`--api` 显式指定时只探那一个。 */
-async function discoverControllers({ explicitApi, explicitSecret, knownSecrets }) {
-  if (explicitApi !== undefined) {
-    if (!isLocalControllerUrl(explicitApi)) {
-      throw new Error("Controller 地址必须是本机 http 回环地址，不会向远程地址发送 secret");
-    }
-    const r = await probeController(explicitApi, explicitSecret);
-    return { found: r.kind === "ok" ? [r] : [], needAuth: r.kind === "auth" ? [r] : [], tried: [explicitApi] };
-  }
-
-  const found = [];
-  const needAuth = [];
-  const tried = [];
-
-  for (const port of CANDIDATE_PORTS) {
-    const apiBase = `http://127.0.0.1:${port}`;
-    tried.push(apiBase);
-
-    // 先免 secret 试，再用配置里已有的 secret 逐个试 —— 那是我们自己存的，不是猜测。
-    let result = await probeController(apiBase, undefined);
-    if (result.kind === "auth") {
-      for (const secret of knownSecrets) {
-        if (secret === "") continue;
-        const retry = await probeController(apiBase, secret);
-        if (retry.kind === "ok") {
-          result = retry;
-          break;
-        }
-      }
-    }
-
-    if (result.kind === "ok") found.push(result);
-    else if (result.kind === "auth") needAuth.push(result);
-  }
-
-  return { found, needAuth, tried };
-}
-
-/**
- * 读取配置内核所需的全部信息，解析复用 `ClashController`，与 doctor 和转发路径
- * 同一份实现（纪律 #4）。
- */
-async function readController(ctrl) {
-  const controller = new ClashController({ id: "setup", apiBase: ctrl.apiBase, apiSecret: ctrl.secret });
-
-  /*
-   * 混合端口只能问内核；读不到时为 null，由调用方拒绝配置。`socks-port` / `port`
-   * 不能替代：桥接 dispatcher 使用 HTTP CONNECT。
-   * 选路模式读不到时按 `rule`（内核默认，也是保守的一侧，见 `pickSelector`）。
-   */
-  const runtime = await controller.runtimeConfig().catch(() => ({ mode: null, mixedPort: null }));
-
-  // 节点列表是必需的：读不到直接失败，由调用方报告并跳过这个内核。
-  const [selectors, nodes] = await Promise.all([controller.selectors(), controller.nodes()]);
-
-  // 规则的目标分组，`GLOBAL` 陷阱的直接证据；旧内核可能没有 `/rules`，拿不到给 null。
-  const routed = await controller.routedGroups().catch(() => null);
-
-  return { mixedPort: runtime.mixedPort, mode: runtime.mode ?? "rule", selectors, nodes, routed };
-}
-
-/**
- * 挑一个 selector 分组。
- *
- * rule 模式下 `GLOBAL` 不参与选路，切它不改变实际出口：所有 Worker 共用同一个
- * 公网 IP，且不报任何错（只有 `doctor --deep` 能发现）。只按节点数排序时
- * 它可能因名称 tiebreak 被选中。
- *
- * 判据是规则实际导向哪里：读 `/rules`（`routedGroups()`），不在规则目标里的分组
- * 不参与选路。拿不到 `/rules` 时降级为按名字把 `GLOBAL` 排到最后。
- * `global` 模式下相反，`GLOBAL` 才是生效的那个。
- */
-function pickSelector(selectors, nodes, mode, routed) {
-  const nodeNames = new Set(nodes.map((n) => n.name));
-  const ruleMode = mode !== "global";
-
-  /*
-   * 优先级（小者优先）：0 = `MATCH` 兜底目标，1 = 出现在某条规则里，
-   * 2 = 规则里没出现（rule 模式下切了不生效）。拿不到 `/rules` 时退回按名字降级。
-   */
-  const rank = (name) => {
-    if (!ruleMode) return name === "GLOBAL" ? 0 : 1;
-    if (routed === null) return name === "GLOBAL" ? 2 : 1;
-    if (routed.fallback === name) return 0;
-    return routed.targets.has(name) ? 1 : 2;
-  };
-
-  const scored = selectors
-    .map((s) => ({
-      selector: s,
-      usable: s.options.filter((o) => nodeNames.has(o)).length,
-      rank: rank(s.name),
-    }))
-    .filter((x) => x.usable > 0)
-    .sort(
-      (a, b) => a.rank - b.rank || b.usable - a.usable || a.selector.name.localeCompare(b.selector.name),
-    );
-  return scored[0] ?? null;
-}
-
-/**
- * 代理 id，从节点名稳定推导：重跑 setup 时同一节点要落到同一个 id，
- * 否则 Worker 仍绑着陈旧条目。用 sha256 是因为节点名含空格、emoji 等
- * `IdSchema` 不允许的字符；前缀 `controller_` 与既有配置一致。
- */
-function proxyIdFor(nodeName) {
-  return `controller_${createHash("sha256").update(nodeName).digest("hex").slice(0, 24)}`;
-}
+// 探测、选分组与合并的实现在 `src/core/proxy/clash/setupImport.ts`，与管理面 `/api/clash/*` 共用。
 
 function argValue(flag) {
   const i = process.argv.indexOf(flag);
@@ -248,14 +103,26 @@ async function main() {
   const explicitApi = argValue("--api");
   const explicitSecret = argValue("--secret");
   // 已有配置里的 secret 是我们自己存的,不是猜测 —— 见 discoverControllers。
-  const knownSecrets = [...new Set(config.clash.bridges.map((b) => b.apiSecret))];
-  if (explicitSecret !== undefined) knownSecrets.unshift(explicitSecret);
+  const knownSecrets = config.clash.bridges.map((b) => b.apiSecret);
 
-  const { found, needAuth, tried } = await discoverControllers({
-    explicitApi,
-    explicitSecret,
-    knownSecrets,
-  });
+  let discovered;
+  try {
+    discovered = await discoverControllers({
+      ...(explicitApi !== undefined ? { explicitApi } : {}),
+      ...(explicitSecret !== undefined ? { secret: explicitSecret } : {}),
+      knownSecrets,
+    });
+  } catch (err) {
+    if (err instanceof NonLocalControllerError) {
+      line("fail", err.message);
+      process.exitCode = 1;
+      return;
+    }
+    throw err;
+  }
+  const { tried } = discovered;
+  const found = discovered.results.filter((r) => r.kind === "ok");
+  const needAuth = discovered.results.filter((r) => r.kind === "auth");
   detail(`已探测(仅 127.0.0.1):${tried.join(", ")}`);
 
   if (found.length === 0) {
@@ -287,44 +154,22 @@ async function main() {
   heading("3. 发现 Selector 与节点");
   const plans = [];
   for (const ctrl of found) {
-    let info;
-    try {
-      info = await readController(ctrl);
-    } catch (err) {
-      line("fail", `${ctrl.apiBase}:${safeErrorMessage(err)}`);
+    const outcome = await planController(ctrl);
+    if (!outcome.ok) {
+      line("fail", `${ctrl.apiBase}:${outcome.reason}`);
+      if (outcome.detail !== undefined) detail(outcome.detail);
       continue;
     }
-
-    if (info.mixedPort === null) {
-      // 拿不到端口就不能配这个内核，猜默认值会让桥接静默连到没人监听的端口。
-      line("fail", `${ctrl.apiBase}:无法从 /configs 读出可用的代理端口`);
-      detail("未读到有效的 mixed-port —— 桥接需要 HTTP 混合端口；socks-port / port 不能替代，请在 Clash 中开启 mixed-port。");
-      continue;
-    }
-
-    const picked = pickSelector(info.selectors, info.nodes, info.mode, info.routed);
-    if (picked === null) {
-      line("fail", `${ctrl.apiBase}:没有找到含可出口节点的 Selector 分组`);
-      detail(`分组 ${info.selectors.length} 个,节点 ${info.nodes.length} 个,但两者无交集。`);
-      continue;
-    }
-
+    const plan = outcome.plan;
     line(
       "pass",
-      `${ctrl.apiBase}:分组「${picked.selector.name}」含 ${picked.usable} 个可用节点,代理端口 ${info.mixedPort}`,
+      `${ctrl.apiBase}:分组「${plan.selector.name}」含 ${plan.usable} 个可用节点,代理端口 ${plan.mixedPort}`,
     );
-    detail(`内核选路模式:${info.mode}`);
-    if (info.selectors.length > 1) {
-      detail(
-        `其余分组:${info.selectors
-          .filter((s) => s.name !== picked.selector.name)
-          .map((s) => s.name)
-          .join(", ")}`,
-      );
-    }
+    detail(`内核选路模式:${plan.mode}`);
+    if (plan.otherSelectors.length > 0) detail(`其余分组:${plan.otherSelectors.join(", ")}`);
     // 只剩 GLOBAL 可选时必须说清后果（见 `pickSelector`），让用户去 Clash 里加分组。
-    if (info.mode !== "global" && picked.selector.name === "GLOBAL") {
-      line("warn", `只找到 GLOBAL 分组,而内核是 ${info.mode} 模式 —— 切换它可能不生效`);
+    for (const warning of plan.warnings) {
+      line("warn", warning);
       detail(
         "rule 模式下规则把流量导向别的分组,切 GLOBAL 不改变实际出口:\n" +
           "所有 Worker 会共用同一个公网 IP,而这个故障不报任何错。\n" +
@@ -332,8 +177,7 @@ async function main() {
           "然后重跑 setup。配好后务必用 npm run doctor -- --deep 验证隔离。",
       );
     }
-
-    plans.push({ ctrl, info, selector: picked.selector });
+    plans.push(plan);
   }
 
   if (plans.length === 0) {
@@ -344,118 +188,28 @@ async function main() {
   /* ---------- 4. 合并进配置 ---------- */
   heading("4. 合并进配置");
 
-  const next = structuredClone(config);
-  next.clash.enabled = true;
-
-  const summary = { bridgesAdded: 0, bridgesUpdated: 0, proxiesAdded: 0, proxiesUpdated: 0 };
-
-  for (const plan of plans) {
-    const url = new URL(plan.ctrl.apiBase);
-    // 内核 id 从地址推导，重跑 setup 落到同一个 id（`IdSchema` 允许 `.` 与 `-`）。
-    const bridgeId = `bridge-${url.hostname}-${url.port}`;
-    const existing = next.clash.bridges.find((b) => b.id === bridgeId);
-
-    if (existing === undefined) {
-      next.clash.bridges.push({
-        id: bridgeId,
-        name: `${plan.ctrl.isMeta ? "mihomo" : "clash"} ${url.port}`,
-        enabled: true,
-        priority: 100,
-        apiBase: plan.ctrl.apiBase,
-        apiSecret: plan.ctrl.secret,
-        localProxyHost: "127.0.0.1",
-        localProxyPort: plan.info.mixedPort,
-        selectorGroup: plan.selector.name,
-      });
-      summary.bridgesAdded += 1;
-    } else {
-      /*
-       * 只更新探测得来的事实（端口、secret、分组），保留用户可能改过的
-       * `name` / `priority` / `enabled` —— 重新启用被停用的内核等于撤销用户的决定。
-       */
-      existing.apiBase = plan.ctrl.apiBase;
-      existing.apiSecret = plan.ctrl.secret;
-      existing.localProxyPort = plan.info.mixedPort;
-      existing.selectorGroup = plan.selector.name;
-      summary.bridgesUpdated += 1;
-    }
-
-    // 只导入这个分组里的节点 —— 分组外的节点切不过去。
-    const inGroup = new Set(plan.selector.options);
-    for (const node of plan.info.nodes) {
-      if (!inGroup.has(node.name)) continue;
-
-      const id = proxyIdFor(node.name);
-      const existingProxy = next.proxies.find((p) => p.id === id);
-
-      if (existingProxy === undefined) {
-        next.proxies.push({
-          id,
-          name: node.name,
-          type: node.type.toLowerCase(),
-          // host/port 指向本机 Clash 混合端口而不是节点真实地址：流量交给 Clash 按 selector 转出。
-          host: "127.0.0.1",
-          port: plan.info.mixedPort,
-          enabled: true,
-          source: "controller",
-          controllerGroup: plan.selector.name,
-          bridgeId,
-          clashNodeName: node.name,
-          // 这些节点的协议（anytls/vless/hysteria2…）undici 与 socks 都接不了，只能经桥接。
-          direct: false,
-          bridgeable: true,
-          egressIp: null,
-        });
-        summary.proxiesAdded += 1;
-      } else {
-        existingProxy.port = plan.info.mixedPort;
-        existingProxy.bridgeId = bridgeId;
-        existingProxy.clashNodeName = node.name;
-        existingProxy.controllerGroup = plan.selector.name;
-        summary.proxiesUpdated += 1;
-      }
-    }
-
-    /*
-     * `activeBridgeId` 只在为空时设，`selectionMode` 完全不动 —— 不抢用户的选择。
-     * 绝不指向停用的内核：manual 模式下 `pickBridge`（`pool.ts`）只在已启用内核里找，
-     * 指过去会让每个桥接代理都失败，而 setup 仍报 ✓。
-     */
-    if (next.clash.activeBridgeId === null) {
-      const candidate = next.clash.bridges.find((b) => b.id === bridgeId);
-      if (candidate?.enabled === true) next.clash.activeBridgeId = bridgeId;
-      else nextStep(`内核 ${bridgeId} 处于停用状态,未设为当前内核 —— 启用它之后再跑一次。`);
-    }
+  const merged = mergeControllerImport(config, plans);
+  if (!merged.ok) {
+    heading("5. 写入");
+    line("fail", "合并后的配置未通过校验,已放弃写入");
+    detail(merged.reason);
+    nextStep("这是 setup 自己的缺陷(它生成了一份非法配置),你的 config.json 未被改动。");
+    process.exitCode = 1;
+    return;
   }
+  const { summary } = merged;
+  for (const warning of summary.warnings) nextStep(warning);
 
   line(
     "pass",
     `内核 +${summary.bridgesAdded} / 更新 ${summary.bridgesUpdated}，` +
       `代理 +${summary.proxiesAdded} / 更新 ${summary.proxiesUpdated}`,
   );
-  detail(`Worker 未改动(${next.workers.length} 个)—— 见下方说明。`);
+  detail(`Worker 未改动(${merged.next.workers.length} 个)—— 见下方说明。`);
 
-  /* ---------- 5. 校验后写盘 ---------- */
+  /* ---------- 5. 写入 ---------- */
   heading("5. 写入");
-
-  /*
-   * 写盘前先过 schema，在碰文件之前就知道合并结果是否合法 ——
-   * 例如代理引用不存在的 bridgeId 会让整份配置加载失败，服务起不来。
-   */
-  const parsed = ConfigSchema.safeParse(next);
-  if (!parsed.success) {
-    line("fail", "合并后的配置未通过校验,已放弃写入");
-    detail(
-      parsed.error.issues
-        .slice(0, 10)
-        .map((i) => `${i.path.join(".") || "(根)"}: ${i.message}`)
-        .join("\n"),
-    );
-    nextStep("这是 setup 自己的缺陷(它生成了一份非法配置),你的 config.json 未被改动。");
-    process.exitCode = 1;
-    return;
-  }
-
+  const parsed = { data: merged.next };
   if (DRY_RUN) {
     line("skip", "--dry-run:未写盘");
     detail(

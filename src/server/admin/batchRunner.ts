@@ -54,6 +54,26 @@ export class BatchProbeRunner {
     return this.#progress;
   }
 
+  /**
+   * 以批测互斥锁跑一个同样会切 selector 的操作（深度诊断）。已有一批或另一个独占操作在跑时
+   * 返回 `null`，调用方回 409；运行期间 `start()` 也返回 false。两者并发会互相切 selector，
+   * 回显报告就成了噪声。
+   */
+  async runExclusive<T>(task: () => Promise<T>): Promise<{ value: T } | null> {
+    if (this.#running !== null) return null;
+    const run = task();
+    // 锁只关心何时结束，不关心成败；失败由下面的 await 抛给调用方。
+    this.#running = run.then(
+      () => {},
+      () => {},
+    );
+    try {
+      return { value: await run };
+    } finally {
+      this.#running = null;
+    }
+  }
+
   /** 本批开始的时刻；从未跑过时为 null。供 `elapsedMs`，刷新后前端无从得知。 */
   startedAt(): number | null {
     return this.#startedAt;

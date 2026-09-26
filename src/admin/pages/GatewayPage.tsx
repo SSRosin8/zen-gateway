@@ -1,248 +1,238 @@
 import { useState } from "react";
-import type { Overview } from "../../shared/contract.ts";
-import {
-  FormStatus,
-  Mono,
-  Panel,
-  PrimaryButton,
-  SecondaryButton,
-  Strong,
-  errorMessage,
-  type FormMessage,
-} from "../components/Panel.tsx";
-import { StatusIndicator } from "../components/StatusIndicator.tsx";
-import { SimpleTable, type Column } from "../components/DataTable.tsx";
-import { patchConfig } from "../lib/api.ts";
+import type { OpenCodeView, Overview } from "../../shared/contract.ts";
+import { FormStatus, Mono, Panel, SecondaryButton, errorMessage, type FormMessage } from "../components/Panel.tsx";
+import { ConfirmDialog } from "../components/ConfirmDialog.tsx";
+import { OpenCodeConfigCard } from "../components/OpenCodeConfigCard.tsx";
+import { RoutingSettingsForm, RuntimeSettingsForm } from "../components/GatewaySettingsForms.tsx";
+import { patchConfig, type FetchState } from "../lib/api.ts";
+import { versionFromDetected, writeOpenCodeConfig } from "../lib/consoleApi.ts";
 import { openCodeConfigSnippet, type OpenCodeVersion } from "../lib/openCodeConfig.ts";
 
 /**
- * 网关页 —— 连接信息与客户端配置片段。
+ * 网关页 —— 连接信息、运行参数、调度、Relay Token 与客户端配置。
  *
- * ## 这一页的主要价值是那段可复制的配置
+ * ## OpenCode 配置由服务端写文件
  *
- * 提供兼容 OpenCode 1/2 的 `opencode.json` 片段。
- * 手写那段配置是最容易出错的一步（端口、路径、token 三处都能写错），
- * 而写错的症状是 401 或连接被拒 —— 两者都指不到「你的 baseURL 少了 /v1」。
+ * 服务端持有真实 Relay Token，写 `opencode.json` 时直接填进去；页面上只显示指纹。
+ * 复制片段仍然保留给其他客户端，但片段里只有占位符 —— 把 token 渲染进 DOM
+ * 等于让它进截图、进浏览器扩展、进 devtools 的保存。
  *
- * **Relay Token 不在片段里**：它是凭证，而这一页只有指纹。片段里放一个
- * 占位符并告诉用户去哪儿取 —— 把 token 渲染进 DOM 等于让它进截图、进
- * 浏览器扩展、进 devtools 的保存。
+ * ## 轮换 Relay Token 之后要重写 opencode.json
+ *
+ * 轮换立即生效，旧 token 的客户端会拿到 401。所以成功后紧跟一个重写按钮，
+ * 而不是让用户自己想起来。
  */
-/** 与 `GatewayPatchSchema.maxAttempts` 相同的范围；提交前校验，错误直接指出规则。 */
-export function validateMaxAttempts(raw: string): { ok: true; value: number } | { ok: false; message: string } {
-  const trimmed = raw.trim();
-  const value = Number(trimmed);
-  if (trimmed === "" || !Number.isInteger(value) || value < 1 || value > 10) {
-    return { ok: false, message: "最多尝试 Worker 数必须是 1 到 10 的整数" };
-  }
-  return { ok: true, value };
-}
+export { validateMaxAttempts } from "../components/GatewaySettingsForms.tsx";
 
-type Bridge = Overview["clash"]["bridges"][number];
-
-function bridgeColumns(activeBridgeId: string | null): ReadonlyArray<Column<Bridge>> {
-  return [
-    {
-      key: "id",
-      header: "内核",
-      render: (b) => (
-        <>
-          <Mono>{b.id}</Mono>
-          {!b.enabled && <span className="ml-2 text-text-muted">（已停用）</span>}
-          {b.id === activeBridgeId && <span className="ml-2 text-accent-fg">当前</span>}
-        </>
-      ),
-    },
-    { key: "api", header: "控制面", render: (b) => <Mono>{b.apiBase}</Mono> },
-    { key: "port", header: "代理端口", numeric: true, render: (b) => <Mono>{b.localProxyPort}</Mono> },
-    { key: "group", header: "分组", render: (b) => <Mono>{b.selectorGroup}</Mono> },
-    {
-      key: "secret",
-      header: "secret",
-      render: (b) =>
-        b.apiSecret.present ? (
-          <Mono>{b.apiSecret.fingerprint}</Mono>
-        ) : (
-          <span className="text-text-muted">无</span>
-        ),
-    },
-  ];
-}
-
-export function GatewayPage({ data, refresh }: { data: Overview; refresh?: () => void }) {
-  const [maxAttempts, setMaxAttempts] = useState(String(data.gateway.maxAttempts));
-  const [saving, setSaving] = useState(false);
-  const [message, setMessage] = useState<FormMessage>(null);
-  const [copied, setCopied] = useState(false);
-  const [openCodeVersion, setOpenCodeVersion] = useState<OpenCodeVersion>("2");
-  const snippet = openCodeConfigSnippet(data.gateway.port, openCodeVersion);
-
+export function GatewayPage({
+  data,
+  refresh,
+  opencode = { status: "loading" },
+}: {
+  data: Overview;
+  refresh?: () => void;
+  opencode?: FetchState<OpenCodeView>;
+}) {
   return (
     <div className="space-y-4">
-      <Panel title="连接">
-        <dl className="grid grid-cols-[auto_1fr] gap-x-6 gap-y-2">
-          <dt className="text-text-muted">监听</dt>
-          <dd>
-            <Mono>127.0.0.1:{data.gateway.port}</Mono>
-            <span className="ml-2 text-text-muted">仅回环 —— 不对外监听</span>
-          </dd>
-          <dt className="text-text-muted">上游</dt>
-          <dd>
-            <Mono>{data.gateway.baseUrl}</Mono>
-          </dd>
-          <dt className="text-text-muted">Relay Token</dt>
-          <dd>
-            {data.gateway.relayToken.present ? (
-              <>
-                <Mono>{data.gateway.relayToken.fingerprint}</Mono>
-                <span className="ml-2 text-text-muted">
-                  只显示指纹（供比对）；完整值在 <Mono>data/config.json</Mono>
-                </span>
-              </>
-            ) : (
-              <span className="text-error">未配置 —— 转发面会拒绝一切请求</span>
-            )}
-          </dd>
-          <dt className="text-text-muted">最多尝试</dt>
-          <dd>
-            {data.gateway.maxAttempts} 个 Worker
-            <span className="ml-2 text-text-muted">一条客户端请求最多换几次</span>
-          </dd>
-          <dt className="text-text-muted">版本</dt>
-          <dd>
-            <Mono>v{data.health.version}</Mono>
-            <span className="ml-2 text-text-muted">pid {data.health.pid}</span>
-          </dd>
-        </dl>
-      </Panel>
+      <ConnectionPanel data={data} refresh={refresh} opencode={opencode} />
+      <OpenCodePanel opencode={opencode} refresh={refresh} port={data.gateway.port} />
+      <RuntimeSettingsForm data={data} refresh={refresh} />
+      <RoutingSettingsForm data={data} refresh={refresh} />
+    </div>
+  );
+}
 
-      <Panel title="运行设置">
-        <form
-          className="flex flex-wrap items-end gap-3"
-          /* 自己校验并给出规则说明，不依赖浏览器原生气泡（它不进 aria-live 区域）。 */
-          noValidate
-          onSubmit={(event) => {
-            event.preventDefault();
-            const checked = validateMaxAttempts(maxAttempts);
-            if (!checked.ok) {
-              setMessage({ tone: "error", text: checked.message });
-              return;
-            }
-            setSaving(true);
-            setMessage(null);
-            void patchConfig({ gateway: { maxAttempts: checked.value } })
+function ConnectionPanel({
+  data,
+  refresh,
+  opencode,
+}: {
+  data: Overview;
+  refresh?: (() => void) | undefined;
+  opencode: FetchState<OpenCodeView>;
+}) {
+  const [confirming, setConfirming] = useState(false);
+  const [rotating, setRotating] = useState(false);
+  const [message, setMessage] = useState<FormMessage>(null);
+  const [rotated, setRotated] = useState(false);
+
+  const rotate = () => {
+    setConfirming(false);
+    setRotating(true);
+    setMessage(null);
+    void patchConfig({ gateway: { relayToken: { rotate: true } } })
+      .then(() => {
+        setRotated(true);
+        setMessage({ tone: "success", text: "已轮换，新 token 立即生效" });
+        refresh?.();
+      })
+      .catch((err) => setMessage(errorMessage(err)))
+      .finally(() => setRotating(false));
+  };
+
+  return (
+    <Panel title="连接">
+      <dl className="grid grid-cols-[auto_1fr] gap-x-6 gap-y-2">
+        <dt className="text-text-muted">监听</dt>
+        <dd>
+          <Mono>127.0.0.1:{data.gateway.port}</Mono>
+          <span className="ml-2 text-text-muted">仅回环，不对外监听</span>
+        </dd>
+        <dt className="text-text-muted">上游</dt>
+        <dd>
+          <Mono>{data.gateway.baseUrl}</Mono>
+        </dd>
+        <dt className="text-text-muted">Relay Token</dt>
+        <dd className="flex flex-wrap items-center gap-x-3 gap-y-2">
+          {data.gateway.relayToken.present ? (
+            <>
+              <Mono>{data.gateway.relayToken.fingerprint}</Mono>
+              <span className="text-text-muted">只显示指纹（供比对）</span>
+            </>
+          ) : (
+            <span className="text-error">未配置，转发面会拒绝一切请求</span>
+          )}
+          <SecondaryButton onClick={() => setConfirming(true)} disabled={rotating}>
+            {rotating ? "轮换中…" : "轮换 Relay Token"}
+          </SecondaryButton>
+        </dd>
+        <dt className="text-text-muted">版本</dt>
+        <dd>
+          <Mono>v{data.health.version}</Mono>
+          <span className="ml-2 text-text-muted">pid {data.health.pid}</span>
+        </dd>
+      </dl>
+      <div className="mt-3 space-y-2" aria-live="polite">
+        <FormStatus message={message} />
+        {rotated && <RewriteAfterRotate opencode={opencode} refresh={refresh} />}
+      </div>
+
+      <ConfirmDialog
+        open={confirming}
+        title="轮换 Relay Token"
+        confirmLabel="确认轮换"
+        destructive
+        onCancel={() => setConfirming(false)}
+        onConfirm={rotate}
+      >
+        <p>服务端会生成新的 Relay Token 并立即生效，旧 token 随即失效。</p>
+        <p>正在使用旧 token 的客户端（包括现有的 opencode.json）会收到 401，需要重写配置。</p>
+      </ConfirmDialog>
+    </Panel>
+  );
+}
+
+/** 轮换成功后紧跟的重写提示；版本沿用检测值。 */
+function RewriteAfterRotate({
+  opencode,
+  refresh,
+}: {
+  opencode: FetchState<OpenCodeView>;
+  refresh?: (() => void) | undefined;
+}) {
+  const [state, setState] = useState<FormMessage>(null);
+  const [busy, setBusy] = useState(false);
+  const exists = opencode.status === "ready" && opencode.data.exists;
+  return (
+    <div className="rounded-md border border-warn bg-surface-accent px-4 py-3" data-rewrite-prompt="">
+      <p>opencode.json 里还是旧 token，重写后 OpenCode 才能继续使用本网关。</p>
+      <div className="mt-2 flex flex-wrap items-center gap-2">
+        <SecondaryButton
+          disabled={busy}
+          onClick={() => {
+            setBusy(true);
+            setState(null);
+            const version = opencode.status === "ready" ? opencode.data.detectedVersion : null;
+            void writeOpenCodeConfig(versionFromDetected(version))
               .then(() => {
-                setMessage({ tone: "success", text: "已保存" });
+                setState({ tone: "success", text: "已重写 opencode.json" });
                 refresh?.();
               })
-              .catch((err) => setMessage(errorMessage(err)))
-              .finally(() => setSaving(false));
+              .catch((err) => setState(errorMessage(err)))
+              .finally(() => setBusy(false));
           }}
         >
-          <label className="flex flex-col gap-1">
-            <span className="text-text-muted">最多尝试 Worker 数</span>
-            <input
-              type="number"
-              min={1}
-              max={10}
-              step={1}
-              required
-              aria-invalid={message?.tone === "error" ? true : undefined}
-              value={maxAttempts}
-              onChange={(e) => setMaxAttempts(e.target.value)}
-              className="min-h-[44px] w-40 rounded-sm border border-border-strong bg-bg px-3"
-            />
-          </label>
-          <PrimaryButton type="submit" disabled={saving}>
-            {saving ? "保存中…" : "保存"}
-          </PrimaryButton>
-          <FormStatus message={message} />
-        </form>
-      </Panel>
+          {busy ? "写入中…" : exists ? "重写 opencode.json" : "写入 opencode.json"}
+        </SecondaryButton>
+        <FormStatus message={state} />
+      </div>
+    </div>
+  );
+}
 
-      <Panel title="客户端配置">
-        <p className="mb-3 text-text-muted">
-          选择你的 OpenCode 主版本，生成覆盖本地网关的 <Mono>opencode</Mono> provider 配置。放在{" "}
-          <Mono>~/.config/opencode/opencode.json</Mono> 或项目根目录。
+function OpenCodePanel({
+  opencode,
+  refresh,
+  port,
+}: {
+  opencode: FetchState<OpenCodeView>;
+  refresh?: (() => void) | undefined;
+  port: number;
+}) {
+  return (
+    <Panel title="OpenCode 项目配置">
+      <OpenCodeConfigCard status={opencode} onWritten={() => refresh?.()} />
+      <OtherClientSnippet port={port} />
+    </Panel>
+  );
+}
+
+/** 给其他客户端或全局配置用的片段；token 只有占位符。 */
+function OtherClientSnippet({ port }: { port: number }) {
+  const [open, setOpen] = useState(false);
+  const [copied, setCopied] = useState(false);
+  const [version, setVersion] = useState<OpenCodeVersion>("2");
+  const snippet = openCodeConfigSnippet(port, version);
+  return (
+    <details className="mt-4 border-t border-border-strong pt-3" open={open} onToggle={(e) => setOpen(e.currentTarget.open)}>
+      <summary className="min-h-[44px] cursor-pointer content-center text-text-muted hover:text-text">
+        其他客户端或全局配置：复制片段
+      </summary>
+      <div className="mt-2 space-y-2">
+        <p className="max-w-3xl text-text-muted">
+          放在 <Mono>~/.config/opencode/opencode.json</Mono> 或其他项目里；把占位符换成 <Mono>data/config.json</Mono> 里的{" "}
+          <Mono>gateway.relayToken</Mono>。
         </p>
-        <label className="mb-3 flex w-fit flex-col gap-1">
-          <span className="text-text-muted">OpenCode 配置格式</span>
-          <select
-            aria-label="OpenCode 版本"
-            value={openCodeVersion}
-            onChange={(event) => setOpenCodeVersion(event.target.value as OpenCodeVersion)}
-            className="min-h-[44px] rounded-sm border border-border-strong bg-bg px-3"
-          >
-            <option value="2">OpenCode 2.x（默认）</option>
-            <option value="1">OpenCode 1.x</option>
-          </select>
-        </label>
-        <div className="relative">
-          <pre className="overflow-x-auto rounded-md border border-border-strong bg-bg p-3 pr-28 font-mono">
-            {snippet}
-          </pre>
-          <div className="absolute right-2 top-2 bg-surface">
-            <SecondaryButton
-              onClick={() => {
-                void navigator.clipboard?.writeText(snippet).then(() => {
-                  setCopied(true);
-                  window.setTimeout(() => setCopied(false), 1500);
-                });
-              }}
+        <div className="flex flex-wrap items-end gap-2">
+          <label className="flex flex-col gap-1">
+            <span className="text-text-muted">片段格式</span>
+            <select
+              aria-label="片段格式"
+              value={version}
+              onChange={(e) => setVersion(e.target.value as OpenCodeVersion)}
+              className="min-h-[44px] rounded-sm border border-border-strong bg-bg px-3"
             >
-              {copied ? "已复制" : "复制"}
-            </SecondaryButton>
-          </div>
+              <option value="2">OpenCode 2.x</option>
+              <option value="1">OpenCode 1.x</option>
+            </select>
+          </label>
+          <SecondaryButton
+            onClick={() => {
+              void navigator.clipboard?.writeText(snippet).then(() => {
+                setCopied(true);
+                window.setTimeout(() => setCopied(false), 1500);
+              });
+            }}
+          >
+            {copied ? "已复制" : "复制"}
+          </SecondaryButton>
         </div>
-        <p className="mt-3 text-text-muted">
-          {openCodeVersion === "1" ? (
+        <pre className="overflow-x-auto rounded-md border border-border-strong bg-bg p-3 font-mono">{snippet}</pre>
+        <p className="max-w-3xl text-text-muted">
+          {version === "1" ? (
             <>
-              OpenCode 1.x 使用单数 <Mono>provider</Mono> 与 <Mono>options</Mono>，只覆盖已有
-              provider 的 <Mono>baseURL</Mono> 与 <Mono>apiKey</Mono>；模型和 SDK 由 OpenCode
-              自己管理。
+              OpenCode 1.x 使用单数 <Mono>provider</Mono> 与 <Mono>options</Mono>
             </>
           ) : (
             <>
-              OpenCode 2.x 使用复数 <Mono>providers</Mono>，只覆盖已有 <Mono>opencode</Mono>{" "}
-              provider 的 <Mono>settings.baseURL</Mono> 与 <Mono>settings.apiKey</Mono>；模型和
-              SDK 由 OpenCode 自己管理。
+              OpenCode 2.x 使用复数 <Mono>providers</Mono> 与 <Mono>settings</Mono>
             </>
-          )}{" "}
-          你选择的模型仍受上游权限与免费规则约束。
+          )}
+          ，只覆盖内置 <Mono>opencode</Mono> provider 的 <Mono>baseURL</Mono> 与 <Mono>apiKey</Mono>；模型和 SDK 由
+          OpenCode 自己管理。你选择的模型仍受上游权限与免费规则约束。
         </p>
-      </Panel>
-
-      <Panel title="Clash 桥接">
-        {!data.clash.enabled ? (
-          <StatusIndicator tone="neutral" icon="○" label="未启用" />
-        ) : (
-          <>
-            <StatusIndicator
-              tone={data.clash.bridges.some((b) => b.enabled) ? "success" : "warn"}
-              icon={data.clash.bridges.some((b) => b.enabled) ? "✓" : "!"}
-              label={`已启用 · ${data.clash.bridges.filter((b) => b.enabled).length}/${data.clash.bridges.length} 个内核`}
-            />
-            <div className="mt-3">
-              <SimpleTable
-                label="Clash 内核"
-                rows={data.clash.bridges}
-                columns={bridgeColumns(data.clash.activeBridgeId)}
-                rowKey={(b) => b.id}
-                rowAttr="data-bridge"
-              />
-            </div>
-            <p className="mt-3 text-text-muted">
-              <Strong>代理端口必须与内核实际的 <Mono>mixed-port</Mono> 一致</Strong> ——
-              不一致时桥接会连到一个没人监听的端口：所有桥接代理传输失败，
-              而控制面明明是通的。<Mono>npm run doctor</Mono> 的第 5 层会核对它。
-            </p>
-            <p className="mt-2 text-text-muted">
-              <Strong>分组不要用 <Mono>GLOBAL</Mono></Strong> —— rule 模式下它不参与选路，
-              切它什么都不改变，于是所有 Worker 共用一个公网 IP 而不报任何错。
-            </p>
-          </>
-        )}
-      </Panel>
-    </div>
+      </div>
+    </details>
   );
 }

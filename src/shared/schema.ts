@@ -286,6 +286,9 @@ export type Gateway = z.infer<typeof GatewaySchema>;
 /** 当前配置格式版本。加字段不必升版本；改语义/改形状才升，并配迁移。 */
 export const CONFIG_VERSION = 1;
 
+/** 配置里 Worker 的总数上限；管理 API 一次批量创建的上限与它相同。 */
+export const MAX_WORKERS = 512;
+
 export const ConfigSchema = z
   .strictObject({
     version: z.number().int().min(1).max(CONFIG_VERSION),
@@ -293,7 +296,7 @@ export const ConfigSchema = z
     // prefault 而非 default：见 RoutingConfigSchema.cooldown 处的说明。
     routing: RoutingConfigSchema.prefault({}),
     models: ModelRulesSchema.prefault({}),
-    workers: z.array(WorkerSchema).max(512).default([]),
+    workers: z.array(WorkerSchema).max(MAX_WORKERS).default([]),
     proxies: z.array(ProxySchema).max(2048).default([]),
     subscriptions: z.array(SubscriptionSchema).max(64).default([]),
     clash: ClashConfigSchema.prefault({}),
