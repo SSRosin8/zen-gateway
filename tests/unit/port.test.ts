@@ -246,3 +246,12 @@ describe("service.mjs 对非法 ZG_PORT 的处置", () => {
     expect(stderr).not.toContain(PROJECT);
   });
 });
+
+describe("默认端口只有一个值", () => {
+  it("schema 的默认端口与 DEFAULT_PORT 相同", async () => {
+    // schema.ts 进浏览器构建、不能 import store，两处各写一次；这里防止它们分叉。
+    const { ConfigSchema, CONFIG_VERSION } = await import("../../src/shared/schema.ts");
+    const parsed = ConfigSchema.parse({ version: CONFIG_VERSION, gateway: { relayToken: "test-token-not-a-real-secret" } });
+    expect(parsed.gateway.port).toBe(DEFAULT_PORT);
+  });
+});

@@ -64,7 +64,7 @@ relay.ts 固定按以下顺序运行：
 
 tap 使用手写 ReadableStream 保持原字节和时序，使用流式 UTF-8 解码和按最长模式推导的重叠窗口。完整成功流才学习推理指纹；失效推理解绑并遗忘；断流或客户端取消不学习也不盲目遗忘。谁锁住 body，谁负责失败路径上的释放。
 
-失败分类由状态码、响应头和本地异常决定，不读取错误 body。rate_limit 尊重 Retry-After 并长冷却；auth（401）固定短退避；forbidden（403）更短的固定冷却并换 Worker 重试，因为免费闸门按请求形态、地区限制按出口返回 403，换出口可能成功；transport、timeout、upstream_error 指数退避并抖动；bad_request、unknown 不冷却。冷却只延长不缩短；并发成功只有在尝试开始时间晚于冷却时才清除现有冷却。目录尚未核验的模型收到 401 时不归咎 Worker，因为不存在的模型也返回 401。
+失败分类由状态码、响应头和本地异常决定，不读取错误 body。rate_limit 尊重 Retry-After 并长冷却；auth（401/402/404）固定短退避；forbidden（403）更短的固定冷却并换 Worker 重试，因为免费闸门按请求形态、地区限制按出口返回 403，换出口可能成功；transport、timeout、upstream_error 指数退避并抖动；bad_request、unknown 不冷却。冷却只延长不缩短；并发成功只有在尝试开始时间晚于冷却时才清除现有冷却。目录尚未核验的模型收到 401 时不归咎 Worker，因为不存在的模型也返回 401。
 
 ## 目录与调度
 

@@ -380,3 +380,24 @@ describe("上游错误响应的 content-type 原样透传(怪癖 §6)", () => {
     expect(res.headers.get("content-type")).toBe("application/json");
   });
 });
+
+describe("discover-upstream.mjs 拒绝未识别的参数", () => {
+  it("--help 与拼错的参数都不发请求", async () => {
+    const { execFile } = await import("node:child_process");
+    const { promisify } = await import("node:util");
+    const run = (args: string[]) =>
+      promisify(execFile)(process.execPath, [join(PROJECT, "scripts", "discover-upstream.mjs"), ...args], {
+        // 指向不可达地址：若参数校验被绕过，脚本会发请求并以非预期的输出失败。
+        env: { ...process.env, ZG_DISCOVER_BASE: "http://127.0.0.1:1/v1" },
+      }).then((r) => ({ code: 0, out: r.stdout }), (e: { code?: number; stdout?: string }) => ({ code: e.code ?? 1, out: e.stdout ?? "" }));
+
+    const help = await run(["--help"]);
+    expect(help.code).toBe(0);
+    expect(help.out).toContain("用法");
+    expect(help.out).not.toContain("✓");
+
+    const typo = await run(["--typo"]);
+    expect(typo.code).not.toBe(0);
+    expect(typo.out).toContain("未识别的参数: --typo");
+  });
+});

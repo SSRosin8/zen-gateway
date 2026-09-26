@@ -61,7 +61,7 @@ HTTP 回环地址。
 ## 管理后台
 
 启动方式见[安装和运行](#安装和运行)。后台包含概览、网关、代理池、Worker、模型和
-用量六页。没有可用 Worker 时会显示首启向导。
+用量六页。候选池里没有 Worker（未配置、全部停用或认证 Worker 缺 key）时会显示首启向导；全部冷却不算。
 
 当前 UI 支持：
 
@@ -74,7 +74,7 @@ HTTP 回环地址。
 - 代理分页、批量探测、按 IP 回显目标的实测公网 IP 分组的视图。
 - 订阅刷新、探测进度、统计和运行期 Worker 状态查看；启动批量探测前需要确认。
 - 深色主题：默认跟随系统，页头可切换“跟随系统 / 浅色 / 深色”。
-- 轮询失败时保留上次数据并显示“数据可能已过期”横幅，而不是清空页面。
+- 轮询失败时保留上次数据，页头提示连接中断及数据的时效，而不是清空页面。
 
 代理和 Clash 内核的增删改仍通过 `data/config.json` 完成，保存后重启网关。后台
 不会伪造一个管理端点来覆盖这些配置；Models 页中的 `defaultSurfaces` 与
@@ -230,7 +230,7 @@ opencode run --model opencode/big-pickle "Reply with exactly: OK"
 |---|---|---|
 | `strategy` | `anonymous_first` | 就绪 Worker 的排序：`anonymous_first` 匿名优先、`authenticated_first` 认证优先、`mixed` 按配置顺序；同类内保持配置顺序，会话亲和命中优先于策略 |
 | `cooldown.rateLimitMs` | 900000 | 429 冷却；上游给了 `Retry-After` 时以它为准，但不短于 `transportBaseMs`；不加抖动 |
-| `cooldown.authFailMs` | 60000 | 401 的固定短冷却（附最多 25% 抖动），不按失败次数翻倍 |
+| `cooldown.authFailMs` | 60000 | 401/402/404（key 失效、额度耗尽）的固定短冷却（附最多 25% 抖动），不按失败次数翻倍 |
 | `cooldown.forbiddenMs` | 5000 | 403 的短冷却（范围 1000–600000，附最多 25% 抖动），并换下一个 Worker 重试；免费闸门按请求形态返回 403、地区限制按出口返回 403，都不代表 Worker 故障 |
 | `cooldown.transportBaseMs` | 2000 | 传输、超时、上游 5xx 指数退避的起点 |
 | `cooldown.transportMaxMs` | 120000 | 上述指数退避的上限 |
@@ -377,7 +377,7 @@ doctor 按 1 配置、2 服务、3 统计库、4 Worker、5 Clash 控制面、6 
 | 403 `not available in your country` | 出口所在地区不可用该模型；网关会换 Worker 重试，全部失败时检查各 Worker 的出口地区 |
 | 400 `Model is unavailable` | 上游目录已变化或账号看不到该模型 |
 | 502 `upstream_unreachable` | 上游、出口、DNS 或 TLS 不可达 |
-| 503 `no_worker_available` | 没有可用 Worker（未配置、全部停用或认证 Worker 缺 key）；全员冷却时仍会尝试最早恢复的一个，响应头 `x-zen-gateway-route: all_cooling` |
+| 503 `no_worker_available` | 没有可入池的 Worker（未配置、全部停用或认证 Worker 缺 key）。全员冷却不返回 503：网关会尝试最早恢复的一个，上游响应带 `x-zen-gateway-route: all_cooling` |
 | 503 `egress_unavailable` | 代理停用、Clash 不可用、selector 或 secret 配置错误 |
 | 启动退出 | schema、引用完整性或端口冲突 |
 
