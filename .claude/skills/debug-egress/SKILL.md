@@ -87,7 +87,10 @@ doctor 第 5 层会核对内核报告的 `mixed-port` 与配置是否一致；�
 企业 DNS 可能把 `opencode.ai` 解析到内网地址，排在分组规则之前的私网
 `IPCIDR → DIRECT` 于是先命中，所有 Worker 的 Zen 请求直连。doctor 第 5 层用
 `upstreamRoute` 按规则顺序判定首条命中并告警；`/connections` 里表现为 `chains`
-只有 `DIRECT`、`rule` 为 `IPCIDR`。
+只有 `DIRECT`、`rule` 为 `IPCIDR`。修法是把 `DOMAIN-SUFFIX,opencode.ai,<分组>` 放到
+规则最前面，并写在订阅更新后仍保留的位置（客户端的规则扩展 / prepend），而不是
+直接改生成出来的运行配置 —— 后者在下次重新生成时被覆盖。细节见 `docs/usage.md`
+的“出口和 Clash”。
 
 验收时在真实 CLI 请求期间读 `/connections`，核对目标为 `opencode.ai` 的连接、
 `chains` 与命中的 `rule`。

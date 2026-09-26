@@ -47,7 +47,7 @@ import { configExists, configPath, loadConfig, saveConfig, ConfigError } from ".
 import { ConfigSchema } from "../src/shared/schema.ts";
 import { isLoopbackAddress } from "../src/server/middleware/loopbackOnly.ts";
 import { safeErrorMessage } from "../src/shared/redact.ts";
-import { isGroupType } from "../src/shared/clashNodeTypes.ts";
+import { ClashController, ControllerError } from "../src/core/proxy/clash/controller.ts";
 import { dataDirOf } from "./lib/instance.mjs";
 import { detail, heading, line, nextStep } from "./lib/report.mjs";
 import { checkArgs } from "./lib/args.mjs";
@@ -89,14 +89,6 @@ const PROBE_TIMEOUT_MS = 1_500;
  * Controller 探测
  * ------------------------------------------------------------------ */
 
-function ensureSlash(base) {
-  const u = new URL(base);
-  u.search = "";
-  u.hash = "";
-  if (!u.pathname.endsWith("/")) u.pathname = `${u.pathname}/`;
-  return u.href;
-}
-
 function isLocalControllerUrl(value) {
   try {
     const url = new URL(value);
@@ -113,14 +105,6 @@ function isLocalControllerUrl(value) {
   }
 }
 
-async function ask(apiBase, path, secret, timeoutMs = PROBE_TIMEOUT_MS) {
-  const res = await fetch(new URL(path, ensureSlash(apiBase)).href, {
-    ...(secret ? { headers: { authorization: `Bearer ${secret}` } } : {}),
-    signal: AbortSignal.timeout(timeoutMs),
-  });
-  return res;
-}
-
 /**
  * 探一个候选地址。
  *
@@ -133,19 +117,15 @@ async function ask(apiBase, path, secret, timeoutMs = PROBE_TIMEOUT_MS) {
  * 被报成「没找到」,用户于是去检查 Clash 是否运行 —— 而它正在运行。
  */
 async function probeController(apiBase, secret) {
+  const controller = new ClashController(
+    { id: "setup-probe", apiBase, apiSecret: secret ?? "" },
+    { timeoutMs: PROBE_TIMEOUT_MS },
+  );
   try {
-    const res = await ask(apiBase, "version", secret);
-    if (res.status === 401 || res.status === 403) return { kind: "auth", apiBase };
-    if (!res.ok) return { kind: "absent", apiBase, why: `返回 ${res.status}` };
-    const body = await res.json();
-    return {
-      kind: "ok",
-      apiBase,
-      secret: secret ?? "",
-      version: typeof body?.version === "string" ? body.version : "unknown",
-      isMeta: body?.meta === true,
-    };
+    const { version, isMeta } = await controller.version();
+    return { kind: "ok", apiBase, secret: secret ?? "", version, isMeta };
   } catch (err) {
+    if (err instanceof ControllerError && err.kind === "auth") return { kind: "auth", apiBase };
     return { kind: "absent", apiBase, why: safeErrorMessage(err) };
   }
 }
@@ -204,64 +184,26 @@ async function discoverControllers({ explicitApi, explicitSecret, knownSecrets }
  * ------------------------------------------------------------------ */
 
 
+/**
+ * 读取配置内核所需的全部信息，解析复用 `ClashController`，与 doctor 和转发路径
+ * 同一份实现（纪律 #4）。
+ */
 async function readController(ctrl) {
-  const secret = ctrl.secret;
+  const controller = new ClashController({ id: "setup", apiBase: ctrl.apiBase, apiSecret: ctrl.secret });
 
-  // 混合端口 —— 见文件头:这个值只能问内核。
-  let mixedPort = null;
-  /**
-   * 选路模式。`rule`(默认)下 `GLOBAL` 分组不参与选路 —— 见 `pickSelector`。
+  /*
+   * 混合端口只能问内核（见文件头）；读不到时为 null，由调用方拒绝配置。
+   * `socks-port` 与 `port` 不能作为替代：桥接 dispatcher 使用 HTTP CONNECT，
+   * 把 SOCKS 端口写成混合端口会让 setup 报成功、所有转发再失败。
    *
-   * 读不到时按 `rule` 处理:那是内核默认值,也是**保守**的一侧
-   * (把 GLOBAL 降级最坏只是选了另一个同样能用的分组;反过来则会选中一个
-   * 切了不生效的分组,而那个故障不报任何错)。
+   * 选路模式读不到时按 `rule` 处理：那是内核默认值，也是保守的一侧
+   * （把 GLOBAL 降级最坏只是选了另一个同样能用的分组；反过来则会选中一个
+   * 切了不生效的分组，而那个故障不报任何错）。见 `pickSelector`。
    */
-  let mode = "rule";
-  try {
-    const res = await ask(ctrl.apiBase, "configs", secret, 3000);
-    if (res.ok) {
-      const body = await res.json();
-      if (typeof body?.mode === "string") mode = body.mode.toLowerCase();
-      const p = body?.["mixed-port"];
-      if (typeof p === "number" && p > 0) mixedPort = p;
-      /*
-       * `socks-port` 与 `port` 不能作为替代：桥接 dispatcher 明确使用 HTTP
-       * CONNECT，而把 SOCKS 端口写成混合端口会让 setup 报成功、所有转发再失败。
-       * 没有真正的 mixed-port 时交给调用方拒绝配置，要求用户在 Clash 中开启它。
-       */
-    }
-  } catch {
-    /* 下面会按 null 处理 */
-  }
+  const runtime = await controller.runtimeConfig().catch(() => ({ mode: null, mixedPort: null }));
 
-  const res = await ask(ctrl.apiBase, "proxies", secret, 5000);
-  if (!res.ok) throw new Error(`读取节点列表失败:${res.status}`);
-  const body = await res.json();
-  const proxies = body?.proxies;
-  if (proxies === null || typeof proxies !== "object") throw new Error("/proxies 返回的不是对象");
-
-  const selectors = [];
-  const nodes = [];
-  for (const [name, value] of Object.entries(proxies)) {
-    if (value === null || typeof value !== "object") continue;
-    const type = typeof value.type === "string" ? value.type : "";
-    if (type === "Selector") {
-      selectors.push({
-        name,
-        now: typeof value.now === "string" ? value.now : "",
-        options: Array.isArray(value.all) ? value.all.filter((x) => typeof x === "string") : [],
-      });
-      continue;
-    }
-    if (isGroupType(type)) continue;
-    const history = Array.isArray(value.history) ? value.history : [];
-    const last = history.at(-1);
-    nodes.push({
-      name,
-      type,
-      latencyMs: typeof last?.delay === "number" && last.delay > 0 ? last.delay : null,
-    });
-  }
+  // 节点列表是必需的：读不到直接失败，由调用方报告并跳过这个内核。
+  const [selectors, nodes] = await Promise.all([controller.selectors(), controller.nodes()]);
 
   /*
    * 规则的目标分组 —— `GLOBAL` 陷阱的**直接证据**。
@@ -269,29 +211,9 @@ async function readController(ctrl) {
    * 拿不到就给 null，`pickSelector` 会退回按名字降级那个启发式。
    * 旧内核可能没有 `/rules`，而那不该让整个 setup 失败。
    */
-  let routed = null;
-  try {
-    const rulesRes = await ask(ctrl.apiBase, "rules", secret, 5000);
-    if (rulesRes.ok) {
-      const rulesBody = await rulesRes.json();
-      const rules = rulesBody?.rules;
-      if (Array.isArray(rules)) {
-        const targets = new Map();
-        let fallback = null;
-        for (const r of rules) {
-          const proxy = typeof r?.proxy === "string" ? r.proxy : "";
-          if (proxy === "") continue;
-          targets.set(proxy, (targets.get(proxy) ?? 0) + 1);
-          if (typeof r?.type === "string" && r.type.toLowerCase() === "match") fallback = proxy;
-        }
-        routed = { targets, fallback };
-      }
-    }
-  } catch {
-    /* 退回启发式 */
-  }
+  const routed = await controller.routedGroups().catch(() => null);
 
-  return { mixedPort, mode, selectors, nodes, routed };
+  return { mixedPort: runtime.mixedPort, mode: runtime.mode ?? "rule", selectors, nodes, routed };
 }
 
 /**

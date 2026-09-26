@@ -24,7 +24,7 @@ shared 不能导入 node:*，因为它会被浏览器构建。Node 专属能力�
 
 ## 启动、热更新和关闭
 
-server/index.ts 先加载严格校验的 config.json，再尝试打开 SQLite，随后创建唯一的 EgressService、Scheduler 和 ModelCatalog，恢复亲和与批量探测状态，组装路由并监听 loopback。已创建的 store 会把写入失败累计到健康信息；数据库在启动时打不开则停用统计、亲和持久化和批量探测，并记录日志，转发仍可用。目前这类初始化失败没有进入健康计数，不能把 storeWriteFailures 为零当作数据库可用的证明。
+server/index.ts 先加载严格校验的 config.json，再尝试打开 SQLite，随后创建唯一的 EgressService、Scheduler 和 ModelCatalog，恢复亲和与批量探测状态，组装路由并监听 loopback。已创建的 store 会把写入失败累计到 /health 的 storeWriteFailures；数据库在启动时打不开则停用统计、亲和持久化和批量探测并记录日志，转发仍可用，这种情况不计入该计数（排查方式见 [usage.md](usage.md#日志和数据库)）。
 
 启动监听后异步预热目录。预热失败不阻止服务；模型路由会报告“从未成功取得目录”的上游不可达。
 
@@ -64,7 +64,7 @@ relay.ts 固定按以下顺序运行：
 
 tap 使用手写 ReadableStream 保持原字节和时序，使用流式 UTF-8 解码和按最长模式推导的重叠窗口。完整成功流才学习推理指纹；失效推理解绑并遗忘；断流或客户端取消不学习也不盲目遗忘。谁锁住 body，谁负责失败路径上的释放。
 
-失败分类由状态码、响应头和本地异常决定，不读取错误 body。rate_limit 尊重 Retry-After 并长冷却；auth（401）固定短退避；forbidden（403）更短的固定冷却，因为免费闸门按请求形态返回 403；transport、timeout、upstream_error 指数退避并抖动；bad_request、unknown 不冷却。冷却只延长不缩短；并发成功只有在尝试开始时间晚于冷却时才清除现有冷却。目录尚未核验的模型收到 401 时不归咎 Worker，因为不存在的模型也返回 401。
+失败分类由状态码、响应头和本地异常决定，不读取错误 body。rate_limit 尊重 Retry-After 并长冷却；auth（401）固定短退避；forbidden（403）更短的固定冷却并换 Worker 重试，因为免费闸门按请求形态、地区限制按出口返回 403，换出口可能成功；transport、timeout、upstream_error 指数退避并抖动；bad_request、unknown 不冷却。冷却只延长不缩短；并发成功只有在尝试开始时间晚于冷却时才清除现有冷却。目录尚未核验的模型收到 401 时不归咎 Worker，因为不存在的模型也返回 401。
 
 ## 目录与调度
 
@@ -82,13 +82,13 @@ EgressService 统一管理 dispatcher、Clash Controller 和 selector 锁；转�
 
 - 直连 HTTP、HTTPS、SOCKS 使用支持 dispatch 的 undici 出口。
 - 桥接模式切换 selector 后经本地代理端口连接。
-- dispatcher 按 Clash 节点名缓存，不能按 Worker 或 proxy id 缓存。
+- dispatcher 按代理 id 缓存，身份键包含桥接的 Clash 节点名（或直连的地址与口令摘要）和超时；身份变化即重建。节点名必须在键里，否则 keep-alive 复用会让出口停在旧节点。
 - Controller 缓存指纹含地址和凭证摘要，等长 secret 改变也会重建。
 - selector 切换和建连在同一把锁内，连接建立后即释放锁。
 
-回显报告按 IP 回显目标的实测公网 IP 分组；未知 IP 不计为独立。直连出口保存到 gateway.directEgressIp，使用专用合成 id。doctor 读取 /rules 检查选中分组是否参与规则及是否是 MATCH 目标，doctor --deep 以回显 IP 做分组核对。回显结果与 Zen 实际出口的关系见 [回显 IP 的测量范围](usage.md#回显-ip-的测量范围)。
+回显报告按 IP 回显目标的实测公网 IP 分组；未知 IP 不计为独立。直连出口保存到 gateway.directEgressIp，使用专用合成 id。doctor 第 5 层读取 /rules 检查选中分组是否参与规则、是否是 MATCH 目标，并用内核 DNS 解析上游域名、按规则顺序找出首条命中（upstreamRoute），不经过所选分组时告警；doctor --deep 以回显 IP 做分组核对。回显结果与 Zen 实际出口的关系见 [回显 IP 的测量范围](usage.md#回显-ip-的测量范围)。
 
-Clash 支持 manual 和 auto。manual 不自动切换；auto 按探活、可用节点、priority 和 id 选择并保持健康内核。批量探测期间锁定一个内核。
+Clash 支持 manual 和 auto。转发路径由 pickBridge 按配置取内核、不探活：manual 严格用 activeBridgeId；auto 优先 activeBridgeId，否则按 priority 和 id。探活择优（selectBridge：可连通、分组内有节点、粘滞、priority、id）只在批量探测第 0 段执行，并把结果写回 activeBridgeId；批量探测期间锁定该内核。doctor 也运行同一择优但只读。
 
 ## 管理 API 与后台
 

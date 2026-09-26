@@ -1,21 +1,14 @@
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { createServer, type Server } from "node:http";
-import { once } from "node:events";
-import { mkdtemp, rm, mkdir } from "node:fs/promises";
-import { tmpdir } from "node:os";
+import { describe, expect, it } from "vitest";
 import { join } from "node:path";
-import type { DatabaseSync } from "node:sqlite";
 import { createApp } from "../../src/server/app.ts";
 import { EgressService } from "../../src/core/proxy/egress.ts";
-import { ModelCatalog, catalogIdentityOf } from "../../src/core/models/catalog.ts";
 import { Scheduler } from "../../src/core/routing/scheduler.ts";
-import { ConfigSchema, type Config } from "../../src/shared/schema.ts";
 import { openDb } from "../../src/store/db/open.ts";
-import { StatsStore, dayKey } from "../../src/store/db/stats.ts";
-import { AffinityStore } from "../../src/store/db/affinityStore.ts";
+import { dayKey } from "../../src/store/db/stats.ts";
+import { TOKEN, useStatsFixture } from "./helpers/statsFixture.ts";
 
 /**
- * 统计集成测试 —— 统计写入与亲和持久化，对着**真实假上游 + 真实 SQLite** 跑。
+ * 统计集成测试 —— 统计写入对着**真实假上游 + 真实 SQLite** 跑。
  *
  * ## 为什么这些必须是集成测试
  *
@@ -23,110 +16,11 @@ import { AffinityStore } from "../../src/store/db/affinityStore.ts";
  * 那些入参凑对了**：中间隔着重试链的 `onAttempt`、流末尾的 `onDone`、
  * 以及「用量归属实际承接者而非候选链首位」这条只在重试发生时才分叉的规则。
  *
- * 「一条客户端请求发了几次上游」与「会话绑定停在候选链首位」同理，
- * 都只有集成测试查得出来 —— 纯单测看不见跨层的次序。
+ * 「一条客户端请求发了几次上游」同理，只有集成测试查得出来 ——
+ * 纯单测看不见跨层的次序。
  */
 
-const TOKEN = "phase7-test-token-x";
-
-type Req = import("node:http").IncomingMessage;
-type Res = import("node:http").ServerResponse;
-
-let upstream: Server;
-let upstreamPort: number;
-let handler: (req: Req, res: Res) => void;
-let egress: EgressService;
-let root: string;
-let db: DatabaseSync;
-let stats: StatsStore;
-let affinityStore: AffinityStore;
-
-const LIVE_IDS = ["big-pickle", "nemotron-3-ultra-free"];
-
-beforeEach(async () => {
-  handler = (_req, res) => {
-    res.writeHead(200, { "content-type": "application/json" });
-    res.end(JSON.stringify({ id: "x", usage: { prompt_tokens: 40, completion_tokens: 10 } }));
-  };
-
-  upstream = createServer((req, res) => {
-    const chunks: Buffer[] = [];
-    req.on("data", (c: Buffer) => chunks.push(c));
-    req.on("end", () => {
-      if (req.method === "GET" && (req.url ?? "").endsWith("/models")) {
-        res.writeHead(200, { "content-type": "application/json" });
-        res.end(JSON.stringify({ object: "list", data: LIVE_IDS.map((id) => ({ id })) }));
-        return;
-      }
-      handler(req, res);
-    });
-  });
-  upstream.listen(0, "127.0.0.1");
-  await once(upstream, "listening");
-  const addr = upstream.address();
-  if (addr === null || typeof addr === "string") throw new Error("无法取得假上游端口");
-  upstreamPort = addr.port;
-
-  egress = new EgressService({ timeouts: { headersTimeoutMs: 5_000, bodyTimeoutMs: 5_000 } });
-
-  root = await mkdtemp(join(tmpdir(), "zg-p7-"));
-  await mkdir(join(root, "data"), { recursive: true, mode: 0o700 });
-  db = openDb(join(root, "data", "runtime.db"));
-  stats = new StatsStore(db);
-  affinityStore = new AffinityStore(db);
-});
-
-afterEach(async () => {
-  await egress.close();
-  upstream.close();
-  await once(upstream, "close");
-  db.close();
-  await rm(root, { recursive: true, force: true });
-});
-
-function config(over: Record<string, unknown> = {}): Config {
-  return ConfigSchema.parse({
-    version: 1,
-    gateway: { relayToken: TOKEN, baseUrl: `http://127.0.0.1:${upstreamPort}/v1` },
-    workers: [
-      { id: "w1", name: "", kind: "authenticated", apiKey: "fake-key-w1-not-real", enabled: true, proxyId: null },
-      { id: "w2", name: "", kind: "authenticated", apiKey: "fake-key-w2-not-real", enabled: true, proxyId: null },
-    ],
-    ...over,
-  });
-}
-
-function relay(body: unknown, headers: Record<string, string> = {}) {
-  return {
-    method: "POST",
-    headers: { authorization: `Bearer ${TOKEN}`, "content-type": "application/json", ...headers },
-    body: JSON.stringify(body),
-  };
-}
-
-async function warmCatalog(cfg: Config): Promise<ModelCatalog> {
-  const catalog = new ModelCatalog();
-  await catalog.ensure(catalogIdentityOf(cfg), cfg, (c) => egress.upstreamDeps(c));
-  return catalog;
-}
-
-async function makeApp(cfg: Config, scheduler?: Scheduler, clock?: () => number) {
-  return createApp({
-    configOf: () => cfg,
-    egress,
-    catalog: await warmCatalog(cfg),
-    scheduler: scheduler ?? new Scheduler({ affinitySink: affinityStore }),
-    stats,
-    ...(clock !== undefined ? { clock } : {}),
-    log: () => {},
-  });
-}
-
-const chatBody = (over: Record<string, unknown> = {}) => ({
-  model: "big-pickle",
-  messages: [{ role: "user", content: "hi" }],
-  ...over,
-});
+const { up, store, config, relay, makeApp, chatBody } = useStatsFixture();
 
 describe("统计真的经转发路径落库", () => {
   it("一次成功请求写下一条尝试、一条用量、一个 Worker 计数", async () => {
@@ -136,9 +30,9 @@ describe("统计真的经转发路径落库", () => {
     // 用量在流末尾的 onDone 里记 —— 必须先把响应读完。
     await res.text();
 
-    expect(stats.requestCounts()).toEqual({ requests: 1, attempts: 1 });
+    expect(store.stats.requestCounts()).toEqual({ requests: 1, attempts: 1 });
 
-    const [attempt] = stats.recentAttempts();
+    const [attempt] = store.stats.recentAttempts();
     expect(attempt).toMatchObject({
       workerId: "w1",
       protocol: "chat",
@@ -155,7 +49,7 @@ describe("统计真的经转发路径落库", () => {
      */
     expect(attempt?.latencyMs).not.toBeNull();
 
-    const [usageRow] = stats.modelUsage();
+    const [usageRow] = store.stats.modelUsage();
     expect(usageRow).toMatchObject({
       model: "big-pickle",
       inputTokens: 40,
@@ -164,26 +58,26 @@ describe("统计真的经转发路径落库", () => {
       requestsWithoutUsage: 0,
     });
 
-    expect(stats.workerTotals()).toEqual([
+    expect(store.stats.workerTotals()).toEqual([
       expect.objectContaining({ workerId: "w1", attempts: 1, successes: 1, failures: 0 }),
     ]);
   });
 
   it("统计写入失败不影响转发 —— 库关掉后请求照样 200", async () => {
     const app = await makeApp(config());
-    db.close();
+    store.db.close();
 
     const res = await app.request("/v1/chat/completions", relay(chatBody()));
     // 转发是主路径，统计是诊断设施：后者坏了不该拖垮前者。
     expect(res.status).toBe(200);
     await res.text();
-    expect(stats.writeFailures().count).toBeGreaterThan(0);
+    expect(store.stats.writeFailures().count).toBeGreaterThan(0);
 
-    db = openDb(join(root, "data", "runtime.db"));
+    store.db = openDb(join(store.root, "data", "runtime.db"));
   });
 
   it("上游没报用量时记进 requests_without_usage,不漏掉这次请求", async () => {
-    handler = (_req, res) => {
+    up.handler = (_req, res) => {
       res.writeHead(200, { "content-type": "application/json" });
       // 刻意不带 usage —— 免费模型的响应未必有。
       res.end(JSON.stringify({ id: "x" }));
@@ -191,66 +85,13 @@ describe("统计真的经转发路径落库", () => {
     const app = await makeApp(config());
     await (await app.request("/v1/chat/completions", relay(chatBody()))).text();
 
-    expect(stats.modelUsage()[0]).toMatchObject({
+    expect(store.stats.modelUsage()[0]).toMatchObject({
       requestsWithUsage: 0,
       requestsWithoutUsage: 1,
       inputTokens: 0,
     });
     // 覆盖率因此是 0 而不是 null，也不是 1 —— 分母数上了这次请求。
-    expect(stats.rates().usageCoverage).toBe(0);
-  });
-});
-
-describe("诊断头三个都在两条路径上", () => {
-  /*
-   * 「诊断手段只在一半路径可用」这个形态容易出现：`route`、`free`、`attempts`
-   * 都曾只在一条路径上设置，而文档写着"前三个头在成功与失败时都有"。
-   *
-   * 这条测试同时钉住三个头在**两条路径**上都存在。
-   */
-  it("成功路径带 worker/route/attempts", async () => {
-    const app = await makeApp(config());
-    const res = await app.request("/v1/chat/completions", relay(chatBody()));
-    await res.text();
-
-    expect(res.headers.get("x-zen-gateway-worker")).not.toBeNull();
-    expect(res.headers.get("x-zen-gateway-route")).not.toBeNull();
-    // 成功前试了几个 —— 多账号轮换下这是该被看见的信号。
-    expect(res.headers.get("x-zen-gateway-attempts")).toBe("1");
-  });
-
-  it("成功前重试过时 attempts 反映真实次数", async () => {
-    let n = 0;
-    handler = (_req, res) => {
-      n += 1;
-      if (n === 1) {
-        res.writeHead(500, {});
-        res.end("{}");
-        return;
-      }
-      res.writeHead(200, { "content-type": "application/json" });
-      res.end(JSON.stringify({ id: "x" }));
-    };
-    const app = await makeApp(config());
-    const res = await app.request("/v1/chat/completions", relay(chatBody()));
-    await res.text();
-
-    expect(res.status).toBe(200);
-    expect(res.headers.get("x-zen-gateway-attempts")).toBe("2");
-  });
-
-  it("失败路径同样带三个头", async () => {
-    handler = (_req, res) => {
-      res.writeHead(500, {});
-      res.end("{}");
-    };
-    const app = await makeApp(config());
-    const res = await app.request("/v1/chat/completions", relay(chatBody()));
-    await res.text();
-
-    expect(res.headers.get("x-zen-gateway-attempts")).not.toBeNull();
-    expect(res.headers.get("x-zen-gateway-route")).not.toBeNull();
-    expect(res.headers.get("x-zen-gateway-worker")).not.toBeNull();
+    expect(store.stats.rates().usageCoverage).toBe(0);
   });
 });
 
@@ -273,12 +114,12 @@ describe("时刻真的从转发路径流到库里", () => {
     const app = await makeApp(config(), undefined, () => FIXED);
     await (await app.request("/v1/chat/completions", relay(chatBody()))).text();
 
-    expect(stats.recentAttempts()[0]?.at).toBe(FIXED);
+    expect(store.stats.recentAttempts()[0]?.at).toBe(FIXED);
 
     // 用量按 UTC 日分行 —— 主键里的 day 必须来自那个时刻。
-    expect(stats.modelUsage(dayKey(FIXED))).toHaveLength(1);
-    expect(stats.modelUsage("1970-01-02")).toHaveLength(1); // 1970 之后的都能看到
-    expect(stats.modelUsage("2026-06-16")).toHaveLength(0); // 次日之后看不到
+    expect(store.stats.modelUsage(dayKey(FIXED))).toHaveLength(1);
+    expect(store.stats.modelUsage("1970-01-02")).toHaveLength(1); // 1970 之后的都能看到
+    expect(store.stats.modelUsage("2026-06-16")).toHaveLength(0); // 次日之后看不到
   });
 
   it("耗时是真的测量出来的 —— 递进时钟下 latencyMs 等于两次读表的差", async () => {
@@ -294,7 +135,7 @@ describe("时刻真的从转发路径流到库里", () => {
     const app = await makeApp(config(), undefined, () => (t += 7));
     await (await app.request("/v1/chat/completions", relay(chatBody()))).text();
 
-    expect(stats.recentAttempts()[0]?.latencyMs).toBe(7);
+    expect(store.stats.recentAttempts()[0]?.latencyMs).toBe(7);
   });
 
   it("写死 at=0 会让 sinceDay 过滤失效 —— 反向断言", async () => {
@@ -306,14 +147,14 @@ describe("时刻真的从转发路径流到库里", () => {
     const app = await makeApp(config(), undefined, () => FIXED);
     await (await app.request("/v1/chat/completions", relay(chatBody()))).text();
 
-    expect(stats.workerTotals()[0]?.lastUsedAt).toBe(FIXED);
+    expect(store.stats.workerTotals()[0]?.lastUsedAt).toBe(FIXED);
   });
 });
 
 describe("重试链的统计语义", () => {
   it("一条 w1 失败 → w2 成功的链 = 1 个请求、2 次尝试,两个 Worker 各自可见", async () => {
     let n = 0;
-    handler = (_req, res) => {
+    up.handler = (_req, res) => {
       n += 1;
       if (n === 1) {
         res.writeHead(500, { "content-type": "application/json" });
@@ -330,9 +171,9 @@ describe("重试链的统计语义", () => {
     await res.text();
 
     // **这是本模块最容易搞错的一条**：请求数 ≠ 尝试数。
-    expect(stats.requestCounts()).toEqual({ requests: 1, attempts: 2 });
+    expect(store.stats.requestCounts()).toEqual({ requests: 1, attempts: 2 });
 
-    const rows = stats.recentAttempts();
+    const rows = store.stats.recentAttempts();
     expect(rows).toHaveLength(2);
     // 同一条链共用 request_id —— 否则「这两次尝试属于同一个请求」查不出来。
     expect(new Set(rows.map((r) => r.requestId)).size).toBe(1);
@@ -352,7 +193,7 @@ describe("重试链的统计语义", () => {
       { w: "w1", i: 0 },
     ]);
 
-    const byWorker = new Map(stats.workerTotals().map((w) => [w.workerId, w]));
+    const byWorker = new Map(store.stats.workerTotals().map((w) => [w.workerId, w]));
     expect(byWorker.get("w1")).toMatchObject({ attempts: 1, failures: 1, successes: 0 });
     expect(byWorker.get("w2")).toMatchObject({ attempts: 1, failures: 0, successes: 1 });
   });
@@ -365,7 +206,7 @@ describe("重试链的统计语义", () => {
      * 多账号出口隔离场景下最要紧的一个数字。
      */
     let n = 0;
-    handler = (_req, res) => {
+    up.handler = (_req, res) => {
       n += 1;
       if (n === 1) {
         res.writeHead(500, {});
@@ -379,7 +220,7 @@ describe("重试链的统计语义", () => {
     const app = await makeApp(config());
     await (await app.request("/v1/chat/completions", relay(chatBody()))).text();
 
-    const rows = db
+    const rows = store.db
       .prepare("SELECT worker_id, input_tokens FROM model_usage")
       .all() as Array<{ worker_id: string; input_tokens: number }>;
     expect(rows).toEqual([{ worker_id: "w2", input_tokens: 99 }]);
@@ -396,7 +237,7 @@ describe("重试链的统计语义", () => {
      * 这条测试仍然通过。有了基线，没接线会让第一个断言先红。
      */
     await (await app.request("/v1/chat/completions", relay(chatBody()))).text();
-    expect(stats.requestCounts()).toEqual({ requests: 1, attempts: 1 });
+    expect(store.stats.requestCounts()).toEqual({ requests: 1, attempts: 1 });
 
     // 付费模型 → 免费闸门在第 3 步拒绝，压根没有上游尝试。
     const res = await app.request("/v1/chat/completions", relay(chatBody({ model: "claude-opus-5" })));
@@ -404,7 +245,7 @@ describe("重试链的统计语义", () => {
 
     // 计数**仍然**是 1/1：一次没发生的上游尝试不该出现在 upstream_attempts 里，
     // 否则「这个 Worker 转发过什么」会包含它根本没参与的请求。
-    expect(stats.requestCounts()).toEqual({ requests: 1, attempts: 1 });
+    expect(store.stats.requestCounts()).toEqual({ requests: 1, attempts: 1 });
   });
 });
 
@@ -421,10 +262,10 @@ describe("writeFailures 有了生产读者（/health）", () => {
   it("库坏掉后 /health 报出非 0 的失败次数", async () => {
     const app = createApp({
       configOf: () => config(),
-      egress,
+      egress: up.egress,
       scheduler: new Scheduler(),
-      stats,
-      storeWriteFailures: () => stats.writeFailures().count,
+      stats: store.stats,
+      storeWriteFailures: () => store.stats.writeFailures().count,
       log: () => {},
     });
 
@@ -433,13 +274,13 @@ describe("writeFailures 有了生产读者（/health）", () => {
     expect(before.storeWriteFailures).toBe(0);
 
     // 关掉库制造写失败。
-    db.close();
-    stats.recordUsage({ model: "m", workerId: "w1", at: Date.now(), usage: null });
+    store.db.close();
+    store.stats.recordUsage({ model: "m", workerId: "w1", at: Date.now(), usage: null });
 
     const after = (await (await app.request("/health")).json()) as { storeWriteFailures: number };
     expect(after.storeWriteFailures).toBeGreaterThan(0);
 
-    db = openDb(join(root, "data", "runtime.db"));
+    store.db = openDb(join(store.root, "data", "runtime.db"));
   });
 });
 
@@ -451,16 +292,16 @@ describe("探测结果落盘（recordProbe 有了生产调用点）", () => {
   it("probeProxy 把结果写进 probe_results", async () => {
     const svc = new EgressService({
       timeouts: { headersTimeoutMs: 3_000, bodyTimeoutMs: 3_000 },
-      probes: stats,
+      probes: store.stats,
       services: [
         {
-          url: `http://127.0.0.1:${upstreamPort}/echo-ip`,
+          url: `http://127.0.0.1:${up.port}/echo-ip`,
           extract: (text) => (text.trim() === "" ? null : text.trim()),
         },
       ],
       probeTimeoutMs: 3_000,
     });
-    handler = (_req, res) => {
+    up.handler = (_req, res) => {
       res.writeHead(200, { "content-type": "text/plain" });
       res.end("203.0.113.9");
     };
@@ -469,7 +310,7 @@ describe("探测结果落盘（recordProbe 有了生产调用点）", () => {
       const r = await svc.probeProxy(config(), null);
       expect(r.outcome.ok).toBe(true);
 
-      const row = db.prepare("SELECT proxy_id, ok, egress_ip FROM probe_results").get();
+      const row = store.db.prepare("SELECT proxy_id, ok, egress_ip FROM probe_results").get();
       expect(row).toMatchObject({ proxy_id: "__direct__", ok: 1, egress_ip: "203.0.113.9" });
     } finally {
       await svc.close();
@@ -479,7 +320,7 @@ describe("探测结果落盘（recordProbe 有了生产调用点）", () => {
   it("失败的探测也记一行 —— 「上周探测失败过」同样要能查", async () => {
     const svc = new EgressService({
       timeouts: { headersTimeoutMs: 3_000, bodyTimeoutMs: 3_000 },
-      probes: stats,
+      probes: store.stats,
       services: [{ url: "http://127.0.0.1:1/never", extract: () => null }],
       probeTimeoutMs: 500,
     });
@@ -487,7 +328,7 @@ describe("探测结果落盘（recordProbe 有了生产调用点）", () => {
       const r = await svc.probeProxy(config(), null);
       expect(r.outcome.ok).toBe(false);
 
-      const row = db.prepare("SELECT ok, egress_ip, failure_kind FROM probe_results").get() as
+      const row = store.db.prepare("SELECT ok, egress_ip, failure_kind FROM probe_results").get() as
         | Record<string, unknown>
         | undefined;
       expect(row?.["ok"]).toBe(0);
@@ -520,7 +361,7 @@ describe("「我们自己丢了用量」经转发路径落库", () => {
      *
      * 后者才是这条要验的形态：**我们自己丢了**，而"上游有没有报"我们不知道。
      */
-    handler = (_req, res) => {
+    up.handler = (_req, res) => {
       res.writeHead(200, { "content-type": "application/json" });
       const payload = JSON.stringify({
         id: "x",
@@ -547,17 +388,17 @@ describe("「我们自己丢了用量」经转发路径落库", () => {
      * 所以正确的断言是：`dropped` 被记下（我们丢过东西这件事可观测），
      * 而**不**被计进 `without`（我们没有假装"上游没报"）。
      */
-    const row = stats.modelUsage()[0];
+    const row = store.stats.modelUsage()[0];
     expect(row?.requestsDroppedUsage).toBe(1);
     // 关键：不记进 without —— 那会把"我们丢了"伪装成"上游没报"。
     expect(row?.requestsWithoutUsage).toBe(0);
-    expect(stats.rates().droppedUsageCount).toBe(1);
+    expect(store.stats.rates().droppedUsageCount).toBe(1);
   });
 
   it("正常大小的响应不记 dropped —— 不误报", async () => {
     const app = await makeApp(config());
     await (await app.request("/v1/chat/completions", relay(chatBody()))).text();
-    expect(stats.modelUsage()[0]).toMatchObject({
+    expect(store.stats.modelUsage()[0]).toMatchObject({
       requestsWithUsage: 1,
       requestsDroppedUsage: 0,
     });
@@ -578,9 +419,9 @@ describe("网关拒绝真的经转发路径落库", () => {
     );
     expect(res.status).toBe(403);
 
-    expect(stats.rejectionsByReason()).toEqual({ not_free: 1 });
+    expect(store.stats.rejectionsByReason()).toEqual({ not_free: 1 });
     // 一次没发生的上游尝试不该出现在 upstream_attempts 里。
-    expect(stats.requestCounts()).toEqual({ requests: 0, attempts: 0 });
+    expect(store.stats.requestCounts()).toEqual({ requests: 0, attempts: 0 });
   });
 
   it("已下架的模型记 retired 而不是 not_free —— 处置不同", async () => {
@@ -595,7 +436,7 @@ describe("网关拒绝真的经转发路径落库", () => {
       relay(chatBody({ model: "glm-5-free" })),
     );
     expect(res.status).toBe(403);
-    expect(stats.rejectionsByReason()).toEqual({ retired: 1 });
+    expect(store.stats.rejectionsByReason()).toEqual({ retired: 1 });
   });
 
   it("非法 JSON 记 body_not_json,model 为占位符", async () => {
@@ -607,7 +448,7 @@ describe("网关拒绝真的经转发路径落库", () => {
     });
     expect(res.status).toBe(400);
 
-    const rows = stats.rejections();
+    const rows = store.stats.rejections();
     expect(rows).toHaveLength(1);
     // 体没解析出来 → 拿不到 model → 占位符。
     expect(rows[0]).toMatchObject({ reason: "body_not_json", protocol: "chat" });
@@ -621,7 +462,7 @@ describe("网关拒绝真的经转发路径落库", () => {
       body: "",
     });
     expect(res.status).toBe(400);
-    expect(stats.rejectionsByReason()).toEqual({ body_empty: 1 });
+    expect(store.stats.rejectionsByReason()).toEqual({ body_empty: 1 });
   });
 
   it("无可用 Worker 记 no_worker —— 六种拒绝里最需要计数的那个", async () => {
@@ -633,94 +474,12 @@ describe("网关拒绝真的经转发路径落库", () => {
     const app = await makeApp(cfg);
     const res = await app.request("/v1/chat/completions", relay(chatBody()));
     expect(res.status).toBe(503);
-    expect(stats.rejectionsByReason()).toEqual({ no_worker: 1 });
+    expect(store.stats.rejectionsByReason()).toEqual({ no_worker: 1 });
   });
 
   it("成功的请求不记拒绝", async () => {
     const app = await makeApp(config());
     await (await app.request("/v1/chat/completions", relay(chatBody()))).text();
-    expect(stats.rejections()).toHaveLength(0);
-  });
-});
-
-describe("亲和持久化:重启后粘滞不归零", () => {
-  it("重启后同一会话仍路由到原 Worker", async () => {
-    const cfg = config();
-    const session = "sticky-session-1";
-
-    // 第一轮：建立绑定。
-    const first = await makeApp(cfg);
-    const r1 = await first.request(
-      "/v1/chat/completions",
-      relay(chatBody(), { "x-opencode-session": session }),
-    );
-    await r1.text();
-    const firstWorker = r1.headers.get("x-zen-gateway-worker");
-    expect(firstWorker).not.toBeNull();
-
-    // 模拟重启：全新的 Scheduler（空内存），只通过 DB 恢复。
-    const revived = new Scheduler({ affinitySink: affinityStore });
-    const now = Date.now();
-    revived.restoreAffinity(affinityStore.loadSessions(now), affinityStore.loadBlobs(now));
-
-    const second = await makeApp(cfg, revived);
-    const r2 = await second.request(
-      "/v1/chat/completions",
-      relay(chatBody(), { "x-opencode-session": session }),
-    );
-    await r2.text();
-
-    expect(r2.headers.get("x-zen-gateway-worker")).toBe(firstWorker);
-    // 命中的是恢复来的绑定，而不是"碰巧又选了同一个" ——
-    // `sticky` 正是 select.ts 里会话亲和命中的那个 reason。
-    expect(r2.headers.get("x-zen-gateway-route")).toBe("sticky");
-  });
-
-  it("不传 affinitySink 时重启后绑定归零(对照)", async () => {
-    /*
-     * 反向断言：证明上一条测的是**持久化**在起作用，
-     * 而不是"候选链顺序恰好稳定"这种与本特性无关的原因。
-     */
-    const cfg = config();
-    const session = "sticky-session-2";
-
-    const first = await makeApp(cfg, new Scheduler());
-    await (
-      await first.request(
-        "/v1/chat/completions",
-        relay(chatBody(), { "x-opencode-session": session }),
-      )
-    ).text();
-
-    // 没有 sink → 库里什么都没有。
-    expect(affinityStore.loadSessions(Date.now())).toHaveLength(0);
-
-    const revived = new Scheduler();
-    const second = await makeApp(cfg, revived);
-    const r2 = await second.request(
-      "/v1/chat/completions",
-      relay(chatBody(), { "x-opencode-session": session }),
-    );
-    await r2.text();
-    // 空内存 → 走策略排序，不是亲和命中。
-    expect(r2.headers.get("x-zen-gateway-route")).toBe("strategy");
-  });
-
-  it("会话绑定落库的是摘要,不是原始会话标识", async () => {
-    const cfg = config();
-    const session = "a-very-recognizable-session-id";
-    const app = await makeApp(cfg);
-    await (
-      await app.request(
-        "/v1/chat/completions",
-        relay(chatBody(), { "x-opencode-session": session }),
-      )
-    ).text();
-
-    const rows = affinityStore.loadSessions(Date.now());
-    expect(rows).toHaveLength(1);
-    // 原值绝不能进库 —— 它来自客户端，而这张表会进备份与诊断导出。
-    expect(rows[0]?.hash).not.toContain("recognizable");
-    expect(rows[0]?.hash).toMatch(/^[0-9a-f]{64}$/);
+    expect(store.stats.rejections()).toHaveLength(0);
   });
 });

@@ -187,7 +187,7 @@ export class BatchProbeRunner {
   async #run(proxyIds: Array<string | null>): Promise<void> {
     /*
      * `let` 而不是 `const` —— 第 0 段可能把 `activeBridgeId` 写回配置，
-     * 而 230/257 行的筛选与真实探测**必须用写回之后的那份**：
+     * 而随后第一段的筛选与第二段的真实探测**必须用写回之后的那份**：
      * 沿用旧引用会让"已切到健康内核"只体现在日志里，而探测照旧打死内核。
      */
     let config = this.#deps.configOf();

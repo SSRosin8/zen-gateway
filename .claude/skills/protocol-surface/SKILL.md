@@ -51,7 +51,7 @@ description: 新增或修改客户端协议面、转发请求链、重试、冷�
 4. **`bad_request` 与出口配置错误不归咎 Worker**：连续失败计数不变（只有成功清零），已有冷却保留。
    `Scheduler.record()` 结合 `blameWorker` 与 `shouldCooldown` 判定，
    成功只在尝试开始时间晚于冷却时才清除冷却；401 的 `auth` 与 403 的
-   `forbidden` 仍会冷却该 Worker。
+   `forbidden` 仍会冷却该 Worker，`forbidden` 另外换 Worker 重试。
 5. **selector 锁的范围**：`fetch.ts` 返回 Response 而**不是**读完 body 的
    promise —— keep-alive 连接复用会击穿锁，所以 `nodeName` 必须参与
    dispatcher 的缓存键。锁只覆盖切换 selector 与建立连接，连接建立后即释放；桥接统一走 CONNECT 隧道，保证 Clash 在切换后选路。

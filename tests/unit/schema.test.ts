@@ -498,3 +498,61 @@ describe("`__direct__` 是保留 id", () => {
     expect(IdSchema.safeParse(DIRECT_EGRESS_ID).success).toBe(false);
   });
 });
+
+describe("schema：进 HTTP 头的字段必须拒绝控制字符", () => {
+  const CRLF = String.fromCharCode(0x0d, 0x0a);
+
+  it("Worker id 含 CRLF 被拒 —— 它会进 x-zen-gateway-worker 响应头", () => {
+    expect(() =>
+      ConfigSchema.parse({
+        version: 1,
+        gateway: { relayToken: "schema-token-not-real-xx" },
+        workers: [
+          { id: `w1${CRLF}X-Evil: 1`, name: "", kind: "authenticated", apiKey: "k", enabled: true, proxyId: null },
+        ],
+      }),
+    ).toThrow();
+  });
+
+  it("apiKey 含 CRLF 被拒 —— 它会进 Authorization 头", () => {
+    expect(() =>
+      ConfigSchema.parse({
+        version: 1,
+        gateway: { relayToken: "schema-token-not-real-xx" },
+        workers: [
+          { id: "w1", name: "", kind: "authenticated", apiKey: `k${CRLF}X: 1`, enabled: true, proxyId: null },
+        ],
+      }),
+    ).toThrow();
+  });
+
+  it("Clash 节点名仍允许 emoji、CJK 与连续空格", () => {
+    /*
+     * 收紧 id 字符集时**不能**连带收紧 clashNodeName:真实订阅里的节点名
+     * 含 emoji flag 序列、中文、连续空格。收窄它会让订阅导入直接失效。
+     */
+    const cfg = ConfigSchema.parse({
+      version: 1,
+      gateway: { relayToken: "schema-token-not-real-xx" },
+      clash: {
+        enabled: true,
+        bridges: [{ id: "k1", name: "内核", apiBase: "http://127.0.0.1:9090", localProxyPort: 17891 }],
+      },
+      proxies: [
+        {
+          id: "p1",
+          name: "🇯🇵 东京  节点",
+          clashNodeName: "🇯🇵 东京  节点 ①",
+          type: "vless",
+          host: "a.invalid",
+          port: 443,
+          source: "subscription",
+          direct: false,
+          bridgeable: true,
+          bridgeId: "k1",
+        },
+      ],
+    });
+    expect(cfg.proxies[0]!.clashNodeName).toBe("🇯🇵 东京  节点 ①");
+  });
+});

@@ -569,7 +569,7 @@ async function handleRelay(
        *
        * 传下去之后注入常量时钟会让耗时恒为 0（那是**正确**的:两次读同一个
        * 时钟），所以要钉住"耗时真的被测量"需要一个**递进**的时钟，
-       * 见 `phase7.test.ts` 的对应用例。
+       * 见 `statsRecording.test.ts` 的对应用例。
        */
       ...(deps.clock !== undefined ? { clock: deps.clock } : {}),
       onAttempt: (record) => {

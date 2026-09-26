@@ -3,7 +3,7 @@ import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { judgeFree, surfacesFor } from "../../src/core/models/free.ts";
 import { upstreamUrl } from "../../src/core/upstream/url.ts";
-import { ModelRulesSchema } from "../../src/shared/schema.ts";
+import { ModelRulesSchema, type ProtocolId } from "../../src/shared/schema.ts";
 
 const ROOT = new URL("../..", import.meta.url).pathname;
 
@@ -315,5 +315,44 @@ describe("上游 URL 拼接", () => {
 
   it("多层路径前缀完整保留", () => {
     expect(upstreamUrl("https://h.invalid/a/b/c", "/models")).toBe("https://h.invalid/a/b/c/models");
+  });
+});
+
+/* ================================================================== *
+ * freeSuffix 为空串时闸门不得全开
+ * ================================================================== */
+
+describe("免费判定：freeSuffix 空串的第二道防护", () => {
+  /** 绕过 schema 直接构造 —— 这正是第二道防护存在的意义。 */
+  function rules(freeSuffix: string) {
+    return {
+      freeSuffix,
+      extraFreeIds: [],
+      defaultSurfaces: ["chat"] as ProtocolId[],
+      surfaceOverrides: {},
+    };
+  }
+
+  it.each(["claude-opus-5", "gpt-5.5", "kimi-k3", "anything"])(
+    "freeSuffix 为空串时不放行付费模型：%s",
+    (id) => {
+      /*
+       * `"".endsWith("")` 对**任何** id 为真 → 整道付费闸门静默全开。
+       * schema 的 `.min(1)` 是第一道,这里是第二道 ——
+       * "一个『配置写错就全开』的闸门不该只有一层防护"。
+       * 先前去掉 `suffix !== ""` 后全套仍绿。
+       */
+      expect(judgeFree(id, rules("") as never).free).toBe(false);
+    },
+  );
+
+  it("空串下连真免费模型也不放行（宁可全关不可全开）", () => {
+    // 两侧代价不对称:放行付费模型要花钱,拒绝免费模型只是一条可自查的错误。
+    expect(judgeFree("nemotron-3-ultra-free", rules("") as never).free).toBe(false);
+  });
+
+  it("正常后缀仍然工作（上面那条不是靠把功能关掉实现的）", () => {
+    expect(judgeFree("x-free", rules("-free") as never).free).toBe(true);
+    expect(judgeFree("claude-opus-5", rules("-free") as never).free).toBe(false);
   });
 });

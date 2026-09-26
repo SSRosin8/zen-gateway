@@ -305,3 +305,84 @@ describe("collectHeaders", () => {
     expect(collectHeaders(hs)).toEqual({ "content-type": "application/json", "x-custom": "v" });
   });
 });
+
+/* ================================================================== *
+ * 凭证类请求头不得转发给上游
+ * ================================================================== */
+
+describe("上游请求头：凭证与来源信息不得外泄", () => {
+  function build(clientHeaders: Record<string, string>) {
+    return buildUpstreamHeaders({
+      clientHeaders,
+      apiKey: "fake-worker-key-not-real",
+      streaming: false,
+    });
+  }
+
+  it.each([
+    ["cookie（浏览器恶意页面 fetch 本地端口时会自动带上）", "cookie"],
+    ["authentication（isSecretKey 唯一认不出的凭证头名）", "authentication"],
+    ["api-key", "api-key"],
+    ["x-goog-api-key", "x-goog-api-key"],
+    ["x-oc-relay-key（redact.ts 已知的本项目凭证形态）", "x-oc-relay-key"],
+    ["x-auth-token", "x-auth-token"],
+    ["x-session-id", "x-session-id"],
+  ])("凭证头不转发：%s", (_label, name) => {
+    const h = build({ [name]: "SECRET-VALUE-MUST-NOT-LEAK" });
+    expect(h[name]).toBeUndefined();
+    expect(JSON.stringify(h)).not.toContain("SECRET-VALUE-MUST-NOT-LEAK");
+  });
+
+  it("content-encoding 不转发 —— 我们转发的是原始未压缩字节", () => {
+    /*
+     * 这是 pipe.ts 在响应侧已修掉的同一个 bug 的**请求侧镜像**。
+     * 残留一个 `gzip` 会让上游对明文做 gunzip,得到解码失败。
+     */
+    const h = build({ "content-encoding": "gzip" });
+    expect(h["content-encoding"]).toBeUndefined();
+  });
+
+  it.each(["x-forwarded-for", "x-real-ip", "forwarded", "x-forwarded-host"])(
+    "客户端自称的来源不转发：%s",
+    (name) => {
+      // 我们不是反代链的一环。转发它会把内网拓扑泄露给上游,
+      // 并代为断言一件我们从未验证过的事。
+      const h = build({ [name]: "10.1.2.3" });
+      expect(h[name]).toBeUndefined();
+      expect(JSON.stringify(h)).not.toContain("10.1.2.3");
+    },
+  );
+
+  it("OpenCode 的身份头原样保留;同前缀但像凭证的头被剥掉", () => {
+    /*
+     * 只有 `OPENCODE_IDENTITY_HEADERS` 名单豁免通用凭证规则。豁免整个前缀会让
+     * `x-opencode-api-key` 这类客户端可控的头原样发往上游;代价是将来名字像凭证的
+     * 新 `x-opencode-*` 头(如 `x-opencode-token-budget`)要先加进名单才能透传。
+     */
+    const h = build({
+      "x-opencode-session": "ses_abc",
+      "x-opencode-request": "req_1",
+      "x-opencode-project": "proj",
+      "x-opencode-client": "cli",
+      "x-opencode-token-budget": "4096",
+      "x-opencode-feature": "on",
+    });
+    expect(h["x-opencode-session"]).toBe("ses_abc");
+    expect(h["x-opencode-client"]).toBe("cli");
+    expect(h["x-opencode-feature"]).toBe("on");
+    expect(h["x-opencode-token-budget"]).toBeUndefined();
+  });
+
+  it.each([
+    "user-agent",
+    "accept-language",
+    "anthropic-version",
+    "x-stainless-lang",
+    "openai-beta",
+    "x-request-id",
+  ])("常规客户端头不被误剥：%s", (name) => {
+    // 过度剥离的代价是功能故障。这组断言是通用凭证规则的误报守卫。
+    const h = build({ [name]: "some-value" });
+    expect(h[name]).toBe("some-value");
+  });
+});

@@ -6,7 +6,8 @@ import { BlockList, isIP } from "node:net";
 /**
  * Clash / Mihomo External Controller 客户端。
  *
- * 只覆盖本项目需要的四件事:探活、枚举 selector 分组、切换选中节点、测延迟。
+ * 只覆盖本项目需要的操作:探活、读运行配置、枚举分组与节点、切换选中节点、
+ * 测延迟，以及供 doctor 核对选路的规则与 DNS 查询。
  *
  * ## 节点名必须 URL 编码
  *
@@ -34,14 +35,6 @@ export type ProxyNode = {
   latencyMs: number | null;
 };
 
-/**
- * Controller 交互失败的分类。
- *
- * `invalid_input` 与其余几种性质不同:它表示**调用方传进来的名字不合法**,
- * 而不是上游出了问题。必须单独一类 —— `delay()` 会把 `bad_response`/`not_found`
- * 当作「节点不可用」吞掉并返回 null,若输入错误也用那两类,一个配置错误就会被
- * 伪装成「这个节点没有延迟数据」,彻底看不见。
- */
 /**
  * 上游 host 在规则表里的首条命中。
  *
@@ -97,6 +90,14 @@ export function matchUpstreamRule(rules: readonly unknown[], host: string, ips: 
   return { kind: "none" };
 }
 
+/**
+ * Controller 交互失败的分类。
+ *
+ * `invalid_input` 与其余几种性质不同:它表示**调用方传进来的名字不合法**,
+ * 而不是上游出了问题。必须单独一类 —— `delay()` 会把 `bad_response`/`not_found`
+ * 当作「节点不可用」吞掉并返回 null,若输入错误也用那两类,一个配置错误就会被
+ * 伪装成「这个节点没有延迟数据」,彻底看不见。
+ */
 export type ControllerErrorKind =
   | "unreachable"
   | "auth"
@@ -274,6 +275,22 @@ export class ClashController {
   }
 
   /**
+   * 读内核运行配置里本项目关心的两项：选路模式与混合端口。
+   *
+   * 两者来自同一次 `/configs` 响应。字段缺失或类型不对时各自为 null，由调用方
+   * 决定默认值（选路模式按 `rule` 保守处理；混合端口缺失不能用 `socks-port`
+   * 或 `port` 代替，因为桥接 dispatcher 使用 HTTP CONNECT）。
+   */
+  async runtimeConfig(): Promise<{ mode: string | null; mixedPort: number | null }> {
+    const body = (await this.#json("configs")) as { mode?: unknown; "mixed-port"?: unknown } | null;
+    const port = body?.["mixed-port"];
+    return {
+      mode: typeof body?.mode === "string" ? body.mode.toLowerCase() : null,
+      mixedPort: typeof port === "number" && port > 0 ? port : null,
+    };
+  }
+
+  /**
    * 规则实际把流量导向哪些分组（出口隔离与 `GLOBAL` 陷阱的判据）。
    *
    * ## 为什么需要它：`GLOBAL` 陷阱不能靠名字判断
@@ -295,15 +312,7 @@ export class ClashController {
    * 更接近真相：一条 MATCH 覆盖所有未命中的域名。
    */
   async routedGroups(): Promise<{ targets: ReadonlyMap<string, number>; fallback: string | null }> {
-    const body = await this.#json("rules");
-    if (body === null || typeof body !== "object") {
-      throw new ControllerError("/rules 返回的不是对象", "bad_response");
-    }
-    const rules = (body as { rules?: unknown }).rules;
-    if (!Array.isArray(rules)) {
-      throw new ControllerError("/rules 的 rules 不是数组", "bad_response");
-    }
-
+    const rules = await this.#rules();
     const targets = new Map<string, number>();
     let fallback: string | null = null;
     for (const entry of rules) {
@@ -331,13 +340,18 @@ export class ClashController {
    * 可能给出不同结果。读不到 DNS 时 IP 规则一律视为无法判定。
    */
   async upstreamRoute(host: string): Promise<UpstreamRoute> {
+    const rules = await this.#rules();
+    const ips = await this.#resolve(host);
+    return matchUpstreamRule(rules, host, ips);
+  }
+
+  async #rules(): Promise<unknown[]> {
     const body = await this.#json("rules");
     const rules = (body as { rules?: unknown } | null)?.rules;
     if (!Array.isArray(rules)) {
       throw new ControllerError("/rules 的 rules 不是数组", "bad_response");
     }
-    const ips = await this.#resolve(host);
-    return matchUpstreamRule(rules, host, ips);
+    return rules;
   }
 
   async #resolve(host: string): Promise<string[] | null> {
@@ -358,16 +372,20 @@ export class ClashController {
     return out;
   }
 
-  /** 枚举全部 selector 分组。 */
-  async selectors(): Promise<SelectorGroup[]> {
+  async #proxies(): Promise<Record<string, unknown>> {
     const body = await this.#json("proxies");
-    const proxies = (body as { proxies?: unknown })?.proxies;
+    const proxies = (body as { proxies?: unknown } | null)?.proxies;
     if (proxies === null || typeof proxies !== "object") {
       throw new ControllerError("/proxies 返回的不是对象", "bad_response");
     }
+    return proxies as Record<string, unknown>;
+  }
 
+  /** 枚举全部 selector 分组。 */
+  async selectors(): Promise<SelectorGroup[]> {
+    const proxies = await this.#proxies();
     const out: SelectorGroup[] = [];
-    for (const [name, value] of Object.entries(proxies as Record<string, unknown>)) {
+    for (const [name, value] of Object.entries(proxies)) {
       if (value === null || typeof value !== "object") continue;
       const node = value as { type?: unknown; now?: unknown; all?: unknown };
       if (node.type !== "Selector") continue;
@@ -382,14 +400,9 @@ export class ClashController {
 
   /** 列出全部可选节点(含最近延迟),用于导入代理池。 */
   async nodes(): Promise<ProxyNode[]> {
-    const body = await this.#json("proxies");
-    const proxies = (body as { proxies?: unknown })?.proxies;
-    if (proxies === null || typeof proxies !== "object") {
-      throw new ControllerError("/proxies 返回的不是对象", "bad_response");
-    }
-
+    const proxies = await this.#proxies();
     const out: ProxyNode[] = [];
-    for (const [name, value] of Object.entries(proxies as Record<string, unknown>)) {
+    for (const [name, value] of Object.entries(proxies)) {
       if (value === null || typeof value !== "object") continue;
       const node = value as { type?: unknown; history?: unknown };
       const type = typeof node.type === "string" ? node.type : "";

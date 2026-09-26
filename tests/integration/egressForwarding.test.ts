@@ -1,10 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { createServer, type Server } from "node:http";
-import { once } from "node:events";
-import { gzipSync } from "node:zlib";
 import { Response as UndiciResponse } from "undici";
 import { fetchUpstream, type UpstreamDeps } from "../../src/core/upstream/fetch.ts";
-import { pipeUpstreamResponse } from "../../src/core/upstream/pipe.ts";
 import { DispatcherPool } from "../../src/core/proxy/dispatcher.ts";
 import { SelectorLockRegistry } from "../../src/core/proxy/selectorLock.ts";
 import { EgressService } from "../../src/core/proxy/egress.ts";
@@ -12,13 +8,12 @@ import { ConfigSchema, type Config } from "../../src/shared/schema.ts";
 import type { ClashController } from "../../src/core/proxy/clash/controller.ts";
 
 /**
- * **控制流**侧守卫。
+ * 转发侧的出口:桥接 selector 与建连的原子性、转发与探测共用出口机构,
+ * 以及本机出口配置错误的归因。
  *
- * 这一组补的是三处"改坏了测试也不报警"的位置。其中桥接转发分支最要紧:
- * 出口隔离是这个项目存在的唯一理由,而它在**转发**侧先前只有注释没有断言
- * —— probe 侧有 `selectorLock.test.ts` 守着,转发侧零覆盖。
+ * 出口隔离是这个项目存在的理由,而 probe 侧有 `selectorLock.test.ts` 守着;
+ * 这里守的是**转发**侧。
  */
-
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
 /** 带一个 Clash 内核与一个只能桥接的代理的配置。 */
@@ -180,7 +175,7 @@ describe("桥接转发：select 与建连必须原子，且锁在响应头后释
   it("转发前会切换 selector，且顺序是 select → fetch", async () => {
     /*
      * 先前这条完全没有断言:把 `lock.run()` 连同 `controller.select()`
-     * 整个删掉、直接 `return doFetch(...)`,781 个测试依然全绿。
+     * 整个删掉、直接 `return doFetch(...)`,全套测试依然全绿。
      * 而删掉它意味着流量从 selector 当前选中的**任意**节点出去 ——
      * 出口隔离彻底失效,症状却是"看起来在工作"。
      */
@@ -324,7 +319,7 @@ describe("转发与探测必须共用同一套出口机构", () => {
   it("多次取 upstreamDeps 返回同一个 dispatcher 池与同一套锁", () => {
     /*
      * 先前把 `upstreamDeps()` 改成每次返回 `new DispatcherPool()` +
-     * `new SelectorLockRegistry()`,781 个测试全绿 —— 而那正是 docstring
+     * `new SelectorLockRegistry()`,全套测试全绿 —— 而那正是 docstring
      * 描述的"锁分裂 + 连接池分裂"。
      *
      * 锁分裂的后果最隐蔽:Clash selector 的 `now` 是**进程外**全局状态,
@@ -345,64 +340,6 @@ describe("转发与探测必须共用同一套出口机构", () => {
     const a = egress.upstreamDeps(config);
     const b = egress.upstreamDeps(config);
     expect(a.locks.forBridge("k1")).toBe(b.locks.forBridge("k1"));
-  });
-});
-
-describe("响应头：content-length 必须剥掉", () => {
-  it("上游的 content-length 不转发", () => {
-    /*
-     * undici 已替我们解压,上游的 content-length 描述的是**压缩前/压缩后**
-     * 的字节数,与我们实际转发的字节数不符。转发它会让客户端按错的长度
-     * 截断或挂等。
-     *
-     * 先前从剥离集里删掉 content-length 后测试全绿 ——
-     * 既有断言只检查了 content-encoding。
-     */
-    const upstream = new UndiciResponse("0123456789", {
-      status: 200,
-      headers: { "content-type": "application/json", "content-length": "3" },
-    });
-    const out = pipeUpstreamResponse(upstream);
-    expect(out.headers.get("content-length")).toBeNull();
-    // 其余头照常转发。
-    expect(out.headers.get("content-type")).toBe("application/json");
-  });
-
-  it("真实 gzip 上游：客户端拿到完整明文且不被错的长度误导", async () => {
-    // 端到端印证上面那条:压缩响应经网关后,长度信息必须来自实际字节。
-    const payload = JSON.stringify({ text: "x".repeat(200) });
-    const gz = gzipSync(Buffer.from(payload));
-
-    let server: Server | undefined;
-    try {
-      server = createServer((req, res) => {
-        req.resume();
-        req.on("end", () => {
-          res.writeHead(200, {
-            "content-type": "application/json",
-            "content-encoding": "gzip",
-            "content-length": String(gz.byteLength),
-          });
-          res.end(gz);
-        });
-      });
-      server.listen(0, "127.0.0.1");
-      await once(server, "listening");
-      const addr = server.address();
-      if (addr === null || typeof addr === "string") throw new Error("no port");
-
-      const { fetch: undiciFetch } = await import("undici");
-      const upstream = await undiciFetch(`http://127.0.0.1:${addr.port}/x`);
-      const out = pipeUpstreamResponse(upstream);
-
-      expect(out.headers.get("content-length")).toBeNull();
-      expect(out.headers.get("content-encoding")).toBeNull();
-      // 完整明文,不是被 gz 长度截断的片段。
-      expect(await out.text()).toBe(payload);
-    } finally {
-      server?.close();
-      if (server) await once(server, "close").catch(() => {});
-    }
   });
 });
 
@@ -565,92 +502,5 @@ describe("错误归因：本机配置问题不得报成客户端 400 或上游 5
       expect((err as Error).message).toContain("apiKey");
       expect((err as Error).message).not.toContain("sk-key");
     }
-  });
-});
-
-describe("响应透传：上游已成功时绝不因畸形头而 500", () => {
-  it("上游给出畸形头时跳过该头，其余照常转发", () => {
-    /*
-     * `pipeUpstreamResponse` 在**上游已经成功之后**被调用。此时抛异常的后果:
-     * 客户端拿裸 500(不是我们的 JSON 错误形状)、上游那次请求已真实计入额度、
-     * 响应体既不转发也不释放(连接泄漏)、且日志完全不被调用。
-     *
-     * 头名/头值都来自上游,不在我们控制内 —— 一个畸形头不该毁掉整个响应。
-     */
-    const upstream = new UndiciResponse('{"ok":1}', {
-      status: 200,
-      headers: { "content-type": "application/json" },
-    });
-
-    // 诊断头里塞入 CRLF（schema 现已挡住这种 worker id，此处验证纵深防御）。
-    const out = pipeUpstreamResponse(upstream, {
-      "x-zen-gateway-worker": `w1${String.fromCharCode(0x0d, 0x0a)}X-Evil: 1`,
-      "x-zen-gateway-attempts": "1",
-    });
-
-    expect(out.status).toBe(200);
-    // 畸形的那个被跳过，正常的那个仍在。
-    expect(out.headers.get("x-zen-gateway-attempts")).toBe("1");
-    expect(out.headers.get("x-evil")).toBeNull();
-    // 上游内容照常转发。
-    expect(out.headers.get("content-type")).toBe("application/json");
-  });
-});
-
-describe("schema：进 HTTP 头的字段必须拒绝控制字符", () => {
-  const CRLF = String.fromCharCode(0x0d, 0x0a);
-
-  it("Worker id 含 CRLF 被拒 —— 它会进 x-zen-gateway-worker 响应头", () => {
-    expect(() =>
-      ConfigSchema.parse({
-        version: 1,
-        gateway: { relayToken: "schema-token-not-real-xx" },
-        workers: [
-          { id: `w1${CRLF}X-Evil: 1`, name: "", kind: "authenticated", apiKey: "k", enabled: true, proxyId: null },
-        ],
-      }),
-    ).toThrow();
-  });
-
-  it("apiKey 含 CRLF 被拒 —— 它会进 Authorization 头", () => {
-    expect(() =>
-      ConfigSchema.parse({
-        version: 1,
-        gateway: { relayToken: "schema-token-not-real-xx" },
-        workers: [
-          { id: "w1", name: "", kind: "authenticated", apiKey: `k${CRLF}X: 1`, enabled: true, proxyId: null },
-        ],
-      }),
-    ).toThrow();
-  });
-
-  it("Clash 节点名仍允许 emoji、CJK 与连续空格", () => {
-    /*
-     * 收紧 id 字符集时**不能**连带收紧 clashNodeName:真实订阅里的节点名
-     * 含 emoji flag 序列、中文、连续空格。收窄它会让订阅导入直接失效。
-     */
-    const cfg = ConfigSchema.parse({
-      version: 1,
-      gateway: { relayToken: "schema-token-not-real-xx" },
-      clash: {
-        enabled: true,
-        bridges: [{ id: "k1", name: "内核", apiBase: "http://127.0.0.1:9090", localProxyPort: 17891 }],
-      },
-      proxies: [
-        {
-          id: "p1",
-          name: "🇯🇵 东京  节点",
-          clashNodeName: "🇯🇵 东京  节点 ①",
-          type: "vless",
-          host: "a.invalid",
-          port: 443,
-          source: "subscription",
-          direct: false,
-          bridgeable: true,
-          bridgeId: "k1",
-        },
-      ],
-    });
-    expect(cfg.proxies[0]!.clashNodeName).toBe("🇯🇵 东京  节点 ①");
   });
 });
