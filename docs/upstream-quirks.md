@@ -104,9 +104,8 @@ key 的目录槽位。不能由少量样本推断完整目录按某个单一维�
 ## 真实 OpenCode CLI 与多出口
 
 **观察日期**：2026-09-26。
-**客户端**：OpenCode CLI v2.0.12，使用原生 `opencode run --standalone --format json`，
-保留本机 OpenCode 的认证和运行时上下文；网关配置为每模型的 `settings.baseURL`、
-Relay Token 和 SDK package。
+**客户端**：OpenCode CLI v2.0.12，使用原生 `opencode run --standalone --format json`；
+网关配置为每模型的 `settings.baseURL`、Relay Token 和 SDK package。
 **范围**：3 个未绑定到当前 Worker 的临时 Clash 出口、3 把已配置认证 key 和一个
 临时构造的不发送 key 的匿名 Worker、4 个免费模型，共 48 次经网关请求。测试没有
 输出 key、出口名称或公网 IP；每次请求都在 Clash `/connections` 中核对到
@@ -126,10 +125,10 @@ Relay Token 和 SDK package。
 
 这组结果说明网关能够在多个真实命中的出口上转发，并保持认证与匿名 Worker 的
 凭证选择。用户默认 OpenCode 会话以及网关日志也分别观察到 MiMo、Big Pickle 的
-成功用量；Muse 是否成功与出口地域有关。此前把 `XDG_CONFIG_HOME`、`XDG_DATA_HOME`
-等目录全部替换为空目录的临时矩阵曾得到 403，但那种运行环境失去了本机 OpenCode
-上下文，不能作为上游可用性的结论，已从验收结果中剔除。Messages 仍只有本地协议级
-验证，等待上游提供可验模型。
+成功用量；Muse 是否成功与出口地域有关。一次同时启用 OpenCode 权限拒绝规则的旧
+矩阵曾得到 403；逐变量控制实验显示关键变量是该权限规则，空的 XDG 目录本身不构成
+失败原因，因此旧矩阵不作为上游可用性的结论。Messages 仍只有本地协议级验证，
+等待上游提供可验模型。
 
 ## 重新测量的边界
 

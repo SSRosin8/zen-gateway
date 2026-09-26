@@ -75,6 +75,27 @@ describe("鉴权", () => {
     expect(err.message).not.toContain("SUPER-SECRET-abc123");
     expect(err.message).toContain("apiSecret");
   });
+
+  it("非 2xx 响应抛错前取消响应体", async () => {
+    let cancelled = 0;
+    const body = new ReadableStream<Uint8Array>({
+      start(controller) {
+        controller.enqueue(new TextEncoder().encode("secret error body"));
+      },
+      cancel() {
+        cancelled += 1;
+      },
+    });
+    const controller = new ClashController(
+      { id: "b1", apiBase: "http://controller.invalid", apiSecret: "" },
+      {
+        fetchImpl: (async () => new Response(body, { status: 401 })) as typeof fetch,
+      },
+    );
+
+    await expect(controller.version()).rejects.toMatchObject({ kind: "auth" });
+    expect(cancelled).toBe(1);
+  });
 });
 
 describe("version", () => {

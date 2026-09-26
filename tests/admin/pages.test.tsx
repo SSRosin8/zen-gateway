@@ -416,13 +416,21 @@ describe("用量页", () => {
  * 网关页与 Worker 页
  * ================================================================== */
 
-function expectLocalOpenCodeModels(snippet: string, port: number) {
+function expectLocalOpenCodeModels(snippet: string, port: number, version: "1" | "2" = "2") {
   const config = JSON.parse(snippet);
   const settings = {
     baseURL: `http://127.0.0.1:${port}/v1`,
     apiKey: "<把配置文件里的 gateway.relayToken 填进来>",
   };
+  if (version === "1") {
+    expect(config).toEqual({
+      $schema: "https://opencode.ai/config.json",
+      provider: { opencode: { options: settings } },
+    });
+    return;
+  }
   expect(config).toEqual({
+    $schema: "https://opencode.ai/config.json",
     providers: {
       opencode: {
         package: "aisdk:@ai-sdk/openai-compatible",
@@ -461,8 +469,19 @@ describe("网关页", () => {
 
   it("提醒保留逐模型设置并说明模型可用性边界", () => {
     render(<GatewayPage data={fakeOverview()} />);
-    expect(screen.getByText(/保留逐模型的/)).toBeInTheDocument();
+    expect(screen.getByText(/OpenCode 配置格式/)).toBeInTheDocument();
     expect(screen.getByText(/模型仍受上游权限与免费规则约束/)).toBeInTheDocument();
+  });
+
+  it("切换 OpenCode 1.x 后复制单数 provider 配置", async () => {
+    const user = userEvent.setup();
+    render(<GatewayPage data={fakeOverview({ gateway: { port: 9877, baseUrl: "https://example.invalid/zen/v1", relayToken: { present: true, fingerprint: "abcd1234" }, maxAttempts: 3 } })} />);
+    await user.selectOptions(screen.getByRole("combobox", { name: "OpenCode 版本" }), "1");
+    await user.click(screen.getByRole("button", { name: "复制" }));
+    const copied = await navigator.clipboard.readText();
+    expectLocalOpenCodeModels(copied, 9877, "1");
+    expect(copied).not.toContain('"providers"');
+    expect(copied).not.toContain('"npm"');
   });
 
   it("Clash 已启用时提醒两条实测出来的坑", () => {
@@ -606,8 +625,18 @@ describe("首启向导", () => {
     render(<Wizard data={data} />);
     const snippet = screen.getByText(/"providers":/, { selector: "pre" }).textContent ?? "";
     expectLocalOpenCodeModels(snippet, 19876);
-    expect(screen.getByText(/保留逐模型的/)).toBeInTheDocument();
+    expect(screen.getByText(/OpenCode 配置格式/)).toBeInTheDocument();
     expect(screen.getByText(/片段不保证上游接受这些模型/)).toBeInTheDocument();
+  });
+
+  it("向导切换 OpenCode 1.x 后展示单数 provider 配置", async () => {
+    const user = userEvent.setup();
+    const data = fakeOverview();
+    data.gateway.port = 19876;
+    render(<Wizard data={data} />);
+    await user.selectOptions(screen.getByRole("combobox", { name: "OpenCode 版本" }), "1");
+    const snippet = screen.getByText(/"provider":/, { selector: "pre" }).textContent ?? "";
+    expectLocalOpenCodeModels(snippet, 19876, "1");
   });
 
   it("每一步都给可直接跑的命令", () => {

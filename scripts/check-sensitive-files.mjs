@@ -22,7 +22,12 @@ export const HIGH_CONFIDENCE_SECRET_PATTERNS = [
   /\bAKIA[0-9A-Z]{16}\b/,
   /\bgh[pousr]_[A-Za-z0-9_]{20,}\b/,
   /\bsk-[A-Za-z0-9_-]{20,}\b/,
+  /\boc_sk_[A-Za-z0-9_-]{20,}\b/,
 ];
+
+// 上游重验需要一个能通过格式检查的坏 key。只豁免这一个精确字面量；其他
+// `oc_sk_` 值仍必须被报告，不能按含有 fake 等词做宽泛放行。
+const KNOWN_FAKE_SECRETS = ["oc_sk_0000_obviously_fake_not_a_real_key"];
 
 // 守卫自身与它的行为测试必须包含这些虚构格式，不能被自身扫描结果污染。
 const SELF_FILES = new Set(["scripts/check-sensitive-files.mjs", "tests/unit/sensitiveFiles.test.ts"]);
@@ -33,7 +38,8 @@ export function forbiddenPath(path) {
 }
 
 export function secretPattern(line) {
-  return HIGH_CONFIDENCE_SECRET_PATTERNS.findIndex((pattern) => pattern.test(line)) >= 0;
+  const candidate = KNOWN_FAKE_SECRETS.reduce((text, secret) => text.replaceAll(secret, ""), line);
+  return HIGH_CONFIDENCE_SECRET_PATTERNS.findIndex((pattern) => pattern.test(candidate)) >= 0;
 }
 
 export function inspectPaths(paths) {

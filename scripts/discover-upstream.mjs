@@ -2,17 +2,10 @@
 /**
  * 上游协议发现 / 重验。
  *
- * ## 这个脚本的范围比规划设想的窄,原因是实测出来的
+ * ## 范围
  *
- * 规划里 Phase 4 是「经真实出口向 Zen 递进发请求,**逐字段**定位被拒原因」,
- * 用来逐字段定位这些已知怪癖(拒收 `client_metadata`、tools 上限、
- * 思考模型需重放 `reasoning_content`、effort-tier 别名拆分)。
- *
- * **那件事现在做不到**,而且不是工程问题:免费额度闸门**短路在请求体校验之前**。
- * 2026-09-23 实测:免 key 发一个免费模型,把 `messages` 写成字符串
- * `"not-an-array"` 再塞一个 `client_metadata`,响应与完全合法的请求
- * **逐字节相同**(都是 403 FreeTierError)。请求体从未被上游看过,
- * 所以字段级怪癖一个都探不到。
+ * 当前观察显示免费额度闸门先于请求体校验：同一免费模型的畸形与合法请求得到
+ * 相同响应。因此脚本只重验闸门顺序和错误形状，不把结果解释为字段级兼容性。
  *
  * 另一条路(付费模型能过体校验)要花真钱,而本网关的前提就是只放行免费模型 ——
  * 在付费模型上测出的怪癖也未必适用于免费模型。所以不走。
@@ -21,7 +14,7 @@
  *
  * 免 key 就能测,不需要凭证,因此可以随时重跑。它把今天观察到的上游行为
  * 写成**期望**,再逐条核对;**上游行为一变就退出 1**,并打印差异。
- * 这正是规划想要的那个性质:知识从散落注释变成可按日期重新验证的清单。
+ * 它把当前观察写成可按日期重新验证的清单。
  *
  * 用法:
  *   node scripts/discover-upstream.mjs           # 免 key,全部探针
@@ -34,7 +27,7 @@
  * 不进 `npm test` / `validate`:需要网络,且上游抖动不该让本地关卡变红。
  */
 
-import { redactText, safeErrorMessage } from "../src/shared/redact.ts";
+import { redactText, redactUrl, safeErrorMessage } from "../src/shared/redact.ts";
 
 const BASE = process.env.ZG_DISCOVER_BASE ?? "https://opencode.ai/zen/v1";
 const KEY = process.env.ZG_DISCOVER_KEY ?? "";
@@ -137,9 +130,7 @@ function eq(label, actual, expected) {
 /**
  * 从**活的**目录里挑探针用的模型,不硬编码 id。
  *
- * 这条是踩过坑才定的:上一轮我把 models.dev 当权威,把一个上游并不存在的
- * `grok-code` 写进了默认免费名单。硬编码的模型 id 会随目录变化而腐坏,
- * 而腐坏的表现是「探针报了个假阴性」—— 最不该出现在重验工具里的失败模式。
+ * 硬编码模型 id 会随目录变化而腐坏，因此探针从当前目录选择模型。
  */
 function classify(catalog) {
   const ids = catalog.map((m) => m.id);
@@ -174,15 +165,13 @@ async function catalogProbes() {
 
       /*
        * 目录按身份区分 —— 这不是账号个体差异。
-       * 2026-09-22 与 09-23 两个不同账号看到的差异项完全相同
-       * (仅带 key 可见 `test`/`test-novita-dsf4.1`;仅免 key 可见
-       * `claude-sonnet-4`/`deepseek-v4-flash-free`),说明是「带 key」与
-       * 「免 key」两种身份各自对应一份视图。
+       * 不同身份可能看到不同目录视图；具体条目由当前目录动态决定，不能把某次
+       * 样本中的模型名称写成永久规则。
        *
-       * 对 Phase 6 的直接约束:目录缓存键必须含 Worker 身份,
+       * 对目录缓存的直接约束:缓存键必须含 Worker 身份,
        * 不能只存一份全局目录。
        */
-      console.log(`  · 目录按身份区分(Phase 6 的缓存键必须含 Worker 身份)`);
+      console.log(`  · 目录按身份区分(缓存键必须含 Worker 身份)`);
       console.log(`      仅带 key 可见: ${onlyKeyed.join(", ") || "(无)"}`);
       console.log(`      仅免 key 可见: ${onlyAnon.join(", ") || "(无)"}`);
       console.log(`      该账号免费集 ${keyedSet.free.length} 个,免 key 视角 ${anonSet.free.length} 个`);
@@ -208,7 +197,7 @@ async function anonProbes(sets) {
     eq("状态码", o.status, 403) ?? eq("错误类型", errorType(o), "FreeTierError"));
 
   /*
-   * **这条探针是整个 Phase 4 范围缩减的证据。**
+   * **这条探针用于确认字段级结论的范围。**
    *
    * 同一个免费模型,请求体故意坏掉:`messages` 是字符串而非数组,
    * 外加一个规划点名要发现的 `client_metadata`。若上游校验了体,
@@ -236,7 +225,7 @@ async function anonProbes(sets) {
    * **模型存在性检查先于鉴权。**
    *
    * 免 key 发一个不存在的 id,得到的不是「缺凭证」而是「模型不支持」——
-   * 说明上游先查模型再查凭证。对 Phase 6 有用:这给目录交集提供了一条
+   * 说明上游先查模型再查凭证。这给目录交集提供了一条
    * **免 key 即可用**的校验途径。
    */
   const ghost = await probe({
@@ -249,8 +238,8 @@ async function anonProbes(sets) {
   /*
    * **闸门顺序是三段的:key 语法 → 免费额度闸门 → key 密钥验证。**
    *
-   * 这一条是本脚本第一次运行就查出来的 —— 而查出的是**我自己先前的错误结论**,
-   * 不是上游变了。先前我断言「有效 key 得 403 而虚构 key 得 401,这个差异本身
+   * 这条用于纠正一个容易出现的误判，而不是判断上游是否发生变化。不能断言「有效
+   * key 得 403 而虚构 key 得 401,这个差异本身
    * 就证明 key 有效」,据此省掉了付费模型验证。实测否定了它:
    *
    *   语法非法 key(`bogus`)        + 免费模型 → 401 AuthError
@@ -311,7 +300,7 @@ async function anonProbes(sets) {
       ? null
       : `期望 application/json,实收 ${o.contentType}`);
 
-  console.log("\n── 匿名通道(字面量 `Bearer public`) ──");
+  console.log("\n── 字面量 `Bearer public` ──");
 
   /*
    * **这里说的「匿名」不是不带 key,而是发字面量 `Bearer public`。**
@@ -332,7 +321,7 @@ async function anonProbes(sets) {
     body: { model: freeModel, messages: msgs },
     key: "public",
   });
-  check("`Bearer public`(匿名通道)→ 403,通道已关", legacyPublic, (o) =>
+  check("`Bearer public` → 当前观察为 403", legacyPublic, (o) =>
     eq("状态码", o.status, 403) ?? eq("错误类型", errorType(o), "FreeTierError"));
 
   return { freeModel, paidModel };
@@ -395,7 +384,7 @@ async function keyedProbes(sets) {
 
 async function main() {
   console.log(`上游协议重验 — ${new Date().toISOString().slice(0, 10)}`);
-  console.log(`baseUrl: ${BASE}`);
+  console.log(`baseUrl: ${redactUrl(BASE)}`);
   console.log(KEY ? "凭证: 已提供(带 key 探针会跑)" : "凭证: 未提供(只跑免 key 探针)");
 
   const sets = await catalogProbes();

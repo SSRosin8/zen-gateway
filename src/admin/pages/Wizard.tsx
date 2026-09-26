@@ -1,7 +1,8 @@
+import { useState } from "react";
 import type { Overview } from "../../shared/contract.ts";
 import { Mono, Panel, Strong } from "../components/Panel.tsx";
 import { StatusIndicator } from "../components/StatusIndicator.tsx";
-import { openCodeConfigSnippet } from "../lib/openCodeConfig.ts";
+import { openCodeConfigSnippet, type OpenCodeVersion } from "../lib/openCodeConfig.ts";
 
 /**
  * 首启向导。
@@ -35,7 +36,8 @@ export function Wizard({ data }: { data: Overview }) {
   const hasUsableWorker = data.pool.total > 0;
   const hasCatalog = data.catalog.freeCount !== null && data.catalog.freeCount > 0;
 
-  const snippet = openCodeConfigSnippet(data.gateway.port);
+  const [openCodeVersion, setOpenCodeVersion] = useState<OpenCodeVersion>("2");
+  const snippet = openCodeConfigSnippet(data.gateway.port, openCodeVersion);
 
   const steps: Step[] = [
     {
@@ -110,15 +112,36 @@ export function Wizard({ data }: { data: Overview }) {
       body: (
         <>
           <p className="text-text-muted">
-            OpenCode 2 配置：覆盖内置的 <Mono>opencode</Mono> provider 及下列模型的连接设置。放在{" "}
+            选择你的 OpenCode 主版本，生成覆盖本地网关的 <Mono>opencode</Mono> provider 配置。放在{" "}
             <Mono>~/.config/opencode/opencode.json</Mono> 或项目根目录：
           </p>
+          <label className="mt-2 flex w-fit flex-col gap-1">
+            <span className="text-text-muted">OpenCode 配置格式</span>
+            <select
+              aria-label="OpenCode 版本"
+              value={openCodeVersion}
+              onChange={(event) => setOpenCodeVersion(event.target.value as OpenCodeVersion)}
+              className="min-h-[44px] rounded-sm border border-border-strong bg-bg px-3"
+            >
+              <option value="2">OpenCode 2.x（默认）</option>
+              <option value="1">OpenCode 1.x</option>
+            </select>
+          </label>
           <pre className="mt-2 overflow-x-auto rounded-md border border-border-strong bg-bg p-3 font-mono">
             {snippet}
           </pre>
           <p className="mt-2 text-text-muted">
-            保留逐模型的 <Mono>settings</Mono>，避免内置模型设置覆盖网关地址。
-            片段不保证上游接受这些模型；新增模型时也要指定对应协议的 SDK 和网关地址。
+            {openCodeVersion === "1" ? (
+              <>
+                OpenCode 1.x 使用单数 <Mono>provider</Mono> 与 <Mono>options</Mono>，保留内置
+                模型 SDK 选择。
+              </>
+            ) : (
+              <>
+                OpenCode 2.x 使用复数 <Mono>providers</Mono>、<Mono>package</Mono> 与逐模型{" "}
+                <Mono>settings</Mono>，避免内置模型地址覆盖网关。
+              </>
+            )}{" "}片段不保证上游接受这些模型。
           </p>
           <p className="mt-2 text-text-muted">
             然后用真实 OpenCode CLI 验证当前可用的免费 Chat 模型。<Mono>curl</Mono>

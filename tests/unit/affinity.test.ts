@@ -162,6 +162,25 @@ describe("extractBlobHashes", () => {
     expect(() => extractBlobHashes(wide)).not.toThrow();
   });
 
+  it("宽对象在预算耗尽后不再读取后续字段", () => {
+    const wide: Record<string, unknown> = {};
+    let reads = 0;
+    for (let i = 0; i < 50_000; i += 1) {
+      Object.defineProperty(wide, `field-${i}`, {
+        enumerable: true,
+        configurable: true,
+        get() {
+          reads += 1;
+          return { signature: BLOB_A };
+        },
+      });
+    }
+
+    extractBlobHashes(wide);
+    expect(reads).toBeLessThan(50_000);
+    expect(reads).toBeGreaterThan(0);
+  });
+
   it("**压栈预算真的限制访问次数** —— `not.toThrow()` 对两种实现都成立", () => {
     /*
      * 第十轮审核实测：删掉数组分支里压栈前的那两行预算检查（退回到「只数

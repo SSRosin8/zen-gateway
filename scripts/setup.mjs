@@ -299,8 +299,8 @@ async function readController(ctrl) {
  *
  * ## `GLOBAL` 在 rule 模式下是个**陷阱**,必须排到最后
  *
- * 实测本机:`GLOBAL` 有 69 个可用节点,`Proxy` 也有 69 个 —— 只按数量排序时
- * 两者打平,而按名字做 tiebreak 会选中 `GLOBAL`(字母序在前)。
+ * 某些配置里 `GLOBAL` 与业务 selector 可能拥有相同节点数量；只按数量排序时
+ * 会因名称 tiebreak 选中 `GLOBAL`。
  *
  * 但内核的 `mode` 是 **`rule`**,而 rule 模式下 `GLOBAL` **根本不参与选路**
  * (规则把流量导向 `Proxy` 这类分组)。于是切 `GLOBAL` 的选中节点**什么都
@@ -320,9 +320,8 @@ async function readController(ctrl) {
  * 一个名字不叫 GLOBAL 却同样不参与选路的分组仍会被选中。
  *
  * 现在读 `/rules`（`routedGroups()`）：那里有每条规则的目标分组与兜底
- * (`MATCH`) 规则。实测本机 556 条规则 → `Proxy` 382 条、`DIRECT` 173 条，
- * 而 `GLOBAL` 出现在**零条**规则里 —— 这就是"它不参与选路"的直接证据，
- * 不再依赖它叫什么名字。
+ * (`MATCH`) 规则。若选中的分组不出现在规则目标里，它就不参与选路；这就是直接
+ * 证据，不依赖分组名称。
  *
  * 拿不到 `/rules` 时退回按名字降级（旧内核可能没有这个端点）——
  * **降级而不是失败**：那个启发式对最常见的形态仍然有效。

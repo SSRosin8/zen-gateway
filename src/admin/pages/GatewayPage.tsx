@@ -3,14 +3,14 @@ import type { Overview } from "../../shared/contract.ts";
 import { Mono, Panel, PrimaryButton, Strong } from "../components/Panel.tsx";
 import { StatusIndicator } from "../components/StatusIndicator.tsx";
 import { patchConfig } from "../lib/api.ts";
-import { openCodeConfigSnippet } from "../lib/openCodeConfig.ts";
+import { openCodeConfigSnippet, type OpenCodeVersion } from "../lib/openCodeConfig.ts";
 
 /**
  * 网关页 —— 连接信息与客户端配置片段。
  *
  * ## 这一页的主要价值是那段可复制的配置
  *
- * 提供 OpenCode 2 的 `opencode.json` 片段。
+ * 提供兼容 OpenCode 1/2 的 `opencode.json` 片段。
  * 手写那段配置是最容易出错的一步（端口、路径、token 三处都能写错），
  * 而写错的症状是 401 或连接被拒 —— 两者都指不到「你的 baseURL 少了 /v1」。
  *
@@ -23,7 +23,8 @@ export function GatewayPage({ data, refresh }: { data: Overview; refresh?: () =>
   const [saving, setSaving] = useState(false);
   const [message, setMessage] = useState<string | null>(null);
   const [copied, setCopied] = useState(false);
-  const snippet = openCodeConfigSnippet(data.gateway.port);
+  const [openCodeVersion, setOpenCodeVersion] = useState<OpenCodeVersion>("2");
+  const snippet = openCodeConfigSnippet(data.gateway.port, openCodeVersion);
 
   return (
     <div className="space-y-4">
@@ -101,9 +102,21 @@ export function GatewayPage({ data, refresh }: { data: Overview; refresh?: () =>
 
       <Panel title="客户端配置">
         <p className="mb-3 text-text-muted">
-          OpenCode 2 配置：覆盖内置的 <Mono>opencode</Mono> provider 及下列模型的连接设置。放在{" "}
+          选择你的 OpenCode 主版本，生成覆盖本地网关的 <Mono>opencode</Mono> provider 配置。放在{" "}
           <Mono>~/.config/opencode/opencode.json</Mono> 或项目根目录。
         </p>
+        <label className="mb-3 flex w-fit flex-col gap-1">
+          <span className="text-text-muted">OpenCode 配置格式</span>
+          <select
+            aria-label="OpenCode 版本"
+            value={openCodeVersion}
+            onChange={(event) => setOpenCodeVersion(event.target.value as OpenCodeVersion)}
+            className="min-h-[44px] rounded-sm border border-border-strong bg-bg px-3"
+          >
+            <option value="2">OpenCode 2.x（默认）</option>
+            <option value="1">OpenCode 1.x</option>
+          </select>
+        </label>
         <div className="relative">
           <pre className="overflow-x-auto rounded-md border border-border-strong bg-bg p-3 pr-28 font-mono">
             {snippet}
@@ -122,9 +135,18 @@ export function GatewayPage({ data, refresh }: { data: Overview; refresh?: () =>
           </button>
         </div>
         <p className="mt-3 text-text-muted">
-          <Strong>保留逐模型的 <Mono>settings</Mono></Strong>：仅修改 provider 地址可能被
-          内置模型设置覆盖。片段中的模型仍受上游权限与免费规则约束；新增模型时也要指定
-          对应协议的 SDK 和网关地址。
+          {openCodeVersion === "1" ? (
+            <>
+              OpenCode 1.x 使用单数 <Mono>provider</Mono> 与 <Mono>options</Mono>，保留内置
+              模型 SDK 选择。
+            </>
+          ) : (
+            <>
+              OpenCode 2.x 使用复数 <Mono>providers</Mono>、<Mono>package</Mono> 与逐模型{" "}
+              <Mono>settings</Mono>，避免内置模型地址覆盖网关。
+            </>
+          )}{" "}
+          片段中的模型仍受上游权限与免费规则约束。
         </p>
       </Panel>
 

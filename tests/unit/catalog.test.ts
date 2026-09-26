@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import { Response as UndiciResponse } from "undici";
 import {
   ModelCatalog,
+  catalogIdentitiesOf,
   catalogIdentityOf,
   isModelEntry,
   parseCatalog,
@@ -296,6 +297,47 @@ describe("身份与槽位", () => {
     });
     const id = catalogIdentityOf(cfg);
     expect(id.proxyId).toBeNull();
+  });
+
+  it("首位 Worker 绑定的代理停用时，目录候选跳到后面的可解析出口", () => {
+    const cfg = config({
+      proxies: [
+        {
+          id: "p1",
+          name: "停用出口",
+          type: "socks5",
+          host: "203.0.113.9",
+          port: 1080,
+          enabled: false,
+          source: "manual",
+          direct: true,
+          bridgeable: false,
+        },
+      ],
+      workers: [
+        {
+          id: "w1",
+          name: "",
+          kind: "authenticated",
+          apiKey: "fake-key-bad-egress-not-real",
+          enabled: true,
+          proxyId: "p1",
+        },
+        {
+          id: "w2",
+          name: "",
+          kind: "authenticated",
+          apiKey: "fake-key-good-egress-not-real",
+          enabled: true,
+          proxyId: null,
+        },
+      ],
+    });
+
+    expect(catalogIdentitiesOf(cfg)).toEqual([
+      { apiKey: "fake-key-good-egress-not-real", proxyId: null },
+    ]);
+    expect(catalogIdentityOf(cfg)).toEqual(catalogIdentitiesOf(cfg)[0]);
   });
 
   it("**目录请求经该 Worker 绑定的出口发出** —— 不是本机直连", async () => {

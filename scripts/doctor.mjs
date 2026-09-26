@@ -583,8 +583,7 @@ async function layerClashControl() {
    * （`GLOBAL` 就是典型）切了什么都不改变 —— 所有 Worker 走本机直连、
    * 共用一个公网 IP，而控制面、切换请求、探测全都正常。
    *
-   * 实测本机：556 条规则里 `Proxy` 382 条、`DIRECT` 173 条、
-   * `GLOBAL` **零条**，MATCH 指向 `Proxy`。
+   * 诊断通过 Controller 的规则目标与 MATCH 兜底判断分组是否参与选路。
    */
   const routingWarnings = [];
   const selectedBridge = bridges.find((b) => b.id === selection.bridgeId);
@@ -738,7 +737,7 @@ async function layerCatalog() {
         `免费集 = (后缀命中 ∪ extraFreeIds) ∩ 在架目录 —— 三者之一不对就会空。`,
       nextStep:
         "上游把带 -free 后缀的模型全下架了,或 freeSuffix 被改错。\n" +
-        `核对在架目录:curl -s https://opencode.ai/zen/v1/models | grep -o '"id":"[^"]*free[^"]*"' | head`,
+        "先刷新本机 /v1/models；如需外部对照，请使用配置中 gateway.baseUrl 对应的上游地址，并确认服务进程的 CA、代理和出口环境。",
     };
   }
 
