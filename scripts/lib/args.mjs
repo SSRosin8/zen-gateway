@@ -1,24 +1,9 @@
 /**
  * CLI 参数校验 —— `setup` 与 `doctor` 共用。
  *
- * ## 为什么必须拒绝未识别的参数
- *
- * 只做 `process.argv.includes("--x")` 的话，**任何拼错或想象出来
- * 的参数都被静默忽略，脚本照常执行完整流程**。
- *
- * 对 `doctor` 那只是白跑一趟；对 `setup` 后果实打实：它会写
- * `data/config.json` —— 那是**唯一一份凭证存储**（Worker 的 apiKey、Relay Token、
- * Controller secret）。一个照着文档摸索用法的人敲 `npm run setup -- --help`
- * 期望看到用法说明，得到的却会是一次真实导入：代理 3→72、桥接 2→3、
- * 外加一个 `config.json.bak`。
- *
- * 这与 `--dry-run` 的存在互为印证：脚本自己承认「写盘前该让人先看一眼」，
- * 而未知参数被忽略恰好绕过了那个机会。
- *
- * ## 为什么两个脚本共用一份
- *
- * 纪律 #4：各写一份的话，新增一个 flag 时只有一处会跟上，而**分叉方向是漏**
- * —— 漏掉校验的那个脚本继续静默接受错参数。
+ * 未识别的参数必须拒绝：`setup` 会写 `data/config.json`（唯一的凭证存储），
+ * 静默忽略 `--help` 之类的错参数就会变成一次真实导入。
+ * 两个脚本共用一份，避免新增 flag 时只有一处跟上（纪律 #4）。
  */
 
 /**
@@ -48,11 +33,7 @@ export function checkArgs(spec) {
       write(`  ${label.padEnd(22)}${f.help}`);
     }
     write(`  ${"--help".padEnd(22)}打印这段说明`);
-    /*
-     * 明写 `--` —— npm 会把 `npm run setup --dry-run` 的 flag 吃掉当成自己的，
-     * 必须写 `npm run setup -- --dry-run` 才能传到脚本。这是个高频困惑点，
-     * 而它的症状恰好是本模块要防的那个：flag 没传到，脚本照常跑完。
-     */
+    // npm 会吞掉 `npm run setup --dry-run` 里的 flag，必须写 `--` 才能传到脚本。
     write(`\n经 npm 调用时 flag 前要加 \`--\`，例如 \`${spec.command} -- ${spec.flags[0]?.flag ?? "--help"}\`。`);
   };
 
@@ -67,10 +48,7 @@ export function checkArgs(spec) {
 
     const spec1 = known.get(arg);
     if (spec1 === undefined) {
-      /*
-       * 拒绝而不是忽略，且**退出码非 0** —— 让 `npm run setup -- --typo && 下一步`
-       * 这样的串联在参数写错时停下，而不是带着一个没生效的 flag 继续。
-       */
+      // 退出码非 0，让 `npm run setup -- --typo && 下一步` 这类串联停下。
       write(`✗ 未识别的参数: ${arg}\n`);
       usage();
       exit(1);

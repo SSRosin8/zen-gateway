@@ -155,7 +155,7 @@ export function Wizard({ data, onCreateWorker }: { data: Overview; onCreateWorke
   return (
     <Panel title="先把它跑起来">
       <div className="rounded-md bg-surface-accent px-4 py-3">
-        <p className="font-serif text-lg">还不能转发</p>
+        <p className="text-heading-16 font-medium">还不能转发</p>
         <p className="mt-1 text-text-muted">
           {hasWorker ? "有 Worker 条目，但没有一个能用。" : "还没有可用的 Worker —— 按下面几步配一遍。"}
         </p>

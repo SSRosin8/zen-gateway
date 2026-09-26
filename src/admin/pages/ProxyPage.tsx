@@ -7,7 +7,7 @@ import type {
 import { isActive, percentages } from "../../shared/batchProbe.ts";
 import { useState } from "react";
 import { StatusIndicator, type StatusTone } from "../components/StatusIndicator.tsx";
-import { Metric, Mono, Panel, PrimaryButton, SecondaryButton, Strong } from "../components/Panel.tsx";
+import { Metric, Mono, Panel, PrimaryButton, SecondaryButton, Strong, Truncate } from "../components/Panel.tsx";
 import { DataTable, TableFilters, type Column } from "../components/DataTable.tsx";
 import { ConfirmDialog } from "../components/ConfirmDialog.tsx";
 import { toHash, type ViewState } from "../lib/router.ts";
@@ -491,14 +491,15 @@ export function ProxyPage({
     {
       key: "name",
       header: "节点",
+      render: (p) => (p.name !== "" ? <Truncate text={p.name} maxWidth="22rem" /> : <Mono>{p.id}</Mono>),
+    },
+    {
+      key: "kind",
+      header: "类型",
+      // 独立一列而不是节点名下的第二行：行高 36px 只容得下单行。
       render: (p) => (
-        <span>
-          <span className="block truncate" style={{ maxWidth: "22rem" }}>
-            {p.name || <Mono>{p.id}</Mono>}
-          </span>
-          <span className="text-text-muted">
-            {p.direct ? "直连" : "桥接"} · {p.type}
-          </span>
+        <span className="text-text-muted">
+          {p.direct ? "直连" : "桥接"} · {p.type}
         </span>
       ),
     },
@@ -535,9 +536,9 @@ export function ProxyPage({
       header: "被引用",
       render: (p) =>
         p.usedBy.length === 0 ? (
-          <span className="text-text-muted">—</span>
+          <span className="text-text-muted">未引用</span>
         ) : (
-          <span>{p.usedBy.join("、")}</span>
+          <Truncate text={p.usedBy.join("、")} maxWidth="14rem" />
         ),
     },
   ];
@@ -616,7 +617,7 @@ export function ProxyPage({
             empty={
               data.proxies.length === 0 ? (
                 <>
-                  <p className="font-serif text-lg">还没有代理</p>
+                  <p className="text-heading-16 font-medium">还没有代理</p>
                   <p className="mt-1 text-text-muted">
                     运行 <Mono>npm run setup</Mono> 自动探测本机 Clash 并导入节点。
                   </p>
@@ -670,8 +671,8 @@ function TabLink({
         event.preventDefault();
         onSelect();
       }}
-      className={`inline-flex min-h-[44px] items-center rounded-sm border px-4 no-underline ${
-        active ? "border-accent-fg text-accent-fg font-medium" : "border-border-strong text-text-muted"
+      className={`inline-flex min-h-[44px] items-center rounded-sm border px-4 no-underline transition-colors hover:bg-surface-hover active:bg-surface-active ${
+        active ? "border-accent-fg text-accent-fg font-medium" : "border-border-strong text-text-muted hover:text-text"
       }`}
     >
       {label}

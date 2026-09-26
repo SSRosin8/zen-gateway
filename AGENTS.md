@@ -1,8 +1,9 @@
 # 开发约定
 
 zen-gateway 是可独立使用的本机个人工具。上游固定为 OpenCode Zen，支持认证与匿名
-Worker、免费模型规则、多个出口、流式透传和本机管理后台。不做多用户、公共服务、
-通用 provider 平台或强制 CI；UI 与文档只维护中文。
+Worker、免费模型规则、多个出口、流式透传和本机管理后台。不做多用户、公共服务或
+通用 provider 平台；UI 与文档只维护中文。本文件是开发约定的唯一来源，
+`CLAUDE.md` 与 `CONTRIBUTING.md` 只引用它。
 
 需求与功能边界见 [`docs/requirements.md`](docs/requirements.md)，实现见
 [`docs/architecture.md`](docs/architecture.md)，操作见 [`docs/usage.md`](docs/usage.md)。
@@ -23,6 +24,10 @@ npm run validate
 构建必须在测试之前：服务集成测试会启动构建入口，不能依赖上一次遗留的 `dist/`。
 Vitest 转译不替代 TypeScript 类型检查；构建配置与测试也必须进入类型检查范围。
 联网的 `npm run discover:upstream` 不进入本地关卡，结果单独说明。
+测试只连本机：`npm test` 注入 `tests/support/offlineGuard.mjs`，测试进程及其子进程访问
+外网会直接失败；需要上游的用例用本机假服务，配置里的 `baseUrl` 也要指向回环地址。
+CI（`.github/workflows/ci.yml`）在 PR 与 `main` 推送上运行同一个 `npm run validate`，
+是合入的必需检查；它不替代本地运行，也不使用任何仓库 secret。
 
 验证通过并整理变更范围后，按用户授权本地提交或申请 MR。提交授权不自动包含推送、
 合并或改写 Git 历史。Git 身份使用仓库本地配置，不修改全局设置。

@@ -8,7 +8,7 @@ import { PAGE_SIZE } from "../../src/admin/components/DataTable.tsx";
  *
  * ## 为什么 skill 也需要关卡
  *
- * 这四份文档的作用是**指导将来的改动** —— 一条过期的指导比没有指导更糟：
+ * 这些文档的作用是**指导将来的改动** —— 一条过期的指导比没有指导更糟：
  * 它会让下一次改动建立在一个不成立的前提上，而读它的人没有理由怀疑它。
  *
  * 而它们恰好最容易漂：里面写满了具体数字（对比度、页长、端口）与
@@ -21,7 +21,11 @@ import { PAGE_SIZE } from "../../src/admin/components/DataTable.tsx";
  *   3. 引用的纪律编号在 `AGENTS.md` 里真的有定义（编号曾出现两套并分叉，
  *      引用过只存在于另一套里的编号）；
  *   4. 提到的源码符号真的还在（重命名后 skill 会指向一个不存在的东西）；
- *   5. 写进 skill 的几个关键常量与代码一致。
+ *   5. 写进 skill 的几个关键常量与代码一致；
+ *   6. 体积有上限：SKILL.md 每次触发都整份进上下文，细节放同目录的 reference.md。
+ *
+ * 引用检查覆盖 skill 目录下的全部 `.md`（SKILL.md 与 reference.md），
+ * 否则把细节挪进 reference.md 就等于挪出了关卡。
  *
  * 剩下的（那些实测的对比度数字、设计判断的理由）由 `tests/design/` 与
  * 各自的单测守着 —— 这里不重复断言它们，只保证**引用不悬空**。
@@ -30,10 +34,29 @@ import { PAGE_SIZE } from "../../src/admin/components/DataTable.tsx";
 const SKILLS_DIR = new URL("../../.claude/skills", import.meta.url).pathname;
 const ROOT = new URL("../..", import.meta.url).pathname;
 
-const EXPECTED_SKILLS = ["dev-workflow", "ui-design", "protocol-surface", "debug-egress"] as const;
+// dev-workflow 已删除：它复述 AGENTS.md，两份流程说明迟早分叉（纪律 #4）。
+const EXPECTED_SKILLS = ["ui-design", "protocol-surface", "debug-egress"] as const;
 
+/** SKILL.md 与 reference.md 的行数上限。前者每次触发都整份加载。 */
+const MAX_LINES = { "SKILL.md": 100, "reference.md": 150 } as const;
+
+/** 目录遍历得到的 skill 内全部 Markdown 文件名（纪律 #12：不手写清单）。 */
+function skillFiles(name: string): string[] {
+  return readdirSync(join(SKILLS_DIR, name))
+    .filter((f) => f.endsWith(".md"))
+    .sort();
+}
+
+/** 只读 SKILL.md：frontmatter 与常量断言针对入口文件。 */
 function skillText(name: string): string {
   return readFileSync(join(SKILLS_DIR, name, "SKILL.md"), "utf8");
+}
+
+/** SKILL.md + reference.md 拼接：引用检查必须覆盖细节文件。 */
+function skillCorpus(name: string): string {
+  return skillFiles(name)
+    .map((f) => readFileSync(join(SKILLS_DIR, name, f), "utf8"))
+    .join("\n");
 }
 
 /**
@@ -76,12 +99,12 @@ const sourceHaystack = ["src", "scripts"]
   .map((f) => readFileSync(join(ROOT, f), "utf8"))
   .join("\n");
 
-/** 四个 skill 引用过的全部纪律编号 —— 供整组的元断言用。 */
+/** 全部 skill 引用过的纪律编号 —— 供整组的元断言用。 */
 const citedAcrossSkills: number[] = [];
 
 describe("skill 文档齐全且格式正确", () => {
-  it("四个 skill 都存在", () => {
-    // 固定就是这四个：少一个是 skill 被误删，多一个是新增后没登记到 EXPECTED_SKILLS。
+  it("登记的 skill 都存在且没有未登记的", () => {
+    // 固定就是这几个：少一个是 skill 被误删，多一个是新增后没登记到 EXPECTED_SKILLS。
     const dirs = readdirSync(SKILLS_DIR, { withFileTypes: true })
       .filter((e) => e.isDirectory())
       .map((e) => e.name)
@@ -112,6 +135,25 @@ describe("skill 文档齐全且格式正确", () => {
       const description = /^description:\s*(.+)$/m.exec(front)?.[1] ?? "";
       expect(description.length).toBeGreaterThan(80);
     });
+
+    it(`${name} 只含 SKILL.md 与可选的 reference.md，且不超过行数上限`, () => {
+      /*
+       * 目录内只允许这两种文件：多层引用或散落的附件不会被下面的引用检查读到。
+       * 行数上限让"把细节挪进 reference.md"成为强制，而不是建议。
+       */
+      const files = skillFiles(name);
+      expect(files).toContain("SKILL.md");
+      const all = readdirSync(join(SKILLS_DIR, name));
+      expect(all.filter((f) => !(f in MAX_LINES)), `${name} 目录里有未登记的文件`).toEqual([]);
+      let checked = 0;
+      for (const f of files) {
+        const lines = readFileSync(join(SKILLS_DIR, name, f), "utf8").trimEnd().split("\n").length;
+        const cap = MAX_LINES[f as keyof typeof MAX_LINES];
+        expect(lines, `${name}/${f} 有 ${lines} 行，上限 ${cap}`).toBeLessThanOrEqual(cap);
+        checked += 1;
+      }
+      expect(checked).toBe(files.length);
+    });
   }
 });
 
@@ -131,7 +173,7 @@ describe("skill 里的引用不悬空", () => {
        * 纪律 #7：文档里写的命令要真跑一遍。这里至少保证它**存在** ——
        * 一个 `npm run xxx` 打成错的 skill 会让读者以为自己环境坏了。
        */
-      const text = skillText(name);
+      const text = skillCorpus(name);
       /*
        * 字符类要含**连字符**：`[a-z:]+` 会把
        * `npm run build-nonexistent` 截成 `build`（存在）→ 静默通过。
@@ -152,11 +194,11 @@ describe("skill 里的引用不悬空", () => {
        * 防止 skill 引用 AGENTS.md 里不存在的纪律编号（编号曾出现两套并分叉，
        * 文档引用了只存在于另一套里的编号）。
        */
-      const text = skillText(name);
+      const text = skillCorpus(name);
       /*
        * 先抓「纪律 #...」整段再从里面抽全部编号：
        * `/纪律 #(\d+)/g` 对 `纪律 #8/#4` 只拿到 8 —— 而
-       * `dev-workflow/SKILL.md` 正在用这个写法，只抽首个编号会让 `#4`
+       * `debug-egress/SKILL.md` 正在用这个写法，只抽首个编号会让 `#4`
        * 这类后续编号逃过检查。
        */
       const cited = [...text.matchAll(/纪律 #\d+(?:\s*[/、]\s*#\d+)*/g)].flatMap((m) =>
@@ -175,10 +217,10 @@ describe("skill 里的引用不悬空", () => {
        * skill 里会写 `core/proxy/clash/select.ts` 这类路径指路。
        * 文件被重命名后，那条指路会把人带到一个不存在的地方。
        */
-      const text = skillText(name);
+      const text = skillCorpus(name);
       /*
        * **裸文件名也要检查**。若正则要求 `src/`/`scripts/`/
-       * `tests/` 前缀，四个 skill 里带前缀的引用只占极少数，
+       * `tests/` 前缀，skill 里带前缀的引用只占少数，
        * 其余都是 `` `clash/select.ts` ``、`` `pipe.ts` ``、`` `retry.ts` ``
        * 这类裸名 —— 全部在视野外，改坏它们全绿。那是「输入集为空」的形态。
        *
@@ -217,7 +259,7 @@ describe("skill 里的引用不悬空", () => {
        * 的（驼峰、或全大写下划线），不认普通英文单词与中文 —— 否则会把
        * 散文里的词也当符号查。
        */
-      const text = skillText(name);
+      const text = skillCorpus(name);
       const candidates = new Set<string>();
       for (const m of text.matchAll(/`([A-Za-z_$][\w$]*(?:\.[A-Za-z_$][\w$]*)?)(?:\(\))?`/g)) {
         const raw = m[1]!;
@@ -246,16 +288,15 @@ describe("skill 里的引用不悬空", () => {
 
   it("**整组确实抓到了纪律引用** —— 否则上面那条在空集上通过", () => {
     /*
-     * 逐个 skill 不要求必须引用纪律：`ui-design` 与 `protocol-surface`
-     * 讲的是设计与协议面，本来就一条都不引（实测 0 / 0，而 `dev-workflow` 5、
-     * `debug-egress` 1）。所以元断言只能落在整组上。
+     * 逐个 skill 不要求必须引用纪律：`ui-design` 讲的是设计，可以一条都不引。
+     * 所以元断言只能落在整组上。
      *
-     * 这条防的是纪律正则改坏：那时四个 skill 全部抓到 0 条，
+     * 这条防的是纪律正则改坏：那时每个 skill 都抓到 0 条，
      * 「引用的编号都有定义」会在空集上静默通过。
      */
     expect(citedAcrossSkills.length).toBeGreaterThan(3);
-    // 顺带钉住那个多编号写法真的被展开了（`纪律 #8/#4` 要抓到两个）。
-    expect(citedAcrossSkills).toContain(4);
+    // 顺带钉住那个多编号写法真的被展开了（debug-egress 的 `纪律 #6/#8` 要抓到两个）。
+    expect(citedAcrossSkills).toContain(6);
     expect(citedAcrossSkills).toContain(8);
   });
 });
@@ -263,8 +304,8 @@ describe("skill 里的引用不悬空", () => {
 describe("skill 里的关键常量与代码一致", () => {
   it("ui-design 写的页长与 `PAGE_SIZE` 一致", () => {
     /*
-     * 这个数字与"行高 44px → 一屏约 12 行"是一套算术，而 skill 明确教读者
-     * "改页长时这三个数要一起算"。它漂了的话那条教导本身就是错的。
+     * 页长与行高、正文字号是一套算术，skill 教读者"改页长时一起算"。
+     * 期望值从 `DataTable.tsx` 导入，不在这里写死数字（纪律 #4）。
      */
     const text = skillText("ui-design");
     expect(text).toContain(`PAGE_SIZE = ${PAGE_SIZE}`);
@@ -300,5 +341,14 @@ describe("skill 里的关键常量与代码一致", () => {
     const text = skillText("protocol-surface");
     const numbered = [...text.matchAll(/^\d+\. \*\*/gm)];
     expect(numbered.length).toBe(7);
+  });
+
+  it("protocol-surface 的七步顺序确实是 1..7 且指向真实的 relay.ts", () => {
+    const text = skillText("protocol-surface");
+    const section = /^## 七步顺序（`([^`]+)`.*$([\s\S]*?)^## /m.exec(text);
+    expect(section, "七步顺序小节不见了").not.toBeNull();
+    expect(existsSync(join(ROOT, section![1]!))).toBe(true);
+    const steps = [...section![2]!.matchAll(/^(\d+)\. /gm)].map((m) => Number(m[1]));
+    expect(steps).toEqual([1, 2, 3, 4, 5, 6, 7]);
   });
 });

@@ -3,6 +3,9 @@ import { render, screen } from "@testing-library/react";
 import { OverviewPage, workerStatus } from "../../src/admin/pages/OverviewPage.tsx";
 import type { Overview, WorkerView } from "../../src/shared/contract.ts";
 import { fakeOverview } from "./App.test.tsx";
+import { ROW_HEIGHT } from "../../src/admin/components/DataTable.tsx";
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
 
 /*
  * Overview 页的组件契约。
@@ -265,11 +268,14 @@ describe("空状态与目录状态", () => {
  * ================================================================== */
 
 describe("无障碍与密度", () => {
-  it("表格行高 44px —— 同时满足宽松密度与触摸目标", () => {
+  it("表格行高 36px，且与 tokens.css 的 --spacing-row 一致", () => {
     const { container } = render(<OverviewPage data={withWorkers([worker()])} />);
     const row = container.querySelector("tr[data-worker]");
     expect(row).not.toBeNull();
-    expect((row as HTMLElement).style.height).toBe("44px");
+    expect(ROW_HEIGHT).toBe(36);
+    expect((row as HTMLElement).style.height).toBe(`${ROW_HEIGHT}px`);
+    const tokens = readFileSync(join(process.cwd(), "src/admin/styles/tokens.css"), "utf8");
+    expect(/--spacing-row:\s*(\d+)px/.exec(tokens)?.[1]).toBe(String(ROW_HEIGHT));
   });
 
   it("主操作按钮触摸目标 ≥44px", () => {

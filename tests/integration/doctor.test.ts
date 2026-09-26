@@ -6,6 +6,7 @@ import {
   dataDir,
   DOCTOR,
   fakeApi,
+  port,
   run,
   startFakeClash,
   startServer,
@@ -287,6 +288,8 @@ describe("doctor 第 5 层核对选中分组与上游规则", () => {
       dnsA: ["10.20.30.40"],
     });
     await writeConfig({
+      // 上游必须是域名才走 DNS 解析 + IP 规则判定；`.invalid` 保证真实解析不到外网。
+      gateway: { relayToken: "test-token-not-a-real-secret", port, baseUrl: "https://upstream.invalid/zen/v1" },
       workers: [{ id: "w1", kind: "authenticated", apiKey: "fake-key-not-real", proxyId: "p1" }],
       proxies: [
         {
@@ -313,7 +316,7 @@ describe("doctor 第 5 层核对选中分组与上游规则", () => {
 
     expect(result.stdout).toContain("IPCIDR,10.0.0.0/8 → DIRECT");
     expect(result.stdout).toContain("内核解析为 10.20.30.40");
-    expect(result.stdout).toContain("DOMAIN-SUFFIX,opencode.ai,Proxy");
+    expect(result.stdout).toContain("DOMAIN-SUFFIX,upstream.invalid,Proxy");
     expect(result.stdout).toMatch(/! 1\/1 个 Clash 内核可连通/);
   }, 40_000);
 

@@ -5,36 +5,14 @@ import type { BatchProbeStore } from "../../store/db/batchProbeStore.ts";
 import type { EgressService } from "../../core/proxy/egress.ts";
 import { applyProbeResults } from "../../core/proxy/egress.ts";
 import { resolveProxy } from "../../core/proxy/pool.ts";
-import { isUsable } from "../../core/routing/workerPool.ts";
+import { usedProxyIds } from "../../core/routing/workerPool.ts";
 import { safeErrorMessage } from "../../shared/redact.ts";
 import { lockedBridgeFor, type BridgeHealth } from "../../core/proxy/clash/select.ts";
 
 /**
- * 批量探测的执行器 —— 把纯 reducer 接到真实探测上。
- *
- * ## 分工
- *
- * - `shared/batchProbe.ts`：状态机（纯函数，穷举可测）
- * - `store/db/batchProbeStore.ts`：进度持久化（刷新页面能接着看）
- * - **本文件**：只负责「按状态机的指示去跑，并把结果喂回去」
- *
- * 三者分开的理由与 `routing/` 那四块同源：判断能被穷举测试，而这一层只需
- * 验证「接得对」。
- *
- * ## 两段是什么
- *
- * 1. **筛选**：`resolveProxy` 能不能解析出一条出口路径 —— 纯本地判断，很快。
- *    一个配置坏了的代理（指向不存在的内核、Clash 没开）不该占一次真实探测。
- * 2. **主探测**：对通过筛选的逐个实测公网 IP —— 真发网络请求，桥接还要切
- *    selector（串行化），所以这一段可能几十秒。
- *
- * 两段**分开显示进度**，不合成一个假百分比（见状态机的文件头）。
- *
- * ## 为什么执行在后台、不 await
- *
- * `POST /api/batch-probe` 立刻返回，进度靠轮询 `GET` 拿。一个几十秒的
- * HTTP 请求会被各种中间层掐断，而那时探测其实还在跑 —— 前端拿到一个错误
- * 而后台状态仍是 running，两边不一致。
+ * 批量探测执行器：把 `shared/batchProbe.ts` 的纯 reducer 接到真实探测上，进度由
+ * `store/db/batchProbeStore.ts` 持久化。两段：筛选（`resolveProxy`，纯本地）→ 主探测（真发请求）。
+ * 执行在后台、不 await：几十秒的 HTTP 请求会被中间层掐断，进度靠轮询拿。
  */
 
 export type BatchRunnerDeps = {
@@ -45,11 +23,8 @@ export type BatchRunnerDeps = {
   readonly log?: (message: string) => void;
   readonly now?: () => number;
   /**
-   * 批测开始前探一遍 Clash 内核。
-   *
-   * 不传则跳过锁定 —— 那是**降级而不是等价**：不锁的话一批探测跑到一半
-   * 换了内核，后半批量到的是另一个内核的出口，而隔离报告把两批混在一起
-   * 按 IP 分组。所以生产必须传。
+   * 批测前探一遍 Clash 内核以锁定一个。不传则跳过锁定，这是降级：
+   * 中途换内核会让隔离报告混入两个内核的出口。生产必须传。
    */
   readonly probeBridges?: () => Promise<readonly BridgeHealth[]>;
 };
@@ -58,20 +33,9 @@ export class BatchProbeRunner {
   #deps: BatchRunnerDeps;
   #progress: BatchProgress;
   #startedAt: number | null;
-  /**
-   * 正在跑的那一轮。
-   *
-   * 用它判断「是否已有一批在跑」而不是只看 `#progress.state`：状态落盘是异步的,
-   * 而两个几乎同时到达的 start 请求都会先读到 `idle`。持有一个 Promise 引用
-   * 是进程内最直接的互斥。
-   */
+  /** 正在跑的那一轮，用作进程内互斥：状态落盘是异步的，并发 start 都会先读到 `idle`。 */
   #running: Promise<void> | null = null;
-  /**
-   * 暂停的等待点。`resume` 时 resolve 它。
-   *
-   * 用 Promise 而不是轮询一个布尔:轮询要选一个间隔,而那个间隔就是「点了继续
-   * 之后多久才真的继续」的延迟。
-   */
+  /** 暂停的等待点，`resume` 时 resolve；用 Promise 而非轮询，避免恢复延迟。 */
   #resumeSignal: (() => void) | null = null;
 
   constructor(deps: BatchRunnerDeps) {
@@ -90,12 +54,7 @@ export class BatchProbeRunner {
     return this.#progress;
   }
 
-  /**
-   * 本批开始的时刻（毫秒时间戳）；从未跑过时为 null。
-   *
-   * 给 `elapsedMs` 用 —— 前端算不了这个数：刷新页面后它不知道这一批是
-   * 什么时候开始的，而进度本身归服务端所有。
-   */
+  /** 本批开始的时刻；从未跑过时为 null。供 `elapsedMs`，刷新后前端无从得知。 */
   startedAt(): number | null {
     return this.#startedAt;
   }
@@ -108,27 +67,14 @@ export class BatchProbeRunner {
   }
 
   /**
-   * 开始一批。
-   *
-   * 返回 false 表示「已有一批在跑」—— 调用方据此回 409，而**不是**静默排队:
-   * 两批并发会互相切 selector（进程外全局状态），于是实测到的出口不是转发
-   * 实际会用的那个，而隔离报告正按那个 IP 分组。
+   * 开始一批。返回 false 表示已有一批在跑或无可探出口，调用方回 409 而不排队：
+   * 两批并发会互相切 selector。
    */
   start(): boolean {
     if (this.#running !== null) return false;
 
     const config = this.#deps.configOf();
-    /*
-     * 只探**在用的**出口 —— 探一个没人用的代理没有诊断价值。
-     *
-     * 判据用 `isUsable` 而不是手写一份 `enabled && apiKey.trim() !== ""`:
-     * `POST /api/probe` 用的就是它（`routes/admin.ts`）,两处必须同源。
-     * 手写第二份的话,今天两者行为相同,但 `isUsable` 的判据
-     * （看 key 而不看 kind）是一个**记录在案的决定**,它变的时候手写那份不会跟着变。
-     * 分叉方向具体:批量探测会去探调度器永远不会用的节点,
-     * 而隔离报告正是拿两边的结果拼出来的（纪律 #4）。
-     */
-    const proxyIds = [...new Set(config.workers.filter(isUsable).map((w) => w.proxyId))];
+    const proxyIds = usedProxyIds(config);
     if (proxyIds.length === 0) return false;
 
     this.#startedAt = this.#now();
@@ -163,11 +109,8 @@ export class BatchProbeRunner {
   }
 
   /**
-   * 请求取消。
-   *
-   * 进 `cancelling` 而不是立刻 `done`：在途的那个探测还在跑（桥接探测可能
-   * 几秒），而它会切 selector。立刻放开按钮会让用户启动第二批，
-   * 两批互相换出口。真正的 `done` 由 `#run` 的循环发现取消标记后给出。
+   * 请求取消。进 `cancelling` 而非立刻 `done`：在途探测仍在切 selector，
+   * 立刻放开按钮会让第二批并发。`done` 由 `#run` 发现取消标记后给出。
    */
   cancel(): void {
     this.#dispatch({ type: "cancel" });
@@ -185,37 +128,16 @@ export class BatchProbeRunner {
   }
 
   async #run(proxyIds: Array<string | null>): Promise<void> {
-    /*
-     * `let` 而不是 `const` —— 第 0 段可能把 `activeBridgeId` 写回配置，
-     * 而随后第一段的筛选与第二段的真实探测**必须用写回之后的那份**：
-     * 沿用旧引用会让"已切到健康内核"只体现在日志里，而探测照旧打死内核。
-     */
+    // `let`：第 0 段可能写回 `activeBridgeId`，之后的筛选与探测必须用写回后的那份。
     let config = this.#deps.configOf();
 
     /* ---- 第 0 段：锁定单内核 ---- */
     if (this.#deps.probeBridges !== undefined && config.clash.enabled) {
       /*
-       * 批测期间锁定一个内核 —— 不变量 #5 的延伸。
-       *
-       * 桥接探测要**切 selector**，而 selector 是进程外的全局状态。
-       * 一批跑到一半换了内核，后半批量到的是另一个内核的出口 ——
-       * 而隔离报告把两批结果混在一起按实测 IP 分组，于是
-       * 「这两个 Worker 出口相同吗」这个问题的答案变成了噪声。
-       *
-       * 探不到任何可用内核时**不中止** —— 直连代理仍然能探。
-       * 中止会让"Clash 挂了"变成"批量探测完全不可用"，而那不成立。
-       *
-       * ## 择优结果必须写回，否则这一段只是一条日志
-       *
-       * `pickBridge`（`pool.ts`）是转发与探测**实际**取端口的地方，而它是纯
-       * 配置推导 —— 它从不知道内核是否活着，auto 模式下优先用
-       * `activeBridgeId`（"最近一个健康内核"）。若只把 `locked.reason`
-       * 打进日志、丢掉 `bridgeId`，两者会给出相反的答案：日志正确地说
-       * "自动切换到 live kernel"，而随后每次 `resolveProxy` 仍拿到死内核的
-       * 端口，全部桥接代理传输失败。**"锁定"这个词就没有所指。**
-       *
-       * 写回 `activeBridgeId` 同时解决两件事：这一批的后续探测走健康内核，
-       * 且 `pickBridge` 的 `remembered` 终于真的是"最近一个健康的那个"。
+       * 批测期间锁定一个内核（不变量 #5 的延伸）：中途换内核会让隔离报告的 IP 分组变成噪声。
+       * 探不到可用内核时不中止，直连代理仍可探。
+       * 择优结果必须写回 `activeBridgeId`：`pickBridge`（`pool.ts`）只按配置取端口，
+       * 只打日志的话后续探测仍会打到死内核。
        */
       try {
         const health = await this.#deps.probeBridges();
@@ -223,12 +145,7 @@ export class BatchProbeRunner {
         this.#deps.log?.(locked.reason);
 
         if (locked.bridgeId !== null && locked.bridgeId !== config.clash.activeBridgeId) {
-          /*
-           * 只在**真的换了**时写盘 —— `config.json` 是唯一一份凭证存储，
-           * 每次批测都原子写一遍它不是免费的（这也是 `SelectionOutcome.changed`
-           * 存在的理由）。这里用 id 比较而不是读 `changed`：`lockedBridgeFor`
-           * 不透传那个字段，而"选出来的与当前记的不同"本身就是同一个判据。
-           */
+          // 只在真的换了时写盘；`lockedBridgeFor` 不透传 `changed`，用 id 比较等价。
           const expected = this.#deps.configOf();
           const next = {
             ...expected,
@@ -251,16 +168,7 @@ export class BatchProbeRunner {
         this.#dispatch({ type: "finished", failureKind: "cancelled" });
         return;
       }
-      /*
-       * 筛选判据:`resolveProxy` 能否解析出一条出口路径。
-       *
-       * 这是纯本地判断(配置是否自洽、Clash 是否启用、协议能否直连或桥接),
-       * 不发任何请求 —— 所以它快,而这正是分两段的意义:一个配置坏了的代理
-       * 不该占一次几秒的真实探测。
-       *
-       * 复用 `resolveProxy` 而**不是**另写一份判断:两份必然分叉,而分叉后
-       * 「筛选说能用而主探测说不能」会让用户看到一批莫名失败的节点。
-       */
+      // 筛选复用 `resolveProxy`：纯本地判断，坏配置的代理不占真实探测，且与主探测不会分叉。
       const resolved = resolveProxy(config, proxyId);
       if (resolved.ok) passed.push(proxyId);
       this.#dispatch({ type: "screened" });
@@ -281,29 +189,13 @@ export class BatchProbeRunner {
         return;
       }
 
-      /*
-       * **逐个串行**，不并发。
-       *
-       * `probeAll` 有并发参数，但这里刻意不用:进度要一个一个报（并发下
-       * 「3/10」这个数字会跳），而桥接探测本来就被 selector 锁串行化了。
-       * 直连代理确实可以并发，但为此让进度变得不可预测不值得。
-       */
+      // 逐个串行：进度要逐个报，桥接探测本就被 selector 锁串行化。
       const result = await this.#deps.egress.probeProxy(config, proxyId);
       outcomes.set(result.proxyId, result.outcome);
 
       /*
-       * 暂停检查要在 dispatch **之前**再做一次。
-       *
-       * 这一发是**真实完成的工作** —— 若在 `await probeProxy` 期间用户点了暂停,
-       * 此刻 state 已是 `paused`,而 reducer 对 `probed` 的处置是「暂停时不推进」
-       * （那条规则是对的:它挡的是前端在途轮询）。于是这一个计数会被永久丢掉 ——
-       * 探测跑了、IP 也写回了,只有 `mainDone` 少了 1,最终停在 19/20。
-       * 用户看到 95% 的「已结束」,会去找那个并不存在的失败节点,
-       * 而每点一次暂停就再丢一个。
-       *
-       * 所以:暂停期间**不推进进度条**（用户看到的语义不变）,但恢复之后
-       * 要把这一发补上。等到恢复再 dispatch 就同时满足这两条
-       * （否则 3 个节点暂停一次 → 终态 `mainDone:2/3`）。
+       * dispatch 前再做一次暂停检查：reducer 暂停时不推进 `probed`，
+       * 在 await 期间被暂停的这一发会被永久丢掉（终态停在 19/20）。等恢复后再补上。
        */
       await this.#waitIfPaused();
       this.#dispatch({ type: "probed" });
@@ -314,14 +206,8 @@ export class BatchProbeRunner {
   }
 
   /**
-   * 把实测 IP 写回配置。
-   *
-   * **一次性写**，不是每探一个写一次：`saveConfig` 是整份原子写 + fsync，
-   * 每个节点写一次意味着几十次 fsync，而中途任何一次失败都会留下
-   * 「一半节点更新了」的状态。
-   *
-   * `applyProbeResult` 对失败**不清空**已有 IP —— 一次网络抖动不该让
-   * 「这个代理的出口是什么」这条已知事实消失。那条规则在纯函数里。
+   * 把实测 IP 一次性写回配置，避免每个节点一次 fsync 与「一半更新」的状态。
+   * 失败不清空已有 IP，规则在 `applyProbeResults` 里。
    */
   async #persist(
     outcomes: Map<string, Awaited<ReturnType<EgressService["probeProxy"]>>["outcome"]>,
@@ -329,21 +215,13 @@ export class BatchProbeRunner {
     if (outcomes.size === 0) return;
     const config = this.#deps.configOf();
 
-    /*
-     * 走 `applyProbeResults`（与 `POST /api/probe` 同一个函数）—— 它同时处理
-     * **本机直连**那条（合成 id → `gateway.directEgressIp`）。
-     * 两处各写一遍必然漏，典型的漏法就是两处都只并了 proxies。
-     */
+    // 与 `POST /api/probe` 同走 `applyProbeResults`，同时处理本机直连那条。
     const merged = applyProbeResults(config, outcomes);
     if (!merged.changed) return;
     try {
       await this.#deps.applyConfig(merged.config, config);
     } catch (err) {
-      /*
-       * 写盘失败**不影响探测结果的有效性** —— 它们已经被测到了，
-       * 只是没能持久化。报出来，但不把整批标成失败:那会让用户以为
-       * 探测本身出了问题。
-       */
+      // 写盘失败不把整批标成失败：测量本身有效，只是没能持久化。
       this.#deps.log?.(`批量探测结果写入失败: ${safeErrorMessage(err)}`);
     }
   }

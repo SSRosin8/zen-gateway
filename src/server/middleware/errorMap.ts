@@ -1,27 +1,10 @@
 import type { FailureKind } from "../../core/failures.ts";
-import { safeErrorMessage } from "../../shared/redact.ts";
 import { HeaderValidationError } from "../../core/upstream/headers.ts";
 
 /**
- * 错误映射 —— 网关自己生成的错误响应。
- *
- * ## 边界:这里只处理「没能拿到上游响应」的情况
- *
- * 拿到了上游响应就原样透传(含错误响应)—— 客户端应当看到上游真实的
- * 429 负载、400 字段报错,而不是网关的转述。本文件负责的是另一半:
- * 请求还没出去就被拒(免费判定、缺模型、鉴权),或出去了但连响应头都没拿到
- * (连接失败、超时)。
- *
- * ## 错误体形状对齐 OpenAI
- *
- * `{ "error": { "type": ..., "message": ... } }`。OpenCode 与各类客户端
- * 都按这个形状解析,自造形状会让客户端显示「未知错误」而不是我们写的说明 ——
- * 那等于把一条可自查的信息扔掉。
- *
- * ## 绝不回显的东西
- *
- * 上游原始错误文本可能含订阅 URL 的 token、代理口令、API key 片段。
- * 所有进 message 的文本都要过 `safeErrorMessage`。
+ * 网关自己生成的错误响应，只用于没拿到上游响应的情况；拿到了就原样透传。
+ * 错误体形状对齐 OpenAI（`{ error: { type, message } }`），客户端才能显示我们的说明。
+ * 进 message 的文本都要过 `safeErrorMessage`。
  */
 
 /** 网关自己的拒绝类型。与上游的错误类型区分开,便于用户定位是谁拒的。 */
@@ -75,11 +58,7 @@ export function statusForGatewayError(type: GatewayErrorType): number {
   }
 }
 
-/**
- * 把重试链的失败分类映射为网关错误类型。
- *
- * 仅在**没拿到上游响应**时用。拿到了就透传,不走这里。
- */
+/** 把重试链的失败分类映射为网关错误类型；仅在没拿到上游响应时用。 */
 export function typeForFailureKind(kind: FailureKind): GatewayErrorType {
   switch (kind) {
     case "transport":
@@ -90,11 +69,7 @@ export function typeForFailureKind(kind: FailureKind): GatewayErrorType {
     case "auth":
     case "forbidden":
     case "rate_limit":
-      /*
-       * 走到这里意味着「分类为 auth/rate_limit 但没有上游响应」——
-       * 正常路径下这两类必定带响应(401/429 都是响应),所以这是异常情况,
-       * 报 upstream_unreachable 比谎称鉴权失败更准确。
-       */
+      // 这几类正常必带响应；没响应时报 upstream_unreachable 比谎称鉴权失败更准确。
       return "upstream_unreachable";
     case "bad_request":
       return "invalid_request";
@@ -104,10 +79,7 @@ export function typeForFailureKind(kind: FailureKind): GatewayErrorType {
 }
 
 /**
- * 把一个抛出的异常变成错误体。
- *
- * `HeaderValidationError` 单独处理:它是**客户端**的错(400),
- * 而且它的 message 已经刻意不含头值,可以直接用。
+ * 把抛出的异常变成错误体。`HeaderValidationError` 是客户端的错（400），其 message 已不含头值。
  */
 export function errorBodyFromException(err: unknown): {
   status: number;
@@ -120,20 +92,10 @@ export function errorBodyFromException(err: unknown): {
     };
   }
 
-  /*
-   * 其余异常一律 500 且**不回显原始消息的细节**。
-   *
-   * safeErrorMessage 会脱敏,但即便如此,一个内部异常的文本
-   * (栈、文件路径、库内部状态)对客户端没有价值,对攻击者有。
-   * 真实消息进日志,客户端只得到一句中性说明。
-   */
+  // 其余异常一律 500，不回显内部细节；真实消息进日志。
   return {
     status: 500,
     body: gatewayError("internal_error", "网关内部错误,详见服务端日志"),
   };
 }
 
-/** 供日志使用的脱敏文本。与返回给客户端的 message 是两条不同的信息。 */
-export function logMessageFor(err: unknown): string {
-  return safeErrorMessage(err);
-}

@@ -10,6 +10,8 @@ import {
   type StatsView,
 } from "../shared/contract.ts";
 import { StatusIndicator } from "./components/StatusIndicator.tsx";
+import { Skeleton } from "./components/Panel.tsx";
+import { TableSkeleton } from "./components/DataTable.tsx";
 import { Nav } from "./components/Nav.tsx";
 import { OverviewPage } from "./pages/OverviewPage.tsx";
 import { GatewayPage } from "./pages/GatewayPage.tsx";
@@ -57,7 +59,7 @@ export function App() {
       <header className="mb-6 flex flex-wrap items-end justify-between gap-4">
         <div>
           {/* wordmark 是衬线真能生效的地方之一（纯拉丁）。 */}
-          <h1 className="font-serif text-3xl leading-none tracking-tight">zen-gateway</h1>
+          <h1 className="font-serif text-display-30 tracking-tight">zen-gateway</h1>
           <p className="mt-2 text-text-muted">OpenCode Zen 免费模型本地网关</p>
         </div>
         <ThemeSelect />
@@ -313,10 +315,10 @@ function UsageTab({ hideStale }: { hideStale: boolean }) {
  * Worker」会让一个装好的系统看起来要重装；显示「全部就绪」则是把未知当成功。
  */
 function FallbackView({ state }: { state: FetchState<unknown> }) {
+  if (state.status === "loading") return <LoadingView />;
   return (
     <section className="rounded-lg border border-border-strong bg-surface p-5">
-      <h2 className="mb-4 text-base font-medium">服务</h2>
-      {state.status === "loading" && <StatusIndicator tone="neutral" icon="○" label="检测中" />}
+      <h2 className="mb-4 text-heading-16 font-medium">服务</h2>
       {state.status === "offline" && (
         <>
           <StatusIndicator tone="error" icon="✕" label="未连接到网关服务" />
@@ -332,6 +334,40 @@ function FallbackView({ state }: { state: FetchState<unknown> }) {
         </>
       )}
     </section>
+  );
+}
+
+/**
+ * 首次加载：文字状态「检测中」立即显示（读屏只读它），骨架按最终布局占位 ——
+ * 一个指标面板 + 一个表格面板，外框、内边距、行高与真实页面一致，数据到达时不跳。
+ */
+function LoadingView() {
+  return (
+    <div className="space-y-4" data-loading="">
+      <section className="rounded-lg border border-border-strong bg-surface">
+        <header className="flex flex-wrap items-center justify-between gap-3 border-b border-border-strong px-4 py-3 sm:px-5">
+          <h2 className="text-heading-16 font-medium">服务</h2>
+          <StatusIndicator tone="neutral" icon="○" label="检测中" />
+        </header>
+        <div className="grid grid-cols-2 gap-6 px-4 py-4 sm:grid-cols-4 sm:px-5" aria-hidden="true">
+          {[0, 1, 2, 3].map((i) => (
+            <div key={i}>
+              <Skeleton className="h-3.5 w-16" />
+              <Skeleton className="mt-2 h-[30px] w-20" />
+              <Skeleton className="mt-2 h-3 w-24" />
+            </div>
+          ))}
+        </div>
+      </section>
+      <section className="rounded-lg border border-border-strong bg-surface">
+        <header className="border-b border-border-strong px-4 py-3 sm:px-5" aria-hidden="true">
+          <Skeleton className="h-4 w-24" />
+        </header>
+        <div className="px-4 py-4 sm:px-5">
+          <TableSkeleton columns={["30%", "25%", "25%", "20%"]} />
+        </div>
+      </section>
+    </div>
   );
 }
 

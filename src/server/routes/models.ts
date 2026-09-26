@@ -7,40 +7,17 @@ import { gatewayError } from "../middleware/errorMap.ts";
 import { MODELS_PATHS } from "../../core/protocols/chat.ts";
 
 /**
- * `/v1/models` —— 目录查询。
- *
- * ## 这里**过滤**而不透传,是刻意的
- *
- * 转发面严格原样透传,但目录是个例外:本网关只放行免费模型,若把上游完整目录
- * 原样报给 OpenCode,它会把付费模型也列进可选项,用户一选就得到 403。
- * 客户端能看到的模型集必须与网关实际放行的集合一致 —— 否则每个付费模型
- * 都是一个「看起来能用,点了报错」的陷阱。
- *
- * ## 为什么读 body 在这里是允许的
- *
- * 不变量 #1 约束的是**转发链路**:那里读 body 会导致「发过字节后又重试」。
- * 目录查询不在那条链路上 —— 它非流式、响应只有几 KB、且本就需要解析内容
- * 才能过滤。这个区别值得写明,免得后来者照抄到转发链路上。
- *
- * ## 缓存
- *
- * 不能**每次请求都打一次上游**:那样上游抖动时目录跟着消失 ——
- * 而目录为空等于免费集为空,等于 OpenCode 的模型列表整个空掉。
- * 所以走 `ModelCatalog`:校验过的最后成功缓存、失败时继续用旧的、
- * 旧的永不硬过期。见那个文件的说明。
- *
- * 身份槽位也在那里。**别在这里存第二份结论** ——
- * 完整推理记在 `catalog.ts` 的文件头（站得住的版本比「按身份区分」更窄：
- * 整份目录按账号不同，而**免费子集**三账号一致，而本网关只放行免费模型）。
- * 这里只负责选一个身份并把结果过滤。
+ * `/v1/models` 目录查询。刻意过滤成免费集而不透传：客户端能看到的模型集必须
+ * 与网关实际放行的一致，否则付费模型都是「点了报 403」的陷阱。
+ * 这里读 body 不违反不变量 #1：它不在转发链路上，且本就需要解析内容。
+ * 缓存与身份槽位见 `ModelCatalog`（`catalog.ts`），这里不存第二份结论。
  */
 
 export type ModelsDeps = {
   readonly configOf: () => Config;
   readonly upstreamOf: (config: Config) => UpstreamDeps;
-  /** 在架目录缓存。与转发面**共用同一个** —— 见 `app.ts`。 */
+  /** 在架目录缓存，与转发面共用同一个（见 `app.ts`）。 */
   readonly catalog: ModelCatalog;
-  readonly log?: (message: string) => void;
 };
 
 export function createModelsRoutes(deps: ModelsDeps): Hono {
@@ -52,14 +29,8 @@ export function createModelsRoutes(deps: ModelsDeps): Hono {
 }
 
 /**
- * 目录查询。
- *
- * 身份怎么选见 `catalogIdentityOf` —— 那条知识连同"刻意不经调度器"的理由
- * 都在它那里,三个调用点共用一份,不在这里再写一遍。
- *
- * 这里用 `ensure`(而非 `refreshIfStale`)是因为这条路径**可以等**:
- * 用户主动在问目录,一次几百毫秒的上游查询是他预期中的事。转发路径相反 ——
- * 见 `relay.ts` 第 3 步的说明。
+ * 身份选择见 `catalogIdentityOf`。这里用 `ensure` 而非 `refreshIfStale`：
+ * 用户主动查询目录时可以等一次上游请求，转发路径则不行。
  */
 async function handleModels(c: Context, deps: ModelsDeps): Promise<Response> {
   const config = deps.configOf();
@@ -73,49 +44,26 @@ async function handleModels(c: Context, deps: ModelsDeps): Promise<Response> {
     if (snapshot !== null) break;
   }
   if (snapshot === null) {
-    /*
-     * 从来没成功拉到过目录。
-     *
-     * 502 而非空列表:一个空的 `{"data":[]}` 会让 OpenCode 显示"没有可用模型",
-     * 而那与"网关拿不到目录"是两件事 —— 用户会去翻自己的模型配置,
-     * 而真实原因是上游或出口不通。
-     */
+    // 从未拉到过目录时报 502 而非空列表：空列表会让用户去翻自己的模型配置。
     return c.json(gatewayError("upstream_unreachable", "无法获取上游模型目录"), 502);
   }
 
   /*
-   * 过滤成免费集。保留上游条目的其余字段原样 ——
-   * 客户端可能依赖 `created`/`owned_by`,重建对象会丢掉我们没预料到的字段。
-   *
-   * 这里把 snapshot 同时当作"待过滤的条目"与"求交集的在架集合"。
-   * 两者同源,所以交集在这条路径上恒为真 —— 但仍然传进去:
-   * `judgeFree` 的签名若在这里能省掉目录,下一个调用点就会照抄这个省法。
+   * 过滤成免费集，保留上游条目其余字段原样。snapshot 同时作为在架集合传入，
+   * 虽然交集在此恒为真，但不给后来的调用点留下省略目录的范例。
    */
   const free = snapshot.entries.filter((entry) => judgeFree(entry.id, config.models, snapshot).free);
 
   return c.json({
     object: "list",
     data: free,
-    /*
-     * 网关自己的诊断字段,不属于 OpenAI 契约。
-     *
-     * 放在体里而不是头里:用户看目录时最想知道的是"这份是不是刚拉的",
-     * 而 OpenCode 不会显示响应头。名字加 `zen_gateway_` 前缀,
-     * 免得哪天上游真加了同名字段。
-     */
+    // 网关自己的诊断字段（不属于 OpenAI 契约），放体里因为 OpenCode 不显示响应头。
     zen_gateway_catalog: {
       slot: slotOf(identity),
       total: snapshot.entries.length,
       free: free.length,
       fetched_at: snapshot.fetchedAt,
-      /*
-       * `isFresh` 不传 `now` —— 让它用 `ModelCatalog` **自己的**时钟。
-       *
-       * 不能传 `Date.now()`:`fetched_at` 来自注入的时钟,于是同一个
-       * 响应体里两个字段会来自两个不同的时间源:注入时钟的环境下 `fresh` 恒为
-       * false(刚拉到的目录报告为"不新鲜"),生产环境下恒为 true。两种情况下
-       * 都无法用断言区分,它就成了一个**无法被验证**的诊断字段。
-       */
+      // 不传 `now`：用 `ModelCatalog` 自己的时钟，与 `fetched_at` 同一时间源。
       fresh: deps.catalog.isFresh(snapshot, config),
     },
   });

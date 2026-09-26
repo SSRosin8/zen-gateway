@@ -1,55 +1,20 @@
 import type { ModelRules } from "../../shared/schema.ts";
 
 /**
- * 免费模型放行判定。
+ * 免费模型放行判定（配置驱动）。
  *
- * ## 判定规则(配置驱动)
+ * 免费 =（后缀命中 `freeSuffix` 或在 `extraFreeIds` 名单）∩ 在架目录。
+ * 交集让已下架的 `xxx-free` 在网关侧就被拒，并给出本网关的措辞，而不是依赖上游
+ * 返回的 400/401（上游会把 401 同时用于鉴权失败与模型不存在）。
  *
- * 免费 = （后缀命中 `freeSuffix` **或** 在 `extraFreeIds` 名单里）**∩ 在架目录**。
- *
- * 把等价名单写成代码常量的话,目录一变就要
- * 改代码发版,而它硬编码的 `union-alpha` 已从上游目录消失。这里全部读配置。
- *
- * ## 交集这一步
- *
- * 少了交集会**放得偏宽**:一个已下架的 `xxx-free` 后缀命中于是被放行,
- * 然后由上游拒绝。实测(2026-09-22,真实 key)真实行为是
- * **400 `Upstream request failed: Model is unavailable.`** → 归为
- * `bad_request` → 不重试、不归咎 Worker、原样透传。
- *
- * 不是 404 → `auth` → 「换 Worker 重试后仍失败」:实测不会把健康 Worker
- * 打进冷却(正是不变量 #4 要保的那件事)。但缺口仍在:没有交集时,
- * 用户看到的是上游措辞「模型不可用」,而不是「这个模型不在本网关的免费集里」。
- *
- * 交集还消掉一个**暴露面**:免 key 时同一个已下架 id 得到
- * **401 `ModelError: Model glm-5-free is not supported`** —— 上游把 401 同时
- * 用于鉴权失败与模型不存在。转发链走不到那条路径(每个候选都有 key),
- * 但它说明**不能假定 401 一定是凭证问题**;若上游哪天在带 key 的请求上也这么
- * 返回,401 → `auth` → `shouldCooldown` 为真,一个坏模型名就会连累健康 Worker。
- *
- * ## 目录缺失时**放行**,不是拒绝
- *
- * 这与下面"默认拒绝"的取向看似冲突,其实不是同一个判断:
- *
- * - **默认拒绝**针对的是「判定不出这个模型免费」—— 放行的代价是真金白银。
- * - **目录缺失**时我们对这个模型仍有一个独立依据(后缀／名单),缺的只是
- *   「它是否还在架」。而"不在架"的唯一后果是**上游拒绝**(见上文 400),
- *   不产生费用。
- *
- * 若这里改成拒绝,一次上游抖动就会让网关拒绝**一切**请求 —— 用一个
- * 不花钱的风险换一次全面不可用。所以缺目录时退回只看后缀／名单的判定,
- * 并用一个单独的 `reason` 让诊断能看出这次没做交集。
- *
- * ## 为什么默认拒绝
- *
- * 判定不出「确定免费」就拒绝。这个网关的存在前提是只用免费模型,
- * 放行一个付费模型的代价是真金白银,而拒绝一个免费模型的代价只是
- * 一条可自查的错误信息 —— 两侧代价不对称,所以默认必须是拒绝。
+ * 判定不出「确定免费」就拒绝：放行付费模型花真钱，误拒只是一条可自查的错误。
+ * 但目录缺失时放行（仍有后缀／名单依据，不在架只会被上游拒、不产生费用），
+ * 否则一次上游抖动就让网关拒绝一切；此时用 `*_unverified` reason 标明没做交集。
  */
 
 export type FreeVerdict =
   | { free: true; reason: "suffix" | "extra" }
-  /** 免费依据成立,但目录不可用,没做交集 —— 见文件头。 */
+  /** 免费依据成立，但目录不可用，没做交集。 */
   | { free: true; reason: "suffix_unverified" | "extra_unverified" }
   | { free: false; reason: "not_free" }
   /** 免费依据成立,但已不在上游在架目录里。 */
@@ -61,35 +26,18 @@ export type CatalogView = {
 } | null;
 
 /**
- * 判断一个模型 id 是否属于免费集。
- *
- * `modelId` 必须是调用方已校验过的非空、无首尾空白的字符串
- * (见 `protocols/types.ts` 的 `readModelField`)。这里不再 trim 或改大小写:
- * 任何归一化都会让「网关认为的 id」与「发给上游的 id」产生分歧,
- * 而那个分歧就是一个放行漏洞。
+ * 判断模型 id 是否属于免费集。`modelId` 须已经 `readModelField` 校验；这里不再归一化，
+ * 否则「网关认为的 id」与「发给上游的 id」分歧即放行漏洞。
  */
 export function judgeFree(
   modelId: string,
   rules: ModelRules,
   catalog: CatalogView = null,
 ): FreeVerdict {
-  /*
-   * 先查显式名单,再看后缀。
-   *
-   * 顺序无关正确性(两者都为真时都是 free),但 reason 会不同,
-   * 而 reason 会进诊断输出 —— 「因为在名单里」比「因为后缀」更有助于
-   * 用户理解为何某个无后缀模型被放行。
-   */
+  // 先查名单再看后缀：结果相同，但 reason 进诊断，「在名单里」更有助于理解。
   const basis: "extra" | "suffix" | null = rules.extraFreeIds.includes(modelId)
     ? "extra"
-    : /*
-       * 后缀判定要求「以后缀结尾且不等于后缀本身」。
-       *
-       * 少了后半个条件,一个恰好叫 `-free` 的模型 id 会被放行;更要紧的是
-       * 若用户把 `freeSuffix` 误配成空串,`endsWith("")` 对**任何** id 都为真,
-       * 整道闸门会静默全开。schema 已用 `.min(1)` 挡住空串,这里是第二道 ——
-       * 一个「配置写错就全开」的闸门不该只有一层防护。
-       */
+    : // 后缀不能等于自身；空串守卫是 schema `.min(1)` 之外的第二道，防止闸门全开。
       rules.freeSuffix !== "" &&
         modelId !== rules.freeSuffix &&
         modelId.endsWith(rules.freeSuffix)
@@ -98,7 +46,7 @@ export function judgeFree(
 
   if (basis === null) return { free: false, reason: "not_free" };
 
-  // 交集被关掉,或目录拿不到 —— 退回"只看后缀与名单"。
+  // 交集被关掉或目录拿不到，退回只看后缀与名单。
   if (!rules.enforceCatalog) return { free: true, reason: basis };
   if (catalog === null) {
     return { free: true, reason: basis === "extra" ? "extra_unverified" : "suffix_unverified" };
@@ -109,27 +57,10 @@ export function judgeFree(
 }
 
 /**
- * 该模型在本网关上支持哪些协议面(读配置的覆写表,回落到默认)。
- *
- * ## 生产调用点:`admin/project.ts`(Models 页),**只作展示 —— 不要接成闸门**
- *
- * 它已经有一个生产读者,所以"不要顺手接上判定"的警告更要紧
- * (下一个人容易照着扩):
- *
- * `defaultSurfaces` 的默认值是 `["chat", "responses"]`,若把它当放行闸门接上,
- * 默认配置下**所有**模型的 `/v1/messages` 请求都会被拒 —— 而那个面
- * 已验证可用。也就是说"补上这个判定"会立刻打坏一个能用的功能。
- *
- * **语义已定**:它是「后台展示用的提示」，不是放行闸门。
- * 依据是已有的测量 —— 上游不按模型区分面（三个面对同一个免费模型都通），
- * 所以当闸门用缺乏依据；而接成闸门会让默认配置下所有 `/v1/messages`
- * 请求被拒。完整理由写在 `schema.ts` 的 `defaultSurfaces` 上。
- *
- * 真正的放行判定在 `ProtocolSurface.streaming`（协议面接口的能力位，
- * 由 `relay.ts` 第 4 步执行）—— 两者不要混。
- *
- * 不要在这里手写"有没有生产调用点"之类的标注:那种标注必然漂 ——
- * 见 `catalog.ts` 的 `status()` 同形态。
+ * 该模型在本网关上支持的协议面（覆写表回落到默认）。
+ * 只供 `admin/project.ts` 展示，不要接成闸门：默认 `["chat", "responses"]` 会让所有
+ * `/v1/messages` 请求被拒，而上游并不按模型区分面（理由见 `schema.ts` 的 `defaultSurfaces`）。
+ * 真正的面能力闸门是 `ProtocolSurface.streaming`。
  */
 export function surfacesFor(modelId: string, rules: ModelRules): readonly string[] {
   return rules.surfaceOverrides[modelId] ?? rules.defaultSurfaces;

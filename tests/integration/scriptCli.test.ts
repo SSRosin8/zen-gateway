@@ -7,6 +7,7 @@ import {
   fakeApi,
   port,
   run,
+  UNREACHABLE_UPSTREAM,
   SETUP,
   startFakeClash,
   startServer,
@@ -47,7 +48,7 @@ describe("两个脚本都不回显凭证", () => {
       JSON.stringify(
         ConfigSchema.parse({
           version: CONFIG_VERSION,
-          gateway: { relayToken: token, port },
+          gateway: { relayToken: token, port, baseUrl: UNREACHABLE_UPSTREAM },
           workers: [{ id: "w1", kind: "authenticated", apiKey: "k", proxyId: "p1" }],
           proxies: [
             {

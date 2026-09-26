@@ -2,34 +2,18 @@ import { randomBytes } from "node:crypto";
 import { constants as fsConstants } from "node:fs";
 import { access, chmod, mkdir, open, readFile, rename, stat, unlink } from "node:fs/promises";
 import { dirname, join } from "node:path";
-import { configPath, dataDir } from "./paths.ts";
+import { configPath, dataDir, DIR_MODE, FILE_MODE } from "./paths.ts";
 import { CONFIG_VERSION, ConfigSchema, type Config } from "../shared/schema.ts";
 import { safeErrorMessage } from "../shared/redact.ts";
 
 /**
- * 配置的加载与持久化。
- *
- * config.json 里有 Zen API key、Relay Token、代理口令、Clash secret ——
- * 整个文件都是凭证。因此：0600 权限、原子写、且任何失败路径都不回显文件内容。
+ * 配置的加载与持久化。整个 config.json 都是凭证：0600 权限、原子写、
+ * 任何失败路径都不回显文件内容。
  */
 
-/** 文件权限：只有属主可读写。data/ 目录同理用 0700。 */
-const FILE_MODE = 0o600;
-const DIR_MODE = 0o700;
-
 /**
- * data/ 的位置与 config.json 的路径。
- *
- * 实现已移到 `paths.ts` —— `scripts/service.mjs` 与 `vite.config.ts` 需要这两个
- * 函数来定位配置文件,但它们不需要解析配置。留在本文件会让引用方连带拖入
- * `zod` 与整个 schema(实测 +57ms,而 `service.mjs status` 全程只有 51ms)。
- *
- * 这里转出来,让既有调用方(`db/open.ts`、测试)不必改 import 路径。
- *
- * 注意是**先 import 再 export**,而不是 `export { x } from "./paths.ts"`:
- * 后者只是转发,**不会**把名字带进本模块作用域,而本文件内部有三处用到
- * `configPath`。只写 re-export 时 tsc 报 `TS2304: Cannot find name 'configPath'`
- * —— 这正是四份 tsconfig 里 `tsconfig.server.json` 覆盖 src/ 的用处。
+ * 转出 `paths.ts` 的实现，供既有调用方沿用本模块路径。先 import 再 export：
+ * 本文件内部也用 `configPath`，纯 re-export 不会把名字带进作用域。
  */
 export { dataDir, configPath };
 
@@ -39,13 +23,8 @@ export function generateRelayToken(): string {
 }
 
 /**
- * 配置错误。
- *
- * 刻意不用构造器参数属性（`constructor(readonly kind: ...)`）：
- * Node 的 strip-only TypeScript 模式不支持那个语法，而 `scripts/*.mjs`
- * 会直接 import 本模块来复用 schema 与读写逻辑（不复用就会退化成两份定义，
- * 脚本写出的配置迟早与 schema 不一致）。**tsc 不会拦这个** ——
- * 只有真正跑脚本时才炸，所以 tests/integration 里有一条「脚本能跑起来」的守卫。
+ * 配置错误。不用构造器参数属性：`scripts/*.mjs` 以 Node strip-only 模式直接
+ * import 本模块，tsc 不会拦这种语法。
  */
 export class ConfigError extends Error {
   override readonly name = "ConfigError";
@@ -73,14 +52,8 @@ export function defaultConfig(): Config {
 }
 
 /**
- * 版本闸门 + 迁移钩子。
- *
- * 目前只有 version 1，没有需要搬的形状。保留这一层是因为格式**会**演进：
- * 「加字段」不升版本（schema 的默认值兜住），「改语义或改形状」才升版本，
- * 届时在这里逐档递进。
- *
- * 不做任何配置迁移或猜测补全 —— 缺 version 字段就是配置坏了，
- * 不是「来自某个更早的格式」。
+ * 版本闸门。加字段不升版本，改语义或形状才升并在这里迁移。
+ * 缺 version 字段就是配置坏了，不猜测补全。
  */
 function checkVersion(raw: Record<string, unknown>): Record<string, unknown> {
   const version = raw["version"];
@@ -122,37 +95,21 @@ export type LoadResult = {
   config: Config;
   /** true 表示文件原先不存在，已生成默认配置（含新 Relay Token）。 */
   created: boolean;
-  /**
-   * 权限与期望值不符的项。
-   *
-   * 仅在 `readOnly` 模式下可能非空 —— 正常模式会当场改掉（见 `ensurePermissions`），
-   * 所以那时这里恒为空数组。诊断工具用它**报告**而不是修。
-   */
+  /** 权限与期望值不符的项。仅 `readOnly` 模式下可能非空，正常模式会当场修正。 */
   permissionIssues: readonly string[];
 };
 
 export type LoadOptions = {
   /**
-   * 只读加载:**不修权限**、文件不存在时**不生成**。
-   *
-   * 给 `doctor.mjs` 用。它的头部承诺「绝不写任何东西」,而默认路径会
-   * `chmod` 配置文件与 `data/` 目录 —— 于是「跑一下 doctor 看看」本身
-   * 成了一次变更,且把该**报告**的问题悄悄修掉了（实测:
-   * 755/644 的 data/ 与 config.json 跑完 doctor 变成 700/600）。
-   *
-   * 不在 doctor 里自己写一遍读取+校验:那会是第二份并行真相（纪律 #4）,
-   * 而两份对「这份配置合不合法」给出不同答案正是最难查的一类分叉。
+   * 只读加载：不修权限、文件不存在时不生成。供 `doctor.mjs` 复用同一套读取与校验
+   * （纪律 #4），同时不把该报告的问题悄悄修掉。
    */
   readOnly?: boolean;
 };
 
 /**
- * 加载配置；文件不存在则生成默认配置并写盘。
- *
- * 只有「文件不存在」会自动创建。文件存在但读不动、解析不了、校验不过时
- * 一律抛错 —— 那种情况下自动覆盖会把用户的配置连同凭证一起丢掉。
- *
- * `{ readOnly: true }` 时两个副作用都关掉，见 `LoadOptions`。
+ * 加载配置；只有文件不存在时生成默认配置并写盘。读不动、解析不了、校验不过
+ * 一律抛错，自动覆盖会丢掉用户的凭证。
  */
 export async function loadConfig(root?: string, options: LoadOptions = {}): Promise<LoadResult> {
   const file = configPath(root);
@@ -180,12 +137,7 @@ export async function loadConfig(root?: string, options: LoadOptions = {}): Prom
   try {
     raw = JSON.parse(text);
   } catch (err) {
-    /*
-     * 绝不把 text 或 JSON.parse 的原始消息放进错误。
-     * V8 的 JSON 报错会带上出错位置附近的原文片段,而这个文件里
-     * 每一行都可能是凭证 —— 那片段会进日志、进终端、进用户粘贴的报错。
-     * 只给位置,让人自己去看文件。
-     */
+    // 不回显 JSON.parse 的原始消息：V8 会带上附近的原文片段，可能是凭证。只给位置。
     const position = /position (\d+)/.exec((err as Error).message)?.[1];
     throw new ConfigError(
       `${file} 不是合法 JSON${position ? `（约在第 ${position} 字节）` : ""}`,
@@ -204,16 +156,11 @@ export async function loadConfig(root?: string, options: LoadOptions = {}): Prom
     throw new ConfigError(
       `${file} 校验未通过：\n${formatIssues(parsed.error)}`,
       "invalid",
-      // detail 与 message 同源,单独留一份供结构化日志用。
       formatIssues(parsed.error),
     );
   }
 
-  /*
-   * 文件可能是别的工具或手工创建的,权限不一定对。
-   *
-   * 只读模式**只查不改**:诊断工具该报告它,而不是悄悄修掉然后说一切正常。
-   */
+  // 文件可能是手工创建的，权限不一定对。只读模式只查不改。
   if (options.readOnly === true) {
     return { config: parsed.data, created: false, permissionIssues: await checkPermissions(file) };
   }
@@ -222,12 +169,7 @@ export async function loadConfig(root?: string, options: LoadOptions = {}): Prom
   return { config: parsed.data, created: false, permissionIssues: [] };
 }
 
-/**
- * 查权限但不改 —— `ensurePermissions` 的只读孪生。
- *
- * 两者刻意共用同一对常量（`FILE_MODE` / `DIR_MODE`）:期望值只有一份,
- * 否则「服务修到 600 而诊断按 644 判定」这种分叉会让两边各说一套。
- */
+/** 查权限但不改，与 `ensurePermissions` 共用 `FILE_MODE` / `DIR_MODE`。 */
 async function checkPermissions(file: string): Promise<string[]> {
   const issues: string[] = [];
   try {
@@ -253,14 +195,8 @@ async function checkPermissions(file: string): Promise<string[]> {
 }
 
 /**
- * 权限不对就修正，而不是只警告 —— 警告会被忽略，凭证不该赌这个。
- *
- * **目录也要管**:`mkdir(…, { mode })` 只在**创建时**生效,已存在且权限过松的
- * `data/` 不会被纠正。只修文件不修目录的话,一个 0755(或更糟)的 data/
- * 会让其他本地用户列目录并读到 runtime.db 与日志。
- *
- * service.mjs 里有一份等价逻辑,但任何不经 service.mjs 的入口
- * (脚本、测试、`npm run dev:server`)都只走这里 —— 两处都需要。
+ * 权限不对就修正而不是只警告。目录也要修：`mkdir` 的 mode 只在创建时生效，
+ * 过松的 data/ 会暴露 runtime.db 与日志。不经 service.mjs 的入口只走这里。
  */
 async function ensurePermissions(file: string): Promise<void> {
   try {
@@ -279,22 +215,17 @@ async function ensurePermissions(file: string): Promise<void> {
 }
 
 /**
- * 原子写。
- *
- * 先写同目录临时文件 → fsync → rename。
- * - 同目录是必须的：跨文件系统 rename 不是原子操作。
- * - fsync 在 rename 之前：否则崩溃后可能 rename 出一个内容为空的文件,
- *   而这个文件是唯一一份凭证存储。
- * - 临时文件一出生就是 0600,不存在「先 0644 再 chmod」的窗口。
+ * 原子写：同目录临时文件（跨文件系统 rename 非原子）→ fsync（否则崩溃后可能
+ * rename 出空文件）→ rename。临时文件创建即 0600，没有权限窗口。
  */
 export async function saveConfig(config: Config, root?: string): Promise<void> {
-  // 写之前必过 schema：避免代码里某处构造了非法配置,写盘后下次启动才炸。
+  // 写之前必过 schema，避免非法配置写盘后下次启动才炸。
   const validated = ConfigSchema.parse(config);
 
   const file = configPath(root);
   const dir = dirname(file);
   await mkdir(dir, { recursive: true, mode: DIR_MODE });
-  // mode 只在创建时生效;已存在且过松的目录要纠正 —— 见 ensurePermissions。
+  // mode 只在创建时生效；已存在且过松的目录要纠正。
   await chmod(dir, DIR_MODE).catch(() => {});
 
   const temp = join(dir, `.config.json.${process.pid}.${randomBytes(6).toString("hex")}.tmp`);
@@ -314,7 +245,7 @@ export async function saveConfig(config: Config, root?: string): Promise<void> {
     throw new ConfigError(`无法写入 ${file}：${safeErrorMessage(err)}`, "unreadable");
   }
 
-  // 目录项也要落盘,否则崩溃后 rename 可能丢失。
+  // 目录项也要落盘，否则崩溃后 rename 可能丢失。
   await syncDir(dir);
 }
 

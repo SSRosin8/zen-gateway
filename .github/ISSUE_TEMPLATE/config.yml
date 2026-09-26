@@ -1,0 +1,5 @@
+blank_issues_enabled: false
+contact_links:
+  - name: 安全问题私下报告
+    url: https://github.com/SSRosin8/zen-gateway/security/advisories/new
+    about: 漏洞与凭证泄露请通过 GitHub 私下报告，不要公开提 issue。

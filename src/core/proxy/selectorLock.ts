@@ -1,38 +1,14 @@
 /**
  * Clash selector 互斥锁。
  *
- * 桥接出口的根本约束:**所有桥接代理都经同一个本地混合端口出去**,
- * 具体走哪个节点由 Clash 的 selector 分组状态(`now`)决定 —— 那是全局状态。
- * 两个并发请求若各自切换 selector,就会互相换掉对方的出口节点,
- * 于是 Worker A 的流量从 Worker B 的 IP 出去,出口隔离彻底失效。
+ * 所有桥接代理经同一个混合端口出去,节点由全局的 selector `now` 决定;并发切换会让
+ * Worker A 的流量从 Worker B 的 IP 出去。因此「切换 selector + 建立连接」必须在同一把锁内,
+ * 且锁必须在响应体开始流之前释放,否则一条长 SSE 会串行化整个网关。
+ * 临界区最晚到 `fetch()` resolve(连接已绑定节点);转发路径在连接就绪时就释放(见 `upstream/fetch.ts`)。
  *
- * 因此「切换 selector + 建立连接」必须在同一把锁内。
- *
- * 但锁**必须在响应体开始流之前释放**:一条 SSE 可能持续几分钟,
- * 若锁跨到流结束,整个网关会被单条长连接串行化。
- *
- * 临界区的边界最晚是 `fetch()` 的 resolve 时机(响应头到达):此时连接已建立
- * 并绑定到当时选中的节点,之后再切换 selector 不会改变这条连接的出口。
- * 转发路径更进一步,在连接就绪时就释放(见 `upstream/fetch.ts`);
- * 探测请求短,仍用响应头为界。
- *
- * ## 陷阱:Promise 同化会把锁的范围悄悄扩大
- *
- * `run()` 内部靠 `.then()` 串行,而 `.then()` **会自动 await 任务返回的 Promise**。
- * 因此:
- *
- *   ✅ `run(() => fetch(url))`        —— 返回 `Promise<Response>`,锁持到响应头到达。
- *                                        Response 本身不是 Promise,body 是它上面的流,
- *                                        之后读 body 在锁外。
- *   ❌ `run(async () => { const r = await fetch(url); return r.text(); })`
- *                                     —— 返回的是读体的 Promise,**锁会一直持到
- *                                        整个响应体读完**,一条长 SSE 就此串行化
- *                                        整个网关。
- *
- * 区别只在返回值是「响应对象」还是「读体的 Promise」,不看类型签名极易写错。
- * 转发链路照抄本模式时尤其要注意:任务里只做「切换 + 建连」。
- *
- * 直连代理没有这个约束(各自独立的 dispatcher),不走这把锁。
+ * 陷阱:`.then()` 会同化任务返回的 Promise。`run(() => fetch(url))` 只持锁到响应头;
+ * `run(async () => (await fetch(url)).text())` 会持锁到响应体读完。任务里只做「切换 + 建连」。
+ * 直连代理各有独立 dispatcher,不走这把锁。
  */
 
 /** 每个 Clash 内核一把锁 —— 不同内核的 selector 彼此独立。 */
@@ -41,15 +17,12 @@ export class SelectorLock {
   #tail: Promise<unknown> = Promise.resolve();
 
   /**
-   * 串行执行 `task`。
-   *
-   * `task` 应当只包含「切 selector + 建立连接」,不要把消费响应体也放进来。
-   * 若信号在排队期间取消,任务不会开始；这点必须在锁层处理,否则客户端断开
-   * 后排队的请求仍会切换全局 selector,造成与任何实际请求都无关的出口抖动。
+   * 串行执行 `task`(只含「切 selector + 建连」)。
+   * 排队期间信号取消则不开始:否则客户端断开后排队请求仍会切换全局 selector,造成出口抖动。
    */
   run<T>(task: () => Promise<T>, signal?: AbortSignal): Promise<T> {
     const execute = (): Promise<T> => {
-      if (signal?.aborted) return Promise.reject(signal.reason ?? new DOMException("操作已取消", "AbortError"));
+      if (signal?.aborted) return Promise.reject(signal.reason);
       return task();
     };
 

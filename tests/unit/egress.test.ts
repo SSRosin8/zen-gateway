@@ -4,7 +4,8 @@ import { setImmediate } from "node:timers/promises";
 import { connect } from "node:net";
 import { ConfigSchema, ProxySchema, type Config } from "../../src/shared/schema.ts";
 import { EgressService, applyProbeResult } from "../../src/core/proxy/egress.ts";
-import { isIpAddress, type IpEchoService } from "../../src/core/proxy/probe.ts";
+import type { IpEchoService } from "../../src/core/proxy/probe.ts";
+import { isIpAddress } from "../../src/shared/ip.ts";
 import { fetchUpstream } from "../../src/core/upstream/fetch.ts";
 import { runRetryChain } from "../../src/core/upstream/retry.ts";
 

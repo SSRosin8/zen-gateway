@@ -257,7 +257,7 @@ describe("档位 2：摘要列的字节长度约束", () => {
    * 都在 NUL 处截断看不见它。档位 2 补 `length(CAST(... AS BLOB)) = 64`。
    *
    * 这些断言直接打在 SQL 层（不经 AffinityStore），因为要验的是**结构约束**
-   * 本身 —— 经过 store 的话 `#safe()` 会把失败吞掉，测出来的是"没抛"而不是
+   * 本身 —— 经过 store 的话 `WriteFailures.guard()` 会把失败吞掉，测出来的是"没抛"而不是
    * "被拦下"。
    */
   const hex64 = "a".repeat(64);

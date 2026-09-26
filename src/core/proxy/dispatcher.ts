@@ -5,25 +5,11 @@ import { DIRECT_EGRESS_ID } from "../../shared/schema.ts";
 import { credentialFingerprint } from "./credentialFingerprint.ts";
 
 /**
- * 出口 dispatcher 工厂。
+ * 出口 dispatcher 工厂。每个代理一个 dispatcher 并缓存复用,避免丢掉连接池与耗尽本地端口。
  *
- * 每个代理一个 dispatcher,按 id 缓存复用 —— 每次请求新建会丢掉连接池,
- * 并且在高频下把本地端口耗尽。
- *
- * ## 超时必须分两段(不变量 #6)
- *
- * 用单一的总时长(例如 `AbortSignal.timeout()` 套整个 fetch)会把响应体
- * 一起 abort:一条正常的长 SSE 到点就被掐断。已实测确认 undici 的语义:
- *   - `headersTimeout` 只管「等首字节」,3s 才发头的服务器会在 1s 被掐断
- *   - `bodyTimeout` 只管「字节之间的空闲」,块间隔 3s 在 60s 上限下正常通过,
- *     在 1s 上限下才失败
- * 两者独立,正是我们需要的:等首字节可以严格,流式输出的块间隔必须宽松。
- *
- * ## socks 为什么用 fetch-socks
- *
- * `socks-proxy-agent` 是 `http.Agent`,**没有 `dispatch()`**,undici 的 fetch
- * 根本用不了它(已实测 `instanceof Dispatcher === false`)。`fetch-socks` 的
- * `socksDispatcher` 才是真正的 undici Dispatcher。
+ * 超时分两段(不变量 #6):`headersTimeout` 只管等首字节,`bodyTimeout` 只管块间空闲;
+ * 总时长超时会掐断正常的长 SSE。socks 用 fetch-socks:`socks-proxy-agent` 是 `http.Agent`,
+ * 没有 `dispatch()`,undici fetch 用不了。
  */
 
 /** 能直接做 undici 出口的协议。 */
@@ -48,10 +34,7 @@ export type EgressTarget =
   /** 直连:自带 dispatcher。 */
   | { mode: "direct"; proxy: Proxy }
   /**
-   * 经本地 Clash 混合端口;出口节点由 selector 决定,需持锁切换。
-   *
-   * `nodeName` 必须参与 dispatcher 身份 —— 见 DispatcherPool 的说明。
-   */
+  /** 经本地 Clash 混合端口,节点由 selector 决定;`nodeName` 必须参与 dispatcher 身份。 */
   | { mode: "bridge"; proxy: Proxy; bridge: BridgeEndpoint; nodeName: string }
   /** 不走代理,用本机网络出口。 */
   | { mode: "none" };
@@ -73,29 +56,12 @@ export function isDirectCapable(type: string): boolean {
 }
 
 /**
- * dispatcher 池。
+/**
+ * dispatcher 池。缓存键包含所有影响连接行为的字段,否则改端口或口令后仍复用旧 dispatcher。
  *
- * 缓存键必须包含所有影响连接行为的字段 —— 只用 proxy.id 的话,
- * 用户改了端口或口令后仍会复用旧 dispatcher,连到旧地址上。
- *
- * ## 桥接:`nodeName` 必须参与身份,否则连接复用会击穿 selector 锁
- *
- * Clash 在**建立连接时**决定这条连接走哪个出站节点,之后该连接终身绑定
- * 那个节点。而 undici 会在 dispatcher 的连接池里复用 keep-alive 连接。
- *
- * 于是:锁保证了「切 selector + 建连接」原子,但只在**真的新建连接**时有效。
- * 若池里还有活连接,undici 直接复用,Clash 就沿用那条连接出生时绑定的节点
- * —— 刚刚执行的 `select()` 被完全忽略。
- *
- * 实测(连接建立时绑定出口 IP 的假混合端口):同一个 proxy id 依次指向
- * A → B → B，三次探测拿到 `1.1.1.1`、`1.1.1.1`、`1.1.1.1`，服务端只看到
- * **1 条 TCP 连接**。第二、三次明明选了 B，出口却还是 A。更糟的是
- * `applyProbeResult` 会把这个错的 IP 持久化进 `egressIp`，
- * 而出口隔离报告正是按它分组 —— 于是整份隔离结论建立在错误数据上。
- *
- * 把 `nodeName` 纳入身份后，一个 dispatcher 只会用于一个节点，
- * 它池里的所有连接都绑定同一节点，复用因此是安全且有益的
- * （省掉每次请求的握手）。节点变了则键变，旧 dispatcher 被弃用。
+ * 桥接时 `nodeName` 必须参与身份(不变量 #7):Clash 在建连时绑定节点,undici 复用
+ * keep-alive 连接会让刚做的 `select()` 失效,出口停在旧节点,`applyProbeResult`
+ * 还会把错误的 IP 写进 `egressIp`。一个 dispatcher 只服务一个节点,复用才安全。
  */
 export class DispatcherPool {
   #cache = new Map<string, { key: string; dispatcher: Dispatcher }>();
@@ -106,17 +72,17 @@ export class DispatcherPool {
     this.#timeouts = timeouts;
   }
 
-  /** 供 Clash 桥接复用:本机直连出口的 dispatcher。 */
+  /** 按出口目标取 dispatcher;身份键变化时丢弃旧实例重建。 */
   get(target: EgressTarget): Dispatcher {
     if (this.#closed) throw new DispatcherError("dispatcher 池已关闭", null);
 
-    // 用共享常量而不是字面量 —— 这个 id 同时被 `IdSchema` 拒绝（纪律 #4）。
+    // 用共享常量:这个 id 同时被 `IdSchema` 拒绝(纪律 #4)。
     const id = target.mode === "none" ? DIRECT_EGRESS_ID : target.proxy.id;
     const key = this.#identityKey(target);
 
     const cached = this.#cache.get(id);
     if (cached) {
-      // 配置变了就丢弃重建,而不是继续用连到旧地址的那个。
+      // 配置变了就丢弃重建。
       if (cached.key === key) return cached.dispatcher;
       void cached.dispatcher.close().catch(() => {});
       this.#cache.delete(id);
@@ -135,13 +101,10 @@ export class DispatcherPool {
     const p = target.proxy;
     if (target.mode === "bridge") {
       const b = target.bridge;
-      // nodeName 必须在键里 —— 见类注释:否则连接复用会让出口停留在旧节点。
+      // nodeName 必须在键里,见类注释。
       return `bridge|${b.bridgeId}|${b.host}:${b.port}|${target.nodeName}|${timeouts}`;
     }
-    // 口令参与键。用摘要而非长度:长度相同的口令会撞键,于是
-    // 「改掉一个等长的错口令」后仍复用旧 dispatcher,鉴权永久失败。
-    // 规则的唯一真相在 credentialFingerprint.ts(egress.ts 的 Controller
-    // secret 用同一个)。
+    // 口令用摘要参与键,规则见 credentialFingerprint.ts。
     const auth = `${p.username ?? ""}:${credentialFingerprint(p.password ?? "")}`;
     return `direct|${p.type.toLowerCase()}|${p.host}:${p.port}|${auth}|${timeouts}`;
   }
@@ -153,9 +116,7 @@ export class DispatcherPool {
     if (target.mode === "none") return new Agent(common);
 
     if (target.mode === "bridge") {
-      // 桥接统一走本地混合端口;走哪个节点由 selector 决定(需持锁切换)。
-      // 强制 CONNECT 隧道:http 目标默认按绝对 URI 转发,Clash 要读完请求头才拨号;
-      // 隧道让节点在建隧道时就绑定,selector 锁才能在连接就绪时释放(见 fetch.ts)。
+      // 强制 CONNECT 隧道:让节点在建隧道时就绑定,selector 锁才能在连接就绪时释放(见 fetch.ts)。
       const { host, port } = target.bridge;
       return new ProxyAgent({ uri: `http://${host}:${port}`, proxyTunnel: true, ...common });
     }
@@ -208,10 +169,7 @@ export class DispatcherPool {
 
   /**
    * 立即断开缓存中 dispatcher 的全部连接,之后拒绝再取。
-   *
-   * 只对尚未 `close()` 的 dispatcher 有效:undici 的 Agent 在 close 时就清空了
-   * 内部客户端表,之后的 destroy 找不到正在排空的连接(实测 undici 8.10)。
-   * 所以停机不先 close 再 destroy,而由 HTTP 服务一层限时排空。
+   * 只对尚未 `close()` 的 dispatcher 有效(Agent close 时即清空客户端表),所以停机不先 close 再 destroy。
    */
   destroy(): void {
     this.#closed = true;

@@ -1,42 +1,17 @@
 #!/usr/bin/env node
 /**
- * 一键自动配置。
+ * 一键自动配置：探测本机 Clash Controller → 发现 Selector → 导入节点 → 写进配置。
  *
- * 探测本机 Clash Controller → 发现 Selector → 导入节点 → 写进配置。
- * 手动做这件事是五步流程。
+ * 安全边界：只探 127.0.0.1 的固定端口白名单，绝不扫 LAN 或端口段；探不到就让用户手填。
  *
- * ## 安全边界:只扫 localhost 的固定白名单
+ * 混合端口必须从 Controller 的 `/configs` 读 `mixed-port`：它随内核配置变化，
+ * 硬编码会让桥接静默连到没人监听的端口，而控制面仍是通的。
  *
- * **绝不扫 LAN,绝不扫端口段。** 这是明确的安全约束,理由不止是
- * 礼貌:一个会扫网段的工具在不受控网络上运行就是一次未授权的端口扫描,
- * 而它带来的便利(自动发现别人机器上的 Clash)本项目根本不需要 ——
- * 本网关只用本机的 Clash 做桥接。
- *
- * 白名单只包含少量常见的本机 Controller 端口。探不到就让用户手填，而不是靠扫描猜。
- *
- * ## 为什么必须从 Controller 的 `/configs` 读 `mixed-port`
- *
- * 混合端口不是稳定的文档默认值，且 `port`/`socks-port` 可能都为 0；端口随
- * 内核配置变化，必须从 Controller 读取。
- * **正因为它会变**,硬编码任何一个值(包括这里提到的这几个)都会让桥接
- * 静默连到一个没人监听的端口:所有桥接代理传输失败,而控制面明明是通的。
- * 那是个极难自查的故障,所以端口只能问内核。
- *
- * ## 这个脚本会改配置,所以它必须先备份、且默认不覆盖已有内容
- *
- * 与 `doctor.mjs` 相反(那个绝对只读)。但「自动配置」不等于「可以丢掉
- * 用户手写的东西」:config.json 里有 Relay Token 与 Zen API key,
- * 那是整个文件里最不能丢的两样。所以:
- *
- *   - 保留全部既有 Worker(连同 apiKey)与 Relay Token
- *   - 代理按 id 合并:同 id 更新连接信息,不动用户可能改过的 name/enabled
+ * 会改配置，所以：
+ *   - 保留全部既有 Worker（连同 apiKey）与 Relay Token，不创建 Worker
+ *   - 代理按 id 合并：同 id 更新连接信息，不动用户可能改过的 name/enabled
  *   - 写盘前把原文件备份成 `config.json.bak`
- *   - `--dry-run` 只打印将要做的改动,不落盘
- *
- * ## Worker 与出口分开
- *
- * setup 只负责发现出口，不猜测用户要创建多少认证或匿名 Worker；已有的两种
- * Worker 都会原样保留。管理页面和配置补丁提供完整的新增、编辑、删除、绑定。
+ *   - `--dry-run` 只打印将要做的改动，不落盘
  */
 
 import { copyFile } from "node:fs/promises";
@@ -56,12 +31,7 @@ const ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
 const DATA_DIR = dataDirOf(ROOT);
 const ROOT_ARG = process.env.ZG_DATA_DIR ? undefined : ROOT;
 
-/*
- * 参数校验放在**任何副作用之前** —— 这个脚本会写 `data/config.json`，
- * 也就是唯一一份凭证存储。未识别的参数若被静默忽略并照常执行完整导入，
- * `npm run setup -- --help` 的后果就是一次真实写入而不是一段用法说明。
- * 理由写在 `lib/args.mjs`。
- */
+// 参数校验放在任何副作用之前：错参数被忽略会变成一次真实写入（见 `lib/args.mjs`）。
 checkArgs({
   command: "npm run setup",
   summary: "zen-gateway 自动配置：探测本机 Clash Controller → 导入出口（不创建 Worker）。",
@@ -74,20 +44,11 @@ checkArgs({
 
 const DRY_RUN = process.argv.includes("--dry-run");
 
-/**
- * 候选 Controller 端口 —— **固定白名单,仅 127.0.0.1**。
- *
- * 9090 是常见默认值，其余是少量候选。列表刻意短：探不到就让用户用 `--api` 手填，
- * 那比把列表扩成一个端口段要好 —— 见文件头的安全边界。
- */
+/** 候选 Controller 端口 —— 固定白名单，仅 127.0.0.1。刻意短，探不到用 `--api` 手填。 */
 const CANDIDATE_PORTS = [9090, 9097, 9091, 9093, 6170];
 
-/** 每个候选的探测超时。本机通信,给 1.5s 足够,而探 5 个也只要几秒。 */
+/** 每个候选的探测超时（本机通信）。 */
 const PROBE_TIMEOUT_MS = 1_500;
-
-/* ------------------------------------------------------------------ *
- * Controller 探测
- * ------------------------------------------------------------------ */
 
 function isLocalControllerUrl(value) {
   try {
@@ -106,15 +67,8 @@ function isLocalControllerUrl(value) {
 }
 
 /**
- * 探一个候选地址。
- *
- * 三种结局要分开,因为处置完全不同:
- *   - `ok`       连上且鉴权过
- *   - `auth`     **连上了但要 secret** —— 这是个发现!只是缺凭证
- *   - `absent`   没人监听
- *
- * 把 `auth` 合进 `absent` 是最容易犯的错:那会让一个配了 secret 的 Clash
- * 被报成「没找到」,用户于是去检查 Clash 是否运行 —— 而它正在运行。
+ * 探一个候选地址：`ok` 连上且鉴权过、`auth` 连上但要 secret、`absent` 没人监听。
+ * `auth` 不能合进 `absent`，否则配了 secret 的 Clash 会被报成「没找到」。
  */
 async function probeController(apiBase, secret) {
   const controller = new ClashController(
@@ -130,12 +84,7 @@ async function probeController(apiBase, secret) {
   }
 }
 
-/**
- * 找出本机的 Controller。
- *
- * `--api` / `--secret` 显式指定时**只探那一个** —— 用户已经知道答案了,
- * 再去扫白名单只会让输出变吵。
- */
+/** 找出本机的 Controller。`--api` 显式指定时只探那一个。 */
 async function discoverControllers({ explicitApi, explicitSecret, knownSecrets }) {
   if (explicitApi !== undefined) {
     if (!isLocalControllerUrl(explicitApi)) {
@@ -153,13 +102,7 @@ async function discoverControllers({ explicitApi, explicitSecret, knownSecrets }
     const apiBase = `http://127.0.0.1:${port}`;
     tried.push(apiBase);
 
-    /*
-     * 先免 secret 试,再用**配置里已有的** secret 逐个试。
-     *
-     * 后者是关键:用户上次配好过一个内核,这次重跑 setup 不该因为"我们不知道
-     * secret"而把它报成需要鉴权。已有配置正是 secret 的来源 —— 那不是猜测,
-     * 是我们自己存的。
-     */
+    // 先免 secret 试，再用配置里已有的 secret 逐个试 —— 那是我们自己存的，不是猜测。
     let result = await probeController(apiBase, undefined);
     if (result.kind === "auth") {
       for (const secret of knownSecrets) {
@@ -179,11 +122,6 @@ async function discoverControllers({ explicitApi, explicitSecret, knownSecrets }
   return { found, needAuth, tried };
 }
 
-/* ------------------------------------------------------------------ *
- * 从 Controller 取出要写进配置的东西
- * ------------------------------------------------------------------ */
-
-
 /**
  * 读取配置内核所需的全部信息，解析复用 `ClashController`，与 doctor 和转发路径
  * 同一份实现（纪律 #4）。
@@ -192,25 +130,16 @@ async function readController(ctrl) {
   const controller = new ClashController({ id: "setup", apiBase: ctrl.apiBase, apiSecret: ctrl.secret });
 
   /*
-   * 混合端口只能问内核（见文件头）；读不到时为 null，由调用方拒绝配置。
-   * `socks-port` 与 `port` 不能作为替代：桥接 dispatcher 使用 HTTP CONNECT，
-   * 把 SOCKS 端口写成混合端口会让 setup 报成功、所有转发再失败。
-   *
-   * 选路模式读不到时按 `rule` 处理：那是内核默认值，也是保守的一侧
-   * （把 GLOBAL 降级最坏只是选了另一个同样能用的分组；反过来则会选中一个
-   * 切了不生效的分组，而那个故障不报任何错）。见 `pickSelector`。
+   * 混合端口只能问内核；读不到时为 null，由调用方拒绝配置。`socks-port` / `port`
+   * 不能替代：桥接 dispatcher 使用 HTTP CONNECT。
+   * 选路模式读不到时按 `rule`（内核默认，也是保守的一侧，见 `pickSelector`）。
    */
   const runtime = await controller.runtimeConfig().catch(() => ({ mode: null, mixedPort: null }));
 
   // 节点列表是必需的：读不到直接失败，由调用方报告并跳过这个内核。
   const [selectors, nodes] = await Promise.all([controller.selectors(), controller.nodes()]);
 
-  /*
-   * 规则的目标分组 —— `GLOBAL` 陷阱的**直接证据**。
-   *
-   * 拿不到就给 null，`pickSelector` 会退回按名字降级那个启发式。
-   * 旧内核可能没有 `/rules`，而那不该让整个 setup 失败。
-   */
+  // 规则的目标分组，`GLOBAL` 陷阱的直接证据；旧内核可能没有 `/rules`，拿不到给 null。
   const routed = await controller.routedGroups().catch(() => null);
 
   return { mixedPort: runtime.mixedPort, mode: runtime.mode ?? "rule", selectors, nodes, routed };
@@ -219,51 +148,21 @@ async function readController(ctrl) {
 /**
  * 挑一个 selector 分组。
  *
- * ## `GLOBAL` 在 rule 模式下是个**陷阱**,必须排到最后
+ * rule 模式下 `GLOBAL` 不参与选路，切它不改变实际出口：所有 Worker 共用同一个
+ * 公网 IP，且不报任何错（只有 `doctor --deep` 能发现）。只按节点数排序时
+ * 它可能因名称 tiebreak 被选中。
  *
- * 某些配置里 `GLOBAL` 与业务 selector 可能拥有相同节点数量；只按数量排序时
- * 会因名称 tiebreak 选中 `GLOBAL`。
- *
- * 但内核的 `mode` 是 **`rule`**,而 rule 模式下 `GLOBAL` **根本不参与选路**
- * (规则把流量导向 `Proxy` 这类分组)。于是切 `GLOBAL` 的选中节点**什么都
- * 不会改变**,实测它的 `now` 还停在 `DIRECT`:
- *
- *   → 所有 Worker 的流量都走本机直连出口
- *   → 它们共用同一个公网 IP
- *   → 回显出口与上游连接核对是本项目的重要诊断依据
- *
- * 这个故障**不报任何错**:控制面通、切换请求返回 204、探测也能拿到 IP ——
- * 只是每个 Worker 拿到的是**同一个** IP。只有 `doctor --deep` 的隔离报告
- * 会发现它,而那需要用户想到去跑。
- *
- * ## 判据是"规则实际导向哪里"，不是"名字"
- *
- * 按**名字**把 `GLOBAL` 降级只是个启发式，漏洞在于：
- * 一个名字不叫 GLOBAL 却同样不参与选路的分组仍会被选中。
- *
- * 所以读 `/rules`（`routedGroups()`）：那里有每条规则的目标分组与兜底
- * (`MATCH`) 规则。若选中的分组不出现在规则目标里，它就不参与选路；这就是直接
- * 证据，不依赖分组名称。
- *
- * 拿不到 `/rules` 时退回按名字降级（旧内核可能没有这个端点）——
- * **降级而不是失败**：那个启发式对最常见的形态仍然有效。
- *
- * `global` 模式下相反 —— 那时 `GLOBAL` 才是真正生效的那个，不降级。
- *
- * (本项目已经踩过一次同构的坑:vite 代理硬编码 9876 把请求转给了**另一个
- * 进程**,"看起来在工作但数据来自错误后端"。这一条是它在出口侧的形态。)
+ * 判据是规则实际导向哪里：读 `/rules`（`routedGroups()`），不在规则目标里的分组
+ * 不参与选路。拿不到 `/rules` 时降级为按名字把 `GLOBAL` 排到最后。
+ * `global` 模式下相反，`GLOBAL` 才是生效的那个。
  */
 function pickSelector(selectors, nodes, mode, routed) {
   const nodeNames = new Set(nodes.map((n) => n.name));
   const ruleMode = mode !== "global";
 
   /*
-   * 优先级三档（小者优先）：
-   *   0 = 规则的兜底目标（`MATCH` 指向它）—— 最强证据
-   *   1 = 出现在某条规则里
-   *   2 = 规则里完全没出现 —— rule 模式下它切了不生效
-   *
-   * 拿不到 `/rules` 时全部记 1（无信息），于是排序退回"按名字降级 + 可用节点数"。
+   * 优先级（小者优先）：0 = `MATCH` 兜底目标，1 = 出现在某条规则里，
+   * 2 = 规则里没出现（rule 模式下切了不生效）。拿不到 `/rules` 时退回按名字降级。
    */
   const rank = (name) => {
     if (!ruleMode) return name === "GLOBAL" ? 0 : 1;
@@ -286,23 +185,13 @@ function pickSelector(selectors, nodes, mode, routed) {
 }
 
 /**
- * 代理 id。
- *
- * 必须**从节点名稳定推导**,不能用随机值或序号:重跑 setup 时同一个节点
- * 要落到同一个 id,否则每次都新增一批代理,而旧的那批仍被 Worker 引用 ——
- * 配置会越长越乱,而 Worker 绑的出口悄悄变成一个陈旧条目。
- *
- * 用 sha256 而不是节点名本身:节点名含空格、冒号、emoji(实测
- * `🇺🇲 示例节点2 IPLC  VIP2 网址:example.invalid`),而 `IdSchema` 只允许
- * `[A-Za-z0-9._:-]`。前缀保留 `controller_` 与既有配置一致。
+ * 代理 id，从节点名稳定推导：重跑 setup 时同一节点要落到同一个 id，
+ * 否则 Worker 仍绑着陈旧条目。用 sha256 是因为节点名含空格、emoji 等
+ * `IdSchema` 不允许的字符；前缀 `controller_` 与既有配置一致。
  */
 function proxyIdFor(nodeName) {
   return `controller_${createHash("sha256").update(nodeName).digest("hex").slice(0, 24)}`;
 }
-
-/* ------------------------------------------------------------------ *
- * 主流程
- * ------------------------------------------------------------------ */
 
 function argValue(flag) {
   const i = process.argv.indexOf(flag);
@@ -317,15 +206,8 @@ async function main() {
   heading("1. 现有配置");
 
   /*
-   * `--dry-run` 时先问「文件在不在」,**不能直接 loadConfig**。
-   *
-   * `loadConfig` 在文件不存在时会**生成一份默认配置并写盘**(含新 Relay Token)。
-   * 那对服务端是对的(首启该生成),但让 `--dry-run` 变成了一句假话:
-   * 横幅打着「不会写盘」,而它刚刚落了一个 0600 文件和一个新 token。
-   *
-   * `doctor.mjs` 的第 1 层用 `configExists` 挡了同一个陷阱
-   * （「跑一次 doctor 就把状态改了」）,这里必须同样挡住:
-   * 否则空 data 目录跑 `--dry-run` 后会出现一个新生成的 relayToken。
+   * `--dry-run` 时先问文件在不在，不能直接 loadConfig：它在文件不存在时会生成默认
+   * 配置并写盘（含新 Relay Token），让「不会写盘」变成假话。doctor 第 1 层同理。
    */
   if (DRY_RUN && !(await configExists(ROOT_ARG))) {
     line("fail", "配置不存在");
@@ -414,10 +296,7 @@ async function main() {
     }
 
     if (info.mixedPort === null) {
-      /*
-       * 拿不到端口就**不能**配这个内核 —— 见文件头。猜一个默认值的后果是
-       * 桥接静默连到没人监听的端口,而那是本项目最难自查的故障之一。
-       */
+      // 拿不到端口就不能配这个内核，猜默认值会让桥接静默连到没人监听的端口。
       line("fail", `${ctrl.apiBase}:无法从 /configs 读出可用的代理端口`);
       detail("未读到有效的 mixed-port —— 桥接需要 HTTP 混合端口；socks-port / port 不能替代，请在 Clash 中开启 mixed-port。");
       continue;
@@ -443,11 +322,7 @@ async function main() {
           .join(", ")}`,
       );
     }
-    /*
-     * 选了 GLOBAL 就必须说清后果 —— 见 `pickSelector`。
-     * 走到这里意味着没有别的候选,那时 GLOBAL 是唯一选择,但它在 rule 模式下
-     * 可能切了不生效,而用户需要知道这件事才能去 Clash 里加一个分组。
-     */
+    // 只剩 GLOBAL 可选时必须说清后果（见 `pickSelector`），让用户去 Clash 里加分组。
     if (info.mode !== "global" && picked.selector.name === "GLOBAL") {
       line("warn", `只找到 GLOBAL 分组,而内核是 ${info.mode} 模式 —— 切换它可能不生效`);
       detail(
@@ -476,12 +351,7 @@ async function main() {
 
   for (const plan of plans) {
     const url = new URL(plan.ctrl.apiBase);
-    /*
-     * 内核 id 从端口推导,稳定且可读。
-     *
-     * 重跑 setup 要落到同一个 id —— 否则每次新增一个内核条目,而代理仍引用
-     * 旧的那个。`IdSchema` 允许 `.` 与 `-`，所以按地址生成的 bridge id 合法。
-     */
+    // 内核 id 从地址推导，重跑 setup 落到同一个 id（`IdSchema` 允许 `.` 与 `-`）。
     const bridgeId = `bridge-${url.hostname}-${url.port}`;
     const existing = next.clash.bridges.find((b) => b.id === bridgeId);
 
@@ -500,12 +370,8 @@ async function main() {
       summary.bridgesAdded += 1;
     } else {
       /*
-       * 只更新**探测得来的事实**(端口、secret、分组),保留用户可能改过的
-       * `name` / `priority` / `enabled`。
-       *
-       * `enabled` 尤其不能动:用户可能刻意停用了一个内核(本机就有一个
-       * 不可达的条目可能因控制面鉴权失败而被停用，而 setup 把它重新启用等于
-       * 撤销用户的决定。
+       * 只更新探测得来的事实（端口、secret、分组），保留用户可能改过的
+       * `name` / `priority` / `enabled` —— 重新启用被停用的内核等于撤销用户的决定。
        */
       existing.apiBase = plan.ctrl.apiBase;
       existing.apiSecret = plan.ctrl.secret;
@@ -514,7 +380,7 @@ async function main() {
       summary.bridgesUpdated += 1;
     }
 
-    // 只导入**这个分组里**的节点 —— 分组外的节点切不过去。
+    // 只导入这个分组里的节点 —— 分组外的节点切不过去。
     const inGroup = new Set(plan.selector.options);
     for (const node of plan.info.nodes) {
       if (!inGroup.has(node.name)) continue;
@@ -527,11 +393,7 @@ async function main() {
           id,
           name: node.name,
           type: node.type.toLowerCase(),
-          /*
-           * host/port 指向**本机的 Clash 混合端口**,不是节点的真实地址 ——
-           * 桥接的全部含义就是「流量交给本机 Clash,由它按 selector 转出去」。
-           * 节点的真实地址我们既拿不到(Controller 不给)也不需要。
-           */
+          // host/port 指向本机 Clash 混合端口而不是节点真实地址：流量交给 Clash 按 selector 转出。
           host: "127.0.0.1",
           port: plan.info.mixedPort,
           enabled: true,
@@ -539,10 +401,7 @@ async function main() {
           controllerGroup: plan.selector.name,
           bridgeId,
           clashNodeName: node.name,
-          /*
-           * `direct: false` —— 这些节点的协议(anytls/vless/hysteria2…)
-           * undici 与 socks 都接不了,只能经 Clash 桥接。
-           */
+          // 这些节点的协议（anytls/vless/hysteria2…）undici 与 socks 都接不了，只能经桥接。
           direct: false,
           bridgeable: true,
           egressIp: null,
@@ -558,17 +417,9 @@ async function main() {
     }
 
     /*
-     * `activeBridgeId` 只在**为空时**设,不抢用户已选的。
-     *
-     * `selectionMode` 完全不动:它默认 `auto`,而用户若改成 `manual` 并选了
-     * 一个内核,那是个明确的决定。
-     *
-     * **但绝不指向一个停用的内核。** 更新分支刻意保留
-     * `enabled: false`（用户可能故意停用了某个内核），而这里若把
-     * `activeBridgeId` 指过去,`pickBridge` 在 manual 模式下只在**已启用**的
-     * 内核里找（`pool.ts`）→ 返回 null → 每个桥接代理都失败,
-     * 而 setup 打的是 ✓ 并说「出口已配好」。
-     * 不可达的内核可能因控制面鉴权失败而被停用。
+     * `activeBridgeId` 只在为空时设，`selectionMode` 完全不动 —— 不抢用户的选择。
+     * 绝不指向停用的内核：manual 模式下 `pickBridge`（`pool.ts`）只在已启用内核里找，
+     * 指过去会让每个桥接代理都失败，而 setup 仍报 ✓。
      */
     if (next.clash.activeBridgeId === null) {
       const candidate = next.clash.bridges.find((b) => b.id === bridgeId);
@@ -588,12 +439,8 @@ async function main() {
   heading("5. 写入");
 
   /*
-   * 写盘前先过 schema。
-   *
-   * `saveConfig` 自己也会 parse,但那时抛出的错误已经在"正在写你的配置"
-   * 这个语境里 —— 而我们想在**碰文件之前**就知道合并结果是否合法。
-   * 引用完整性尤其要紧:代理引用了不存在的 bridgeId 会让整份配置加载失败,
-   * 于是一次 setup 把服务变成起不来。
+   * 写盘前先过 schema，在碰文件之前就知道合并结果是否合法 ——
+   * 例如代理引用不存在的 bridgeId 会让整份配置加载失败，服务起不来。
    */
   const parsed = ConfigSchema.safeParse(next);
   if (!parsed.success) {
@@ -616,16 +463,7 @@ async function main() {
         `内核 ${parsed.data.clash.bridges.length} 个 · 代理 ${parsed.data.proxies.length} 个`,
     );
   } else {
-    /*
-     * 备份。
-     *
-     * config.json 里有 Relay Token 与全部 Zen API key —— 整个文件都是凭证。
-     * 一个自动化工具改它之前必须留一份可回退的副本,哪怕合并逻辑看起来是
-     * 加法。备份与原文件同目录(继承 0700)且同样 0600。
-     *
-     * 首次运行(文件刚由 loadConfig 生成)时没什么可备份的,但照做也无害 ——
-     * 少一个条件分支。
-     */
+    // config.json 整个文件都是凭证，自动改写前必须留可回退的副本（同目录、0600）。
     const file = configPath(ROOT_ARG);
     try {
       await copyFile(file, `${file}.bak`);

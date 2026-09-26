@@ -17,11 +17,8 @@ import { probeBridges } from "../core/proxy/clash/select.ts";
 import { ClashController } from "../core/proxy/clash/controller.ts";
 
 /**
- * 服务入口。
- *
- * 启动顺序刻意如下:**先加载配置,后监听端口**。
- * 反过来的话,一份坏配置会让服务先占住端口再崩,而 service.mjs 的健康等待
- * 会在超时后报「启动失败」,却不说是配置的问题 —— 用户拿不到可自查的信息。
+ * 服务入口。先加载配置、后监听端口：否则坏配置会先占端口再崩，
+ * service.mjs 只能报「启动失败」而不说是配置问题。
  */
 
 async function main(): Promise<void> {
@@ -44,17 +41,8 @@ async function main(): Promise<void> {
   }
 
   /*
-   * 运行时数据库。**打不开不阻止启动。**
-   *
-   * 统计、探测历史与亲和持久化都是**可用性改善**，不是转发的正确性前提。
-   * 一个坏掉的统计库（磁盘满、档位高于本程序、权限错）让整个网关起不来
-   * 是错误的取舍 —— 用户要的是转发能用。失败只打一行然后继续，
-   * 三个 sink 保持未注入，行为等同于没有持久化的纯内存网关。
-   *
-   * 与 `loadConfig` 刻意相反：配置坏了**必须**拒绝启动，因为那意味着凭证、
-   * 出口绑定、放行规则都是未知的 —— 那是正确性。
-   *
-   * 放在 egress **之前**：`EgressService` 要拿 `probes` sink。
+   * 运行时数据库打不开不阻止启动：统计、探测历史与亲和持久化是可用性改善，
+   * 不是转发的正确性前提（与配置相反，配置坏了必须拒绝启动）。放在 egress 之前：它要 `probes` sink。
    */
   let stats: StatsStore | undefined;
   let affinityStore: AffinityStore | undefined;
@@ -81,27 +69,16 @@ async function main(): Promise<void> {
   });
 
   /*
-   * 出口服务在进程内**唯一** —— 见 `EgressService.upstreamDeps`：
-   * Clash selector 的 `now` 是进程外的全局状态，两套锁会让探测量到的出口
-   * 与转发实际用的出口不一致，而出口隔离报告正是按实测 IP 分组。
-   *
-   * 配置读取做成函数，让热更新后下一个请求即生效，调用点不必各自感知热更新。
-   *
-   * 调度器在这里建，而不是让 `createApp` 兜底 new 一个 ——
-   * 它需要拿到 `affinityStore` 才能镜像落盘，而装配层不该认识数据库。
+   * 调度器在这里建而非由 `createApp` 兜底：它要 `affinityStore` 镜像落盘，装配层不该认识数据库。
+   * 出口服务进程内唯一，见 `EgressService.upstreamDeps`。
    */
   const scheduler = new Scheduler(
     affinityStore !== undefined ? { affinitySink: affinityStore } : {},
   );
 
   /*
-   * 装回上次的亲和绑定。
-   *
-   * **在开始监听之前**做完：装载是同步的本地读，很快；而若放在监听之后，
-   * 头几个请求会看到一张空表，于是刚重启的那一刻粘滞失效 ——
-   * 那正是持久化要解决的问题本身。
-   *
-   * 失败只打一行：内存里那份是空的，只是粘滞从零开始，不影响正确性。
+   * 在开始监听之前装回上次的亲和绑定，否则重启后头几个请求粘滞失效。
+   * 失败只打一行：粘滞从零开始，不影响正确性。
    */
   if (affinityStore !== undefined) {
     try {
@@ -120,18 +97,8 @@ async function main(): Promise<void> {
   }
 
   /*
-   * 明细表的保留期清理。
-   *
-   * `upstream_attempts` 与 `probe_results` 的每行带**毫秒级时间戳**，合起来
-   * 是一份作息时间线（哪天几点在工作、连续多久）—— 在「意外把文件复制/
-   * 打包出去」这个威胁下比聚合值敏感得多。容量本身不是问题（约 47 MB/年）。
-   *
-   * 聚合所需的信息已在 `worker_stats` 与 `model_usage` 里（按天，不按毫秒），
-   * 所以删明细不损失统计能力。`secure_delete = ON` 保证删掉的页真被擦掉，
-   * 否则「已经清过了」是个假保证。
-   *
-   * 30 天：够排查「上周那次限流是怎么回事」，又不至于攒成一年的时间线。
-   * 启动时跑一次即可 —— 这是个自用工具，不值得养一个 interval。
+   * 明细表保留期清理：`upstream_attempts` 与 `probe_results` 的毫秒时间戳合起来是一份作息时间线，
+   * 聚合信息已在按天的表里，删明细不损失统计。启动时跑一次即可。
    */
   const DETAIL_RETENTION_DAYS = 30;
   if (stats !== undefined) {
@@ -143,14 +110,8 @@ async function main(): Promise<void> {
   }
 
   /*
-   * 统计/持久化的写失败**汇合到一处报告**。
-   *
-   * 两个 store 各有一个 `writeFailures()`，而 `affinityStore` 被塞进
-   * `Scheduler` 的构造参数后就再也拿不出来 —— 而 doctor 要报这些数，
-   * 进程里必须有一处同时持有全部引用。这里持有它们，`/health` 读这个函数。
-   *
-   * 吞掉写失败是对的（诊断设施不该让转发失败），但**吞掉不等于可以不知道**：
-   * 一个一直写失败的库会安静地给出全 0 报表，而那看起来像「没人用」。
+   * 各 store 的写失败汇合到一处，供 `/health` 报告（`affinityStore` 进了 `Scheduler` 后拿不出来）。
+   * 吞掉写失败是对的，但一直写失败的库会安静地给出全 0 报表。
    */
   const storeWriteFailures = (): number => {
     const a = stats?.writeFailures().count ?? 0;
@@ -162,24 +123,9 @@ async function main(): Promise<void> {
   const catalog = new ModelCatalog({ log: (message) => console.error(message) });
 
   /*
-   * 配置热更新的**唯一**写入点。
-   *
-   * `configOf()` 是函数，但只有这里会改它指向的对象 —— 没有这个入口，
-   * 它返回的恒是启动时那份，「热更新只有形状没有入口」。
-   *
-   * ## 顺序刻意是「先写盘，再换引用」
-   *
-   * 反过来的话，一次写盘失败（磁盘满、权限）会留下**内存已生效而磁盘是旧值**
-   * 的状态：界面显示改动生效了，而下次重启退回旧值。「一半生效」比「没生效」
-   * 难查得多 —— 用户会怀疑是自己改错了别的地方。
-   *
-   * ## 必须换一个**新对象**
-   *
-   * `Scheduler.#syncedFrom` 用**引用比较**判断「配置换了没有」（深比较一份含
-   * 512 个 Worker 的配置要跑在每个请求上）。原地改字段会让引用不变 →
-   * 调度器认为配置没换 → Worker 池不重新 sync → 改了配置下一个请求还在用旧的池，
-   * 而这个偏差**不报任何错**。`saveConfig` 返回的是 `ConfigSchema.parse` 的
-   * 结果（新对象），`applyConfigPatch` 也 `structuredClone` 过，两处都成立。
+   * 配置热更新的唯一写入点。先写盘再换引用：反过来写盘失败会留下「一半生效」。
+   * 必须换新对象：`Scheduler.#syncedFrom` 用引用比较判断配置是否变化；
+   * `saveConfig` 返回 `ConfigSchema.parse` 的新对象。
    */
   let configWrite: Promise<void> = Promise.resolve();
   const applyConfig = async (next: Config, expected?: Config): Promise<void> => {
@@ -193,13 +139,8 @@ async function main(): Promise<void> {
         next.gateway.bodyTimeoutMs !== config.gateway.bodyTimeoutMs;
       config = next;
       /*
-       * 出口缓存失效。
-       *
-       * `EgressService` 按 bridgeId 缓存 Controller 客户端、按节点名缓存
-       * dispatcher，而 `apiBase`/`apiSecret` 变了必须重建 —— 否则会继续连旧地址
-       * 或用旧凭证，症状是「密码明明改对了还是 401」。超时变了则新池带新超时。
-       *
-       * 失败(停机中服务已关闭)只记日志:配置已经写盘生效,这一点不该被它推翻。
+       * 出口缓存失效：Controller 客户端与 dispatcher 按旧 apiBase/apiSecret/超时缓存，必须重建。
+       * 失败只记日志，配置已写盘生效。
        */
       try {
         egress.reset(
@@ -215,11 +156,7 @@ async function main(): Promise<void> {
     await run;
   };
 
-  /*
-   * 在装配管理 API 之前解析有效端口，让 Overview 与真正监听的端口共享同一
-   * 个值（包括 ZG_PORT 覆盖）。resolvePort 仍然在 loadConfig 之后调用，首启
-   * 默认配置已在那一步落盘。
-   */
+  // 在装配管理 API 之前解析有效端口（含 ZG_PORT 覆盖），让 Overview 与实际监听一致。
   let port: number;
   try {
     port = resolvePort();
@@ -230,14 +167,8 @@ async function main(): Promise<void> {
   }
 
   /*
-   * 批量探测的执行器。
-   *
-   * **必须在 `applyConfig` 之后建**：它要拿那个函数把实测 IP 写回配置。
-   *
-   * 启动时先收尾遗留状态:崩溃或 `kill -9` 会让库里留下 `running`,而那批探测
-   * **已经不在跑了**（它活在上一个进程里）。不收尾的话前端永远显示「探测中…」、
-   * 按钮永远禁用,唯一出路是手工改库。标成 `done` 且带 `interrupted` ——
-   * 静默标成 idle 会让用户以为那批探测正常完成了。
+   * 批量探测执行器，必须在 `applyConfig` 之后建。启动时先收尾遗留的 `running`
+   * （上个进程崩溃留下），标成 `done` 并带 `interrupted`，否则前端永远显示探测中。
    */
   let batchRunner: BatchProbeRunner | undefined;
   if (batchStore !== undefined) {
@@ -251,12 +182,7 @@ async function main(): Promise<void> {
       egress,
       store: batchStore,
       log: (message) => console.error(message),
-      /*
-       * 批测前探一遍内核并锁定一个。
-       *
-       * `probeBridges` 只读 `/version` 与 `/proxies`，不改任何状态，
-       * 所以能并发、也不会干扰在途的转发。
-       */
+      // 批测前探一遍内核并锁定一个；`probeBridges` 只读，不干扰在途转发。
       probeBridges: async () =>
         await probeBridges(
           config.clash.bridges.filter((b) => b.enabled),
@@ -280,16 +206,10 @@ async function main(): Promise<void> {
       effectivePort: () => port,
       runtimeWorkers: () => scheduler.runtimeWorkers(config, Date.now()),
       catalog,
-      // 与转发面同一个实例 —— 两套 dispatcher 池/selector 锁会让探测量到的出口
-      // 不是转发实际用的那个(不变量 #7 的延伸)。
+      // 与转发面同一个实例（不变量 #7 的延伸）。
       egress,
       ...(batchRunner !== undefined ? { batch: batchRunner } : {}),
-      /*
-       * `/health` 的体从同一处构造 —— 不在两个地方各拼一份。
-       *
-       * 两份会分叉（纪律 #4），而分叉方向是漏：加一个字段时 `/api/overview`
-       * 里那份不会更新，于是管理面显示的健康信息比 `/health` 旧一个版本。
-       */
+      // `/health` 的体从同一处构造（纪律 #4）。
       health: () => buildHealth(storeWriteFailures()),
       ...(stats !== undefined ? { stats } : {}),
       log: (message) => console.error(message),
@@ -297,28 +217,12 @@ async function main(): Promise<void> {
   });
 
   /*
-   * 端口由 `store/port.ts` 单点解析 —— `ZG_PORT` > `config.gateway.port` > 9876。
-   *
-   * 这里刻意**不**自己读 `config.gateway.port`,尽管配置已在内存里:本文件、
-   * `service.mjs`、`vite.config.ts` 若各自手写解析,任意两处脱节都会让脚本去探
-   * 一个没人监听的端口,健康等待超时后报「启动失败」,而服务其实已经起来了。
-   *
-   * 必须在 `loadConfig()` **之后**调用:首启时那一步才会把默认配置落盘。
-   */
-  /*
-   * 仅 loopback 监听。
-   *
-   * 管理面另有 loopbackOnly 中间件独立把关(监听地址是可配的,
-   * 而管理面任何情况下都不该接受远端)。
+   * 端口由 `store/port.ts` 单点解析（`ZG_PORT` > `config.gateway.port` > 9876），见上文 `resolvePort`。
+   * 仅 loopback 监听；管理面另有 loopbackOnly 独立把关。
    */
   const hostname = "127.0.0.1";
 
-  /*
-   * 端口被占时给一句能自查的话。
-   *
-   * 默认行为是 Node 抛未捕获的 EADDRINUSE 并打出一整段栈 —— 那对用户毫无
-   * 帮助,而这是最常见的启动失败(上一个实例还活着)。
-   */
+  // 端口被占时给一句能自查的话，而不是 EADDRINUSE 的整段栈。
   const server = serve({ fetch: app.fetch, port, hostname }, (info) => {
     console.log(`zen-gateway 已启动 → http://${hostname}:${info.port}`);
     if (created) {
@@ -326,15 +230,8 @@ async function main(): Promise<void> {
     }
 
     /*
-     * 目录预热 —— 在**开始监听之后**,且刻意不 await。
-     *
-     * 顺序要紧:预热要发网络请求,而它放在 `listen` 之前会把启动时间挂在
-     * 上游的响应速度上。`service.mjs` 的健康等待有超时,于是一次上游慢响应
-     * 会被报成「启动失败」,而服务其实完全正常 —— 与端口脱节是同一种误报。
-     *
-     * 失败无所谓:`refreshIfStale` 自己吞异常并记失败时刻,而
-     * `/v1/models` 被访问时会再试一次(`ensure`)。预热只是让**第一个**
-     * 转发请求就能享受交集,而不是等到有人先去拉一次模型列表。
+     * 目录预热：在开始监听之后且不 await，免得把启动时间挂在上游响应速度上。
+     * 失败无所谓：`/v1/models` 被访问时会再试（`ensure`）。
      */
     catalog.refreshIfStale(
       catalogIdentityOf(config),
@@ -353,15 +250,8 @@ async function main(): Promise<void> {
   });
 
   /*
-   * 优雅停机:停止接受新连接 → 限时等在途请求与出口连接排空 → 超时就强断 →
-   * 关库 → 退出。
-   *
-   * 限时低于 `service.mjs` 的 10 秒停止等待:一条长 SSE 可能持续几分钟,
-   * 无限期等待会让 `npm run stop` 报「未响应 SIGTERM」。超时后先断客户端连接,
-   * 客户端取消会沿请求链传到上游;再 destroy 出口池,收拾余下的上游连接。
-   * 热更新换下、仍在排空的旧池无法从外部强断,由随后的进程退出结束。
-   *
-   * 重复信号(SIGTERM 后又按 Ctrl-C)复用同一次停机,不重入。
+   * 优雅停机：停止接受新连接 → 限时排空 → 超时强断客户端连接与出口池 → 关库 → 退出。
+   * 限时低于 `service.mjs` 的 10 秒停止等待。重复信号复用同一次停机。
    */
   let stopping: Promise<void> | null = null;
   const shutdown = (): Promise<void> => {

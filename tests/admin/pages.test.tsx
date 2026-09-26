@@ -77,13 +77,13 @@ function stubIdleBatch() {
  * ================================================================== */
 
 describe("代理池页", () => {
-  it("超过一页时分页,页长 12（与「一屏 12 行」的算术对齐）", () => {
+  it("超过一页时分页,页长 16（与「行高 36px → 一屏约 16 行」的算术对齐）", () => {
     stubIdleBatch();
     /*
-     * 密度选宽松（行高 44px）的直接后果是一屏约 12 行，而代理池可能有几十个
+     * 紧凑密度（行高 36px）下 1280×800 视口的表格区约放 16 行，而代理池可能有几十个
      * 节点。所以分页是**必需项**，且页长必须与密度一致。
      */
-    expect(PAGE_SIZE).toBe(12);
+    expect(PAGE_SIZE).toBe(16);
 
     const many = Array.from({ length: 30 }, (_, i) =>
       proxy({ id: `p${i}`, name: `节点${i}`, usedBy: [] }),
@@ -92,7 +92,7 @@ describe("代理池页", () => {
       <ProxyPage data={proxyList(many)} view={view} navigate={noop} />,
     );
 
-    expect(container.querySelectorAll("tr[data-row]")).toHaveLength(12);
+    expect(container.querySelectorAll("tr[data-row]")).toHaveLength(PAGE_SIZE);
     // 文案被 `{}` 插值拆成多个文本节点，所以查整体文本而不是单个元素。
     expect(container.textContent?.replace(/\s+/g, " ")).toContain("共 30 条");
   });
@@ -197,28 +197,29 @@ describe("代理池页", () => {
      * 变异测试逼出来的:去掉 `Math.min(Math.max(1, page), totalPages)` 之后
      * 整套测试**依然全绿** —— 没有一条覆盖这条路径。
      */
-    const rows = Array.from({ length: 15 }, (_, i) =>
+    // 页长 + 3 行 → 2 页，而 URL 说第 99 页。
+    const total = PAGE_SIZE + 3;
+    const rows = Array.from({ length: total }, (_, i) =>
       proxy({ id: `p${i}`, name: `节点${i}`, usedBy: [] }),
     );
     const { container } = render(
-      // 15 行 → 2 页，而 URL 说第 99 页。
       <ProxyPage data={proxyList(rows)} view={parseHash("#proxy?page=99")} navigate={noop} />,
     );
 
-    // 夹到最后一页 → 显示第 13-15 条（3 行），而不是 0 行。
+    // 夹到最后一页 → 显示最后 3 行，而不是 0 行。
     expect(container.querySelectorAll("tr[data-row]")).toHaveLength(3);
-    expect(container.textContent?.replace(/\s+/g, " ")).toContain("共 15 条");
+    expect(container.textContent?.replace(/\s+/g, " ")).toContain(`共 ${total} 条`);
   });
 
   it("页码小于 1 时夹到第一页", () => {
     stubIdleBatch();
-    const rows = Array.from({ length: 15 }, (_, i) =>
+    const rows = Array.from({ length: PAGE_SIZE + 3 }, (_, i) =>
       proxy({ id: `p${i}`, name: `节点${i}`, usedBy: [] }),
     );
     const { container } = render(
       <ProxyPage data={proxyList(rows)} view={{ ...parseHash("#proxy"), page_: -5 }} navigate={noop} />,
     );
-    expect(container.querySelectorAll("tr[data-row]")).toHaveLength(12);
+    expect(container.querySelectorAll("tr[data-row]")).toHaveLength(PAGE_SIZE);
   });
 });
 

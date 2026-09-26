@@ -3,18 +3,9 @@ import type { FailureKind } from "../failures.ts";
 import { cooldownUntil } from "./cooldown.ts";
 
 /**
- * Worker 集合与就绪判定 —— 调度状态机里**唯一**持有可变状态的部分。
- *
- * 其余三块(`cooldown` / `affinity` 的判定 / `select`)都是纯函数或纯数据结构,
- * 状态集中在这里一处,是为了让「为什么这次选了它」可以由一次 `snapshot()`
- * 完整回答。把状态与选择混在一个带隐式状态的大 class 里的话,那个问题答不了 —— 状态散落在方法之间,没有任何一处能完整回答它。
- *
- * ## 状态只有两项
- *
- * `cooldownUntil` 与 `consecutiveFails`。没有「健康分」「权重」「滑动窗口」——
- * 本项目的 Worker 数量是个位数(用户手工配置的账号),统计式的健康评估在
- * 这个规模上只会让行为变得无法预测,而用户真正需要的是
- * 「它为什么不用我这个账号」有一句确定的回答。
+ * Worker 集合与就绪判定：调度里唯一持有可变状态的部分，让「为什么选了它」可由一次
+ * `snapshot()` 完整回答。状态只有 `cooldownUntil` 与 `consecutiveFails`：Worker 是个位数的
+ * 手工账号，统计式健康评估只会让行为不可预测。
  */
 
 /** Worker 的运行期状态。对外只读,修改一律经本类的方法。 */
@@ -39,21 +30,12 @@ type RetiredState = {
   readonly lastFailure: FailureKind | null;
 };
 
-/** `#retired` 的容量上限。见它的声明处说明。 */
+/** `#retired` 的容量上限。 */
 const RETIRED_CAP = 512;
 
 /**
- * 就绪判定的**唯一**定义。
- *
- * 这个比较有多个使用者(`isReady`、`snapshot`,以及
- * `select.ts` 的候选过滤),不能各写一遍。按纪律 #4,并行的判断必然分叉,而分叉方向是漏 ——
- * 将来任何对"就绪"语义的改动(加一个 `disabledUntil`、或把 `<=` 改成 `<`)
- * 只会落在一处。更糟的是 `select.ts` 里**同一个函数**内会两份判定并存:
- * 候选过滤用手写的,粘滞校验用 `pool.isReady`。
- *
- * NaN 防护在这里,而不是在每个调用点:`NaN <= now` 与 `x <= NaN` 都是 false,
- * 于是一个 NaN 会让 Worker **永久**不就绪 —— 这正是 `normalizeFails` 注释
- * 描述的那个后果,而那里只防失败计数这一个入口。
+ * 就绪判定的唯一定义（`isReady`、`snapshot`、`select.ts` 共用，纪律 #4）。
+ * NaN 防护在这里：NaN 参与比较恒为 false，会让 Worker 永久不就绪。
  */
 export function isWorkerReady(cooldownUntil: number, now: number): boolean {
   if (!Number.isFinite(now)) return false;
@@ -61,36 +43,27 @@ export function isWorkerReady(cooldownUntil: number, now: number): boolean {
   return cooldownUntil <= now;
 }
 
-/**
- * Worker 是否可用于转发。
- *
- * 认证 Worker 必须有上游 key；匿名 Worker 的空 key 是合法的免鉴权请求。
- * 两种类型都要先满足 `enabled`，再进入候选池。按 kind 处理是必要的：
- * 匿名 Worker 的“无 key”正是它与认证 Worker 的行为差异。
- */
+/** Worker 是否可用于转发：须 enabled；认证 Worker 须有 key，匿名 Worker 的空 key 合法。 */
 export function isUsable(worker: Worker): boolean {
   if (!worker.enabled) return false;
   return worker.kind === "anonymous" || worker.apiKey.trim() !== "";
 }
 
+/**
+ * 可用 Worker 实际绑定的出口，去重；`null` 表示本机直连，也算一个出口。
+ * 单点探测、批量探测与 doctor 共用，探测范围不会分叉（纪律 #4）。
+ */
+export function usedProxyIds(config: Config): Array<string | null> {
+  return [...new Set(config.workers.filter(isUsable).map((w) => w.proxyId))];
+}
+
 export class WorkerPool {
-  /** 按配置顺序。顺序本身有意义 —— 见 `select.ts` 的策略排序。 */
+  /** 按配置顺序；顺序有意义（`select.ts` 的稳定排序）。 */
   #workers: WorkerRuntime[] = [];
 
   /**
-   * 被过滤掉(停用/清空 key)的 Worker 的状态。
-   *
-   * 不留这一份的后果:`sync()` 的 `previous` Map 从 `#workers` 建,
-   * 而它已被 `filter(isUsable)` 过滤 —— 停用的 Worker 不在里面。于是
-   * 「停用 → 再启用」会让 `prior === undefined`,冷却与失败计数全清。
-   * 实测:429 `Retry-After: 900` 之后停用再启用,剩余冷却从 900000ms 变成 0。
-   *
-   * 管理后台点一下停用再启用就能抹掉上游明确要求的 15 分钟等待,
-   * 而那正是冷却存在的理由。所以停用要**保留**状态,与「换 key 才重置」一致。
-   *
-   * 有上限:配置里 Worker 最多 512 个,但这张表跨多次 sync 累积,
-   * 而热更新可以反复改配置。超出就丢最老的 —— 丢掉只意味着那个 Worker
-   * 重新启用时从零开始,不是数据损坏。
+   * 被过滤掉（停用/清空 key）的 Worker 的状态，让「停用再启用」不抹掉上游要求的冷却。
+   * 跨多次 sync 累积，超出上限丢最老的（那个 Worker 回来时从零开始，不是损坏）。
    */
   #retired = new Map<string, RetiredState>();
 
@@ -99,31 +72,14 @@ export class WorkerPool {
   }
 
   /**
-   * 用一份新配置替换 Worker 列表,**保留**同 id 的冷却状态。
-   *
-   * 不保留会让配置热更新变成一次"全员复活":用户在管理后台改个端口,
-   * 所有正在冷却的 Worker 立刻重新就绪,于是刚被限流的账号马上又被打一遍。
-   *
-   * ## 但 apiKey 变了就重置
-   *
-   * 换 key 是用户对「这个账号不能用」的**直接回应**。此时还让它继续冷却
-   * 到期,用户会看到自己刚修好的 key 依然被跳过,合理推断是"改了没生效"。
-   * 这是少数几处「状态不如用户意图重要」的地方。
-   *
-   * 出口(proxyId)变化**不**重置:那不改变 Worker 的额度与鉴权状态,
-   * 而限流与鉴权失败正是冷却的主要来源。
-   *
-   * ## 停用再启用同样保留 —— 状态从 `#retired` 找回
-   *
-   * 只看 `#workers` 是不够的:它已被 `filter(isUsable)` 过滤,停用的 Worker
-   * 不在里面。429 `Retry-After: 900` 之后停用再启用,
-   * 剩余冷却会从 900000ms 变成 0 —— 后台点两下就能抹掉上游明确
-   * 要求的等待。停用不是「用户修好了这个账号」,不该获得与换 key 同等的重置。
+   * 用新配置替换 Worker 列表，保留同 id 的冷却状态（否则热更新变成全员复活）。
+   * apiKey 变了才重置：换 key 是用户对「这个账号不能用」的直接回应。出口变化与停用再启用
+   * 都不重置（后者从 `#retired` 找回）。
    */
   sync(config: Config): void {
     const previous = new Map(this.#workers.map((w) => [w.id, w] as const));
 
-    // 这一轮不再可用的,把状态存进 #retired 等它回来。
+    // 这一轮不再可用的，状态存进 #retired。
     const nextIds = new Set(config.workers.filter(isUsable).map((w) => w.id));
     for (const w of this.#workers) {
       if (nextIds.has(w.id)) continue;
@@ -142,7 +98,6 @@ export class WorkerPool {
     }
 
     this.#workers = config.workers.filter(isUsable).map((w) => {
-      // 在池里的优先;不在池里的去 #retired 找(停用过一段时间又回来)。
       const prior = previous.get(w.id) ?? this.#retired.get(w.id);
       const keySame = prior !== undefined && prior.apiKey === w.apiKey;
       return {
@@ -156,7 +111,6 @@ export class WorkerPool {
       };
     });
 
-    // 回到池里的不必再留一份。
     for (const w of this.#workers) this.#retired.delete(w.id);
   }
 
@@ -178,42 +132,13 @@ export class WorkerPool {
   }
 
   /**
-   * 记一次成功 —— 清零计数，并在**这次尝试确实晚于冷却**时解除冷却。
-   *
-   * ## 为什么要看发起时刻
-   *
-   * 「一次成功证明它现在能用」只在这次尝试**发出于冷却生效之后**才成立。
-   * 而 `record()` 的调用顺序由**上游响应到达顺序**决定，不由发起顺序决定：
-   *
-   * ```
-   * 请求A 发出 ──── 上游慢 300ms ──→ 200 成功   ← 记账在后
-   * 请求B 发出 → 立刻 429 Retry-After: 900      ← 记账在前
-   * ```
-   *
-   * 不能无条件 `cooldownUntil: 0`：那样请求 A 那次成功（它在冷却生效
-   * **之前**就已发出，对"现在能不能用"零信息）会把上游明确要求的 900 秒清成 0。
-   * 触发不需要巧合：429 通常是账号级的，而多轮对话客户端天然并发。
-   *
-   * 这是「不归咎于 Worker 不等于证明它现在能用」那条判据的推广（见
-   * `Scheduler.record`）：**「一次成功」不等于「现在能用」—— 要看它是什么时候
-   * 发出的**。
-   *
-   * `attemptStartedAt` 由调用方按 `now - latencyMs` 算出（`AttemptRecord`
-   * 已有 `latencyMs`，不必新增字段）。取不到时传 `now`，那退化成无条件解除
-   * —— 对「尝试发出时没有冷却」这个最常见的情形完全一致。
-   *
-   * 不可重试的 4xx **不要**用这个:它们不归咎也不证明可用,`Scheduler.record`
-   * 对它们不改任何状态。
+   * 记一次成功：清零计数，仅当这次尝试发出于冷却生效之后才解除冷却。`record()` 按响应到达
+   * 顺序调用：并发下一次更早发出的慢成功，不能清掉随后 429 设下的冷却。
+   * `attemptStartedAt` 由调用方按 `now - latencyMs` 算出，取不到传 `now`。
    */
   markSuccess(workerId: string, attemptStartedAt: number): void {
     this.#update(workerId, (current) => {
-      /*
-       * 这次尝试发出时冷却已经结束（或本来就没有冷却）→ 它对"现在能用"
-       * 确实有信息，清掉冷却。否则只清计数：请求确实成功了，连续失败已经中断。
-       *
-       * 用 `>=` 而不是 `>`：`cooldownUntil` 恰好等于发起时刻意味着冷却刚到期，
-       * 那次尝试是在冷却之后发出的。
-       */
+      // `>=`：冷却恰好在发起时刻到期，也算发出于冷却之后。
       const startedAfterCooldown =
         Number.isFinite(attemptStartedAt) && attemptStartedAt >= current.cooldownUntil;
       return {
@@ -224,11 +149,7 @@ export class WorkerPool {
     });
   }
 
-  /**
-   * 记一次失败并按类别冷却。返回冷却到的时刻;`null` 表示未冷却。
-   *
-   * `jitter` 由调用方注入(生产用 `Math.random()`),让单测能断言确切时长。
-   */
+  /** 记一次失败并按类别冷却。返回冷却到的时刻；`null` 表示未冷却。 */
   markFailure(input: {
     workerId: string;
     kind: FailureKind;
@@ -240,13 +161,7 @@ export class WorkerPool {
     const worker = this.get(input.workerId);
     if (worker === null) return null;
 
-    /*
-     * 失败计数**无论传入哪种 kind** 都要加 —— 这是本方法的局部不变量。
-     *
-     * 不冷却的类别由 `Scheduler.record()` 拦在前面(`!blameWorker ||
-     * !shouldCooldown(failure)` 时不改任何状态),所以这里只会见到真实故障。
-     * `WorkersPage` 的「连续失败」一列显示的就是它们的连续次数。
-     */
+    // 计数对任何 kind 都加；不冷却的类别已由 `Scheduler.record()` 拦在前面。
     const consecutiveFails = worker.consecutiveFails + 1;
 
     const until = cooldownUntil({
@@ -259,14 +174,7 @@ export class WorkerPool {
     });
 
     this.#update(input.workerId, (current) => ({
-      /*
-       * 取较大值,不直接覆盖。
-       *
-       * 并发请求会让两次失败乱序到达:先算出的长冷却(如 429 的 15 分钟)
-       * 若被后算出的短冷却(如一次传输失败的 2 秒)覆盖,那个刚限流我们的
-       * 上游会在 2 秒后再被打一遍 —— 而 `Retry-After` 明确说了要等 15 分钟。
-       * 冷却只该延长,不该被另一次失败缩短。
-       */
+      // 取较大值：乱序到达的短冷却不能缩短 429 设下的长冷却。
       cooldownUntil: until === null ? current.cooldownUntil : Math.max(current.cooldownUntil, until),
       consecutiveFails,
       lastFailure: input.kind,
@@ -275,7 +183,7 @@ export class WorkerPool {
     return this.get(input.workerId)?.cooldownUntil ?? null;
   }
 
-  /** 供诊断导出。不含 apiKey —— 它是凭证。 */
+  /** 供诊断导出。不含 apiKey。 */
   snapshot(now: number): Array<{
     id: string;
     kind: WorkerKind;

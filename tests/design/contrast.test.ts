@@ -23,14 +23,19 @@ if (LIGHT["bg"] === DARK["bg"]) {
 /** 承载文本或图标的 token —— 必须在每个表面上 ≥4.5:1。 */
 const FOREGROUNDS = ["text", "text-muted", "accent-fg", "success", "warn", "error", "info"] as const;
 
-/** 内容可以叠在上面的表面 token。 */
-const SURFACES = ["bg", "surface", "surface-accent"] as const;
+/**
+ * 内容可以叠在上面的表面 token。
+ *
+ * `surface-hover` / `surface-active` 是按钮、筛选片、导航、表格行的悬停与按下底色 ——
+ * 悬停时行内的全部文字都压在它上面，所以它们和静态表面一样参与笛卡尔积。
+ */
+const SURFACES = ["bg", "surface", "surface-accent", "surface-hover", "surface-active"] as const;
 
 /**
  * 结构性 token —— 不承载任意文本，不参与 ≥4.5:1 的笛卡尔积规则，
  * 但每一个都有下面单独的断言，不是「豁免」。
  */
-const STRUCTURAL = ["border", "border-strong", "accent-fill", "on-accent-fill"] as const;
+const STRUCTURAL = ["border", "border-strong", "accent-fill", "accent-fill-hover", "on-accent-fill"] as const;
 
 const CLASSIFIED = [...FOREGROUNDS, ...SURFACES, ...STRUCTURAL] as const;
 
@@ -131,6 +136,11 @@ describe("accent-fill 作为填充的约束", () => {
     expect(ratio, `= ${ratio.toFixed(2)}:1`).toBeGreaterThanOrEqual(4.5);
   });
 
+  it.each(THEMES)("%s：on-accent-fill 在 accent-fill-hover（主按钮悬停）上 ≥4.5:1", (_name, tokens) => {
+    const ratio = contrastRatio(tokens["on-accent-fill"]!, tokens["accent-fill-hover"]!);
+    expect(ratio, `= ${ratio.toFixed(2)}:1`).toBeGreaterThanOrEqual(4.5);
+  });
+
   it.each(THEMES)("%s：次要文字压在 accent-fill 上确实不可读", (_name, tokens) => {
     const ratio = contrastRatio(tokens["text-muted"]!, tokens["accent-fill"]!);
     expect(
@@ -138,6 +148,29 @@ describe("accent-fill 作为填充的约束", () => {
       "若此处变为及格，说明 accent-fill 被调过，需重新评估它能否作行背景",
     ).toBeLessThan(4.5);
   });
+});
+
+/*
+ * 悬停与按下必须真的改变底色。
+ *
+ * 与 token 等值（或几乎等值）的悬停色等于没有反馈，而笛卡尔积只保证文字可读，
+ * 看不见「颜色有没有变」。这里钉住三件事：hover ≠ 它所在的表面、active 比 hover
+ * 更远离 surface、两者都没远到压过 border-strong（悬停不该比边框更抢眼）。
+ */
+describe("悬停与按下的底色", () => {
+  for (const [theme, tokens] of THEMES) {
+    it(`${theme}：surface-hover 与 bg / surface 都可区分，active 更深一级`, () => {
+      const hoverVsSurface = contrastRatio(tokens["surface-hover"]!, tokens["surface"]!);
+      const hoverVsBg = contrastRatio(tokens["surface-hover"]!, tokens["bg"]!);
+      const activeVsSurface = contrastRatio(tokens["surface-active"]!, tokens["surface"]!);
+      expect(hoverVsSurface).toBeGreaterThan(1.05);
+      expect(hoverVsBg).toBeGreaterThan(1.05);
+      expect(activeVsSurface).toBeGreaterThan(hoverVsSurface);
+      expect(activeVsSurface).toBeLessThan(
+        contrastRatio(tokens["border-strong"]!, tokens["surface"]!) + 0.01,
+      );
+    });
+  }
 });
 
 /*

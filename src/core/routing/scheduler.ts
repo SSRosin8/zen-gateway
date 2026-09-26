@@ -1,39 +1,19 @@
 import type { Config } from "../../shared/schema.ts";
 import { RoutingConfigSchema } from "../../shared/schema.ts";
-import { shouldCooldown, type FailureKind } from "../failures.ts";
-import type { AttemptRecord, AttemptTarget } from "../upstream/retry.ts";
+import { shouldCooldown } from "../failures.ts";
+import type { AttemptRecord } from "../upstream/retry.ts";
 import { AffinityMap } from "./affinity.ts";
 import type { AffinitySink, RestoredBinding } from "./affinity.ts";
 import { WorkerPool } from "./workerPool.ts";
 import { select, type Selection } from "./select.ts";
 
 /**
- * 调度器 —— 把 `workerPool` / `cooldown` / `affinity` / `select` 装成一个对象,
- * 并**独占**进程内的调度状态。
- *
- * ## 为什么要这一层
- *
- * 四块各自是纯函数或纯数据结构,但它们之间有次序约束(选之前要 sync、
- * 结算要在流结束之后、亲和绑定与冷却必须看同一个 `now`)。这些约束若散在
- * 路由里,每新增一个协议面就会被复制一遍,而复制的两份必然分叉。
- *
- * 路由层因此只看得到三个动作:`plan` → `record` → `settleStream`。
- *
- * ## 进程内唯一
- *
- * 与 `EgressService` 同理:两个调度器意味着两份冷却状态,于是"这个 Worker
- * 在冷却"取决于请求碰巧走到哪一份 —— 而冷却是为了别再打那个上游。
+ * 调度器：把 `workerPool` / `cooldown` / `affinity` / `select` 装成一个对象并独占进程内调度状态，
+ * 集中它们的次序约束（选前 sync、流结束后结算、绑定与冷却看同一个 `now`）。路由层只见
+ * `plan` → `record` → `settleStream`。进程内唯一：两份冷却状态会让冷却取决于请求走到哪份。
  */
 
-/**
- * 亲和 TTL 的兜底值,从 **schema 的默认值**推导而不是另写一个字面量。
- *
- * 两份默认值必然分叉(纪律 #4),而分叉方向是漏:改了 schema 却没改这里,
- * 容量淘汰会按一个陈旧的 TTL 判断"什么算过期"。
- *
- * 它只在 `plan()`/`record()` 从未被调用过(即还没 sync 过任何配置)时生效 ——
- * 实际流程里 `plan` 总在 `rebind`/`settleStream` 之前,所以这是纯兜底。
- */
+/** 亲和 TTL 兜底值，从 schema 默认值推导（纪律 #4）；仅在从未 sync 过配置时生效。 */
 const DEFAULT_AFFINITY_TTL_MS = RoutingConfigSchema.parse({}).affinityTtlMs;
 
 export type ScheduleContext = {
@@ -48,45 +28,22 @@ export type ScheduleContext = {
 export class Scheduler {
   #pool = new WorkerPool();
   #affinity: AffinityMap;
-  /**
-   * 上一次 sync 用的配置对象**引用**。
-   *
-   * 用引用比较而非深比较:`configOf()` 在没有热更新时返回同一个对象,
-   * 而深比较一份含 512 个 Worker 的配置要跑在每个请求上。热更新必然产生
-   * 新对象(schema.parse 的结果),所以引用变化正是"配置换了"的准确信号。
-   */
+  /** 上一次 sync 的配置引用：热更新必然产生新对象，引用比较足够且避免每请求深比较。 */
   #syncedFrom: Config | null = null;
 
-  /**
-   * 最近一次 sync 时的亲和 TTL。
-   *
-   * 容量淘汰需要知道"什么算过期"(见 `AffinityMap.evict`),而
-   * `rebind`/`settleStream` 的签名里没有 config —— 它们在链结束与流结束时被
-   * 调用,那时把整份配置再传一遍只是噪音。缓存这一个数值即可。
-   *
-   * 初值从 schema 默认值推导,不写字面量:两份默认值必然分叉(纪律 #4)。
-   */
+  /** 最近一次 sync 的亲和 TTL，供签名里没有 config 的 `rebind`/`settleStream` 使用。 */
   #ttlMs: number = DEFAULT_AFFINITY_TTL_MS;
 
   /** 注入以便测试断言确切的冷却时长。 */
   readonly #jitter: () => number;
 
-  /**
-   * `affinitySink` 传入则亲和绑定镜像落盘。
-   *
-   * 不传则纯内存 —— 全部既有单测走这条路，而它们测的是调度逻辑，
-   * 不该为此各自建一个临时数据库。
-   */
+  /** 传入 `affinitySink` 则亲和绑定镜像落盘，否则纯内存。 */
   constructor(opts?: { jitter?: () => number; affinitySink?: AffinitySink }) {
     this.#jitter = opts?.jitter ?? Math.random;
     this.#affinity = new AffinityMap(opts?.affinitySink);
   }
 
-  /**
-   * 启动时把持久化的亲和绑定装回内存。
-   *
-   * 必须按 `at` 升序传入 —— 见 `AffinityMap.restore`。
-   */
+  /** 启动时把持久化的亲和绑定装回内存；须按 `at` 升序（见 `AffinityMap.restore`）。 */
   restoreAffinity(
     sessions: readonly RestoredBinding[],
     blobs: readonly RestoredBinding[],
@@ -110,46 +67,19 @@ export class Scheduler {
   }
 
   /**
-   * 记一次尝试的结局。由 `retry.ts` 的 `onAttempt` 逐次调用。
+   * 记一次尝试的结局，由 `retry.ts` 的 `onAttempt` 逐次调用。`now` 是尝试结束时刻
+   * （一次尝试可耗数分钟，用开始时刻会把冷却算进过去）。
    *
-   * `now` 必须是**这次尝试结束的时刻**,不是请求开始的时刻 —— 见
-   * `relay.ts` 里 `nowOf()` 的说明。一次尝试可以耗 60-300 秒(headers/body
-   * 超时),用开始时刻会把冷却算进过去。
-   *
-   * 三条分支,而分支条件**从 `shouldCooldown` 推导**而不是另写一份:
-   *
-   * - **成功** → `markSuccess`(清零 + 解除冷却)。上游用行为证明了它现在能用。
-   * - **不归咎 Worker,或该类别本就不冷却** → 什么都不改:冷却与连续失败数原样保留
-   * - 其余 → `markFailure`,按类别冷却
-   *
-   * ## 第二条为什么不清零
-   *
-   * 不归咎的结局(坏请求、出口配置错误、未核验模型的 401)对 Worker 是否可用
-   * 零信息:它既不该让退避升级(所以不走 `markFailure`),也不该打断真实故障的
-   * 连续计数 —— `transport, bad_request, transport` 仍是连续两次真实故障,
-   * 清零会让一个夹在中间的坏请求把指数退避拉回起点。只有成功才重置计数。
-   *
-   * ## 第二条为什么要带上 `!shouldCooldown`
-   *
-   * `unknown` 的 `blameWorker` 为 true(`retry.ts` 只对出口配置错误置 false),
-   * 只看 `blameWorker` 会让它走 `markFailure`:计数 +1 而冷却为 null,计数无界
-   * 膨胀,把后续**真实**故障的退避直接推到上限。「该不该冷却」只有
-   * `shouldCooldown` 一份真相(纪律 #4)。
+   * - 成功 → `markSuccess`
+   * - 不归咎 Worker 或该类别不冷却 → 不改任何状态：既不升级退避，也不打断真实故障的
+   *   连续计数；`unknown` 的 blameWorker 为 true，所以必须同时看 `shouldCooldown`（纪律 #4）
+   * - 其余 → `markFailure`
    */
   record(record: AttemptRecord, config: Config, now: number): void {
     this.#ensureSynced(config);
 
     if (record.failure === null) {
-      /*
-       * 发起时刻 = 记账时刻 − 这次尝试的耗时。
-       *
-       * `markSuccess` 需要它来判断「这次成功对『现在能用』是否有信息」——
-       * 一次在冷却生效**之前**就已发出的成功（并发下很常见）不该清掉冷却。
-       * 理由写在 `markSuccess` 上。
-       *
-       * `latencyMs` 非有限时退回 `now`，那退化成原来的无条件清除 ——
-       * 对「发出时没有冷却」这个最常见的情形结果一致。
-       */
+      // 发起时刻 = 记账时刻 − 耗时，供 `markSuccess` 判断；耗时非有限则退回 now。
       const startedAt = Number.isFinite(record.latencyMs) ? now - record.latencyMs : now;
       this.#pool.markSuccess(record.workerId, startedAt);
       return;
@@ -168,26 +98,9 @@ export class Scheduler {
   }
 
   /**
-   * 重试链 settled 之后,把会话改绑到**实际**承接的 Worker。
-   *
-   * ## 为什么 plan 时的绑定不够
-   *
-   * `plan` 绑的是候选链**首位**,而重试链可能往后走:一条
-   * 「w1 拿到 429 → w2 成功」的链里,签发推理块的是 **w2**。若绑定仍停在 w1,
-   * 等 w1 冷却结束,下一轮就回到它 —— 而客户端回放的是 w2 签发的推理块,
-   * 上游必拒。症状是「对话隔一会儿就报一次错」,而且只在限流之后出现。
-   *
-   * 集成测试查出来的:单测结构上测不到它,因为单测模拟的是「冷却发生在
-   * plan **之前**」,而这个缺陷只在「冷却发生在请求**过程中**」时出现。
-   *
-   * ## 为什么不放在 settleStream 里
-   *
-   * 会话身份在链 settled 的那一刻就已确定,不需要等流读完。而 `settleStream`
-   * 挂在流末尾 —— 它只在**客户端真的读完响应**时触发。把会话改绑放在那里,
-   * 一次客户端提前断开就会让绑定停在错误的 Worker 上。
-   *
-   * 只在成功时改绑:全链失败时「实际承接者」是最后一个失败的那个,绑上去
-   * 没有意义 —— 而它已进入冷却,下一轮自然会重挑。
+   * 链 settled 后把会话改绑到实际承接的 Worker：「w1 429 → w2 成功」时推理块由 w2 签发，
+   * 绑定停在 w1 会让冷却结束后的回放被上游拒。不放在 `settleStream`：客户端提前断开时
+   * 那里不触发。只在成功时调用。
    */
   rebind(sessionHash: string | null, workerId: string, now: number): void {
     if (sessionHash === null) return;
@@ -196,36 +109,14 @@ export class Scheduler {
   }
 
   /**
-   * 不变量 #3:流结束后的亲和结算。
-   *
-   * 三种结局,处置完全不同:
-   *
-   * | 结局 | 动作 | 为什么 |
-   * |---|---|---|
-   * | 检出失效推理 | 解绑会话 + 忘掉指纹 | 留着会让下一轮回到同一个必败 Worker |
-   * | 2xx 且完整读完 | 学习指纹 → 该 Worker | 成功服务证明它接受这批推理块 |
-   * | 不完整(断流/客户端取消) | **什么都不做** | 上游可能在未读到的部分拒绝了 |
-   *
-   * 第三行是关键:`complete === false` 时既不学也不忘。学了可能把一个其实
-   * 会拒的 Worker 记成正确答案;忘了则会白丢一个可能正确的绑定
-   * (客户端按 ESC 中断生成属于这一类,而那与推理是否有效毫无关系)。
-   *
-   * 注意会话绑定**不在**这三行里 —— 它由 `rebind` 在链 settled 时处理,
-   * 见那里的说明。
+   * 不变量 #3：流结束后的亲和结算。
+   * - 检出失效推理：解绑会话 + 忘掉指纹，免得下一轮回到必败 Worker
+   * - 2xx 且完整读完：学习指纹 → 该 Worker
+   * - 不完整（断流/客户端取消）：既不学也不忘，上游可能在未读部分拒绝，而 ESC 中断与推理有效性无关
+   * 会话绑定由 `rebind` 处理。
    */
   settleStream(input: {
-    /**
-     * 承接本次请求的 Worker;**失败路径传 null**。
-     *
-     * 可空不是图方便:`workerId` 只被"学习指纹"这一个分支用到,而学习只发生在
-     * 2xx。失败路径(`result.ok === false` ⇒ status ≥ 400)永远走不到那里,
-     * 所以在那里编一个 workerId 是**死信息** —— 它会让读代码的人以为
-     * 失败路径也在按 Worker 记账。
-     *
-     * 不要在失败路径传 `result.attempts.at(-1)?.workerId ?? ""`:变异测试
-     * 把它换成 `""` 后全部测试依然绿 —— 那正是"这个值根本没被用"的证据,
-     * 而不是测试的漏洞。
-     */
+    /** 承接本次请求的 Worker；失败路径传 null（只有 2xx 的学习分支用它，勿编造值）。 */
     readonly workerId: string | null;
     readonly sessionHash: string | null;
     readonly blobHashes: readonly string[];
@@ -245,24 +136,14 @@ export class Scheduler {
     if (!input.complete) return;
     if (input.status < 200 || input.status >= 300) return;
     if (input.blobHashes.length === 0) return;
-    // 走到这里 status 必为 2xx,而 2xx 只出现在成功路径 —— 那里一定有 workerId。
     if (input.workerId === null) return;
 
     this.#affinity.learnBlobs(input.blobHashes, input.workerId, input.now, this.#ttlMs);
   }
 
   /**
-   * Worker 的运行期状态 —— 管理 API 的数据来源。
-   *
-   * ## 为什么不直接用 `snapshot()`
-   *
-   * `snapshot()` 返回的是 `WorkerPool` 的内部形状（含 `kind`/`proxyId`，
-   * 那些**配置里已经有了**），而管理面需要的恰好是配置里**没有**的那一半：
-   * 冷却剩余、连续失败、就绪与否。让投影层去 `snapshot()` 里挑字段会形成
-   * 一处隐式耦合 —— 那个方法的形状为诊断导出而定，改它会悄悄改掉 API 契约。
-   *
-   * 这个方法只承诺管理 API 需要的那几个字段，两者各自演进。
-   * `snapshot()` 因此**仍然没有生产调用点**，如实标注着。
+   * 管理 API 用的 Worker 运行期状态，只承诺配置里没有的字段；不直接暴露 `snapshot()`，
+   * 免得诊断导出的形状悄悄改掉 API 契约。
    */
   runtimeWorkers(config: Config, now: number): Array<{
     id: string;
@@ -293,18 +174,7 @@ export class Scheduler {
     };
   }
 
-  /**
-   * 丢掉过期与指向已删除 Worker 的亲和条目。
-   *
-   * ⚠️ **仍无生产调用点**，理由见 `AffinityMap.prune`（不接上是有意的）。
-   * 这里不写「由管理面或定期任务调用」—— 那会是个**假的调用点声明**：
-   * 全仓只有单测调它。同一事实只在 `AffinityMap.prune` 写一份，
-   * 免得两份副本一份失实（纪律 #4）。
-   *
-   * 「有没有读者」这件事的唯一真相是调用点本身，而
-   * `tests/unit/exportsReferenced.test.ts` 已经把它做成了关卡 ——
-   * 手写标注只该说明**为什么不接**，不该声称它被接了。
-   */
+  /** 丢掉过期与指向已删除 Worker 的亲和条目。仍无生产调用点，理由见 `AffinityMap.prune`。 */
   prune(config: Config, now: number): void {
     this.#ensureSynced(config);
     this.#affinity.prune(now, config.routing.affinityTtlMs, (id) => this.#pool.has(id));
@@ -317,6 +187,3 @@ export class Scheduler {
     this.#syncedFrom = config;
   }
 }
-
-/** 候选链为空时的诊断信息来源 —— 转出以便路由只 import 一个模块。 */
-export type { AttemptTarget, FailureKind };
