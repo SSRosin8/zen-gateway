@@ -256,16 +256,15 @@ describe("loopbackOnly 中间件", () => {
 
 describe("assertEveryRouteGuarded 真的会拦住裸路由", () => {
   /*
-   * 第十轮审核实测:这条断言**自己没有任何东西守着**。首行插一句 `return`
-   * 之后全量测试依然全绿,而 `app.ts` 的注释当时写着「见
-   * `tests/integration/relay.test.ts` 里对它做的变异测试」—— **那个测试不存在**。
-   * 一条指向不存在的测试的注释比没有注释更糟:它让下一个人以为这里有守卫。
+   * 这条断言需要**自己被守着**:没有这组测试时,首行插一句 `return`
+   * 之后全量测试依然全绿。一条指向不存在的测试的注释比没有注释更糟:
+   * 它让下一个人以为这里有守卫。
    *
-   * 唯一碰到它的是 `auditRound4.test.ts` 对一个**正确**的 app 断言
+   * 其他碰到它的只有 `auditRound4.test.ts` 对一个**正确**的 app 断言
    * `.not.toThrow()`,那只能发现误报,发现不了断言被阉掉。
    *
-   * 这与隔壁 `assertAdminRoutesLoopbackOnly` 是同一个洞 —— 第八轮在那条上
-   * 修好了而没有把同一手法应用到这条。下面喂的都是**故意装错的 app**。
+   * 这与隔壁 `assertAdminRoutesLoopbackOnly` 是同一个洞,用同一手法补:
+   * 下面喂的都是**故意装错的 app**。
    */
   it("一条完全没有中间件覆盖的路由要抛错", () => {
     const app = new Hono();
@@ -319,12 +318,12 @@ describe("assertEveryRouteGuarded 真的会拦住裸路由", () => {
 
 describe("assertAdminRoutesLoopbackOnly 真的会拦住装配错误", () => {
   /*
-   * 第八轮审核实测:在 `assertAdminRoutesLoopbackOnly` 首行插一句 `return`,
-   * 全套测试**依然全绿**。唯一碰到它的测试是对一个**正确**的 app 断言
+   * 没有这组测试时,在 `assertAdminRoutesLoopbackOnly` 首行插一句 `return`,
+   * 全套测试**依然全绿**。其他碰到它的测试只有对一个**正确**的 app 断言
    * `.not.toThrow()` —— 那只能发现误报（把对的报成错的），
    * 永远发现不了「这条断言被阉掉了」。
    *
-   * 于是这条声称已关闭缺口 #8 的守卫，自己没有任何东西守着。而它守的是
+   * 那样这条守卫自己没有任何东西守着。而它守的是
    * 管理面唯一的保护:那里不设 Relay Token，「仅本机」就是全部。
    *
    * 所以下面喂进去的是**故意装错的 app** —— 断言必须抛。
@@ -337,7 +336,7 @@ describe("assertAdminRoutesLoopbackOnly 真的会拦住装配错误", () => {
 
   it("挂了中间件但**不是**回环闸门时也抛错 —— 判据是身份不是形状", () => {
     /*
-     * 这是缺口 #8 的核心:`assertEveryRouteGuarded` 只问「有没有守卫」。
+     * 这是这条守卫存在的理由:`assertEveryRouteGuarded` 只问「有没有守卫」。
      * 一条只挂了别的中间件（比如 relayAuth，或任何自定义的）的管理路由
      * 能骗过那条断言，而它对远端是开放的。
      */
@@ -369,10 +368,10 @@ describe("assertAdminRoutesLoopbackOnly 真的会拦住装配错误", () => {
 
 describe("Relay Token 定长比较", () => {
   /*
-   * README 的安全约束写着「Relay Token 定长比较」，而第八轮审核实测:
+   * README 的安全约束写着「Relay Token 定长比较」。若只看布尔结果，
    * 把 `secureCompare` 的实现换成 `return actual === expected`，
-   * 全套测试**依然全绿** —— 既有断言全部只看布尔结果，而 `===`
-   * 复现同样的结果。也就是说「定长」这条性质此前只有代码审阅。
+   * 全套测试**依然全绿** —— `===` 复现同样的结果。
+   * 也就是说「定长」这条性质只靠代码审阅守不住。
    *
    * 下面两条查的是**性质**而不是结果:
    * 1. 长度不同时不能早退（早退会泄漏长度信息）；
@@ -422,7 +421,7 @@ describe("Relay Token 定长比较", () => {
      * 被 GC / JIT / 分支预测的噪声完全盖过 —— 拿时钟写断言只会得到一条
      * 随机会红的测试，那比没有更糟。
      *
-     * 第八轮审核正是实测出:把实现换成 `===` 之后全套测试全绿，
+     * 实测:只看结果时，把实现换成 `===` 之后全套测试全绿，
      * 而 README 的安全清单写着「Relay Token 定长比较」。
      *
      * 所以这里明确地只保证一件事:**手法没被换掉**。这与

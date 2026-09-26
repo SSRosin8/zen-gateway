@@ -245,11 +245,11 @@ const MAX_CAUSE_CHAIN_LENGTH = 800;
  * ## 为什么要跟 `cause`
  *
  * undici 的 fetch 把一切底层故障包成 `TypeError: fetch failed`,**真正的原因
- * 只在 `err.cause` 里**。先前这里只取 `err.message`,于是一个证书链故障
+ * 只在 `err.cause` 里**。只取 `err.message` 的话,一个证书链故障
  * (`UNABLE_TO_GET_ISSUER_CERT_LOCALLY`,上游证书链未被当前服务进程信任)
- * 在日志里只留下 `目录拉取失败(keyed): fetch failed` —— 三个词,不可诊断,
+ * 在日志里只会留下 `目录拉取失败(keyed): fetch failed` —— 三个词,不可诊断,
  * 而症状是 `/v1/models` 返回 HTTP 200 加一个空列表(空集合不报错)。
- * 脱敏函数无意中成了信息销毁函数。
+ * 脱敏函数就会无意中变成信息销毁函数。
  *
  * 每一层都各自过 `redactText`,所以跟随 cause **不会**放宽脱敏 ——
  * 底层错误同样可能带 URL 内嵌凭证。

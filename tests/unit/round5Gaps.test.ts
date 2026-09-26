@@ -8,14 +8,14 @@ import { ConfigSchema, CooldownConfigSchema, type Config } from "../../src/share
 import type { Response as UndiciResponse } from "undici";
 
 /**
- * 第五轮审核补的断言 —— 每一条都对应一个**存活过的变异**。
+ * 针对**存活过的变异**补的断言 —— 每一条都对应一个。
  *
  * 110 组变异存活 26 组,分成四类(见 AGENTS.md 纪律 #1):测的路径不存在、
  * 条件被另一层顺带满足、调用点存在但输入集为空、代码里有死信息。
  * 前三类补断言(本文件),第四类改代码。
  *
  * 集中放一个文件是刻意的:它们的共同点不是"测同一个模块",而是
- * "先前无法失败"。下一轮审核可以直接拿这个文件核对哪些洞已经堵上。
+ * "不补就无法失败"。复查时可以直接拿这个文件核对哪些洞已经堵上。
  */
 
 const NOW = 1_800_000_000_000;
@@ -57,7 +57,7 @@ const cooldownCfg = CooldownConfigSchema.parse({});
  * 一、输入集为空:测试数据从未走到被测分支
  * ================================================================== */
 
-describe("sync 的 proxyId 分支(先前 proxyId 从未真的变过)", () => {
+describe("sync 的 proxyId 分支(proxyId 必须真的变一次)", () => {
   it("proxyId 真的换一个值时,冷却仍然保留", () => {
     /*
      * 原有那条名为「proxyId 变了**不**重置冷却」的测试,两次都传
@@ -84,7 +84,7 @@ describe("sync 的 proxyId 分支(先前 proxyId 从未真的变过)", () => {
   });
 });
 
-describe("pipe.ts 无 body 的补偿分支(Phase 5 新加,先前零覆盖)", () => {
+describe("pipe.ts 无 body 的补偿分支", () => {
   /** 造一个 undici 风格的响应。204/304 时 body 为 null,与 undici 实测一致。 */
   function upstreamOf(status: number, body: ReadableStream<Uint8Array> | null): UndiciResponse {
     return {
@@ -138,7 +138,7 @@ describe("pipe.ts 无 body 的补偿分支(Phase 5 新加,先前零覆盖)", () 
   });
 });
 
-describe("statusText 兜底(先前只给过畸形头,没给畸形 statusText)", () => {
+describe("statusText 兜底(畸形的是 statusText 而不是头)", () => {
   it("畸形 statusText 时退回不带它的构造,响应仍然产出", () => {
     const body = new ReadableStream<Uint8Array>({ start(c) { c.close(); } });
     const res = pipeUpstreamResponse(
@@ -179,7 +179,7 @@ describe("pipe 抛错时必须释放它**自己锁住**的流", () => {
 
   it("状态码越界导致构造失败时,onDone 仍被通知一次且标记为不完整", async () => {
     /*
-     * 第五轮审核查出的最要紧一条。`tapReadable` 内部 `getReader()` 锁住了
+     * 本文件最要紧的一条。`tapReadable` 内部 `getReader()` 锁住了
      * 上游 body,而 `new Response()` 仍可能抛 —— 此时 `relay.ts` 那层兜底的
      * `upstream.body?.cancel()` 会异步拒绝(流已被锁)并被 `.catch()` 吞掉。
      *
@@ -231,7 +231,7 @@ describe("pipe 抛错时必须释放它**自己锁住**的流", () => {
   });
 });
 
-describe("2xx 的上界(先前 3xx 从未进过 settleStream)", () => {
+describe("2xx 的上界(3xx 也要进 settleStream)", () => {
   it("304 不学习指纹 —— 它不是成功的生成响应", () => {
     /*
      * 变异验证:把 `status >= 300` 改成 `>= 400` 后全绿,因为没有任何用例
@@ -261,15 +261,14 @@ describe("2xx 的上界(先前 3xx 从未进过 settleStream)", () => {
   });
 });
 
-describe("counts/snapshot 必须自己 sync(先前所有用例都先 plan 过)", () => {
-  it("全新 Scheduler 的第一个操作就问 counts", () => {
+describe("runtimeWorkers/snapshot 必须自己 sync(不先 plan)", () => {
+  it("全新 Scheduler 的第一个操作就问 runtimeWorkers", () => {
     /*
-     * 变异验证:去掉 `counts`/`snapshot` 里的 `#ensureSynced` 后全绿 ——
-     * 因为每条用例都先调了 `plan()`(它会 sync)。而 `/health` 完全可能
-     * 在任何转发请求之前就来问池状态。
+     * 每条用例都先调 `plan()`(它会 sync)时,去掉这两个方法里的 `#ensureSynced`
+     * 仍然全绿。而管理面完全可能在任何转发请求之前就来问池状态。
      */
     const cfg = config([{ id: "w1" }, { id: "w2" }]);
-    expect(new Scheduler().counts(cfg, NOW)).toEqual({ ready: 2, total: 2 });
+    expect(new Scheduler().runtimeWorkers(cfg, NOW).map((w) => w.ready)).toEqual([true, true]);
   });
 
   it("全新 Scheduler 的第一个操作就问 snapshot", () => {
@@ -278,7 +277,7 @@ describe("counts/snapshot 必须自己 sync(先前所有用例都先 plan 过)",
   });
 });
 
-describe("LRU 刷新(先前容量用例只插新键,从不重绑已有键)", () => {
+describe("LRU 刷新(重绑已有键,不只插新键)", () => {
   it("重新绑定把条目移到队尾,淘汰的不是它", () => {
     /*
      * `bindSession`/`learnBlobs` 靠"先 delete 再 set"维持
@@ -298,7 +297,7 @@ describe("LRU 刷新(先前容量用例只插新键,从不重绑已有键)", () 
   });
 });
 
-describe("指纹长度边界(先前只测了 5 与 20000,两端都在界外)", () => {
+describe("指纹长度边界(界内外两端各差一)", () => {
   const pad = (n: number): string => "z".repeat(n);
 
   it("恰好 16 字符被收集,15 字符不被收集", () => {
@@ -335,9 +334,9 @@ describe("遍历预算不得误伤真实负载", () => {
      *
      * ## 为什么用行为断言而不是内存断言
      *
-     * 我第一版断言"heap 增长 < 60MB"。变异验证打脸:把压栈计数改回去之后
-     * 测试**依然全绿** —— 因为我为了让测试跑得快把数组从 355 万缩到 50 万,
-     * 而那个规模的内存增长恰好落在我自己设的阈值内。内存与耗时断言的阈值
+     * 断言"heap 增长 < 60MB"不成立:把压栈计数改回去之后测试**依然全绿** ——
+     * 为了让测试跑得快,数组从 355 万缩到 50 万,而那个规模的内存增长
+     * 恰好落在阈值内。内存与耗时断言的阈值
      * 天生要靠猜,猜松了就是空壳。
      *
      * 改用一个由修复**直接导致**的行为差异:

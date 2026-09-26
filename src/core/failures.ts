@@ -4,7 +4,7 @@
  * 分级冷却与重试判定都依赖这个分类,所以它必须是**纯函数**,
  * 且只看状态码与响应头 —— 绝不看响应体。
  *
- * 理由见规划的不变量 #1:一旦重试判定读了 body,重试链就必须先消费 body,
+ * 理由见不变量 #1:一旦重试判定读了 body,重试链就必须先消费 body,
  * 而消费过的 body 无法再转发给客户端;更糟的是流式响应下「先发了字节又去重试」
  * 会让客户端收到拼接的两段响应。把「只看 status + headers」写成类型约束,
  * 这个错误就无法在后续阶段被偷偷引入。
@@ -23,6 +23,11 @@ export const FAILURE_KINDS = [
   "rate_limit",
   /** 鉴权失败。短退避 —— 配错的 key 应该反复暴露,而不是安静消失 15 分钟。 */
   "auth",
+  /**
+   * 403。比 auth 更短的冷却:上游的免费闸门(`FreeTierError`)按客户端请求形态
+   * 返回 403,且先于密钥校验,所以它多半说明的是请求形态而不是这个 Worker 坏了。
+   */
+  "forbidden",
   /** 上游 5xx。可重试。 */
   "upstream_error",
   /** 连接层失败(DNS/TCP/TLS/代理拒绝)。指数退避 + 抖动。 */
@@ -50,7 +55,8 @@ export function classifyStatus(facts: ResponseFacts): FailureKind | null {
   // 2xx/3xx 不是失败。
   if (status < 400) return null;
 
-  if (status === 401 || status === 403) return "auth";
+  if (status === 401) return "auth";
+  if (status === 403) return "forbidden";
   if (status === 408) return "timeout";
   if (status === 429) return "rate_limit";
 
@@ -67,7 +73,7 @@ export function classifyStatus(facts: ResponseFacts): FailureKind | null {
   if (status >= 500) return "upstream_error";
 
   /*
-   * **不可达**（第十轮审核实测：100–599 全枚举，这一行零命中）。
+   * **不可达**（100–599 全枚举，这一行零命中）。
    *
    * 上面几条已经穷尽：2xx/3xx 走 `null`、4xx 走 `bad_request`、5xx 走
    * `upstream_error`。留着它只为满足返回类型（TS 看不出 number 的这几个区间
@@ -96,7 +102,7 @@ export function isRetryable(kind: FailureKind): boolean {
  *
  * `bad_request` 必须返回 false:400/422 是客户端请求的问题,不是 Worker 的问题。
  * 若据此冷却,一个客户端的坏请求会把所有健康 Worker 逐个打进冷却
- * (规划的不变量 #4)。
+ * (不变量 #4)。
  */
 export function shouldCooldown(kind: FailureKind): boolean {
   return kind !== "bad_request" && kind !== "unknown";

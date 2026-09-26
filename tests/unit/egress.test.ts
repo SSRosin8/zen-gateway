@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { createServer, type Server, type ServerResponse } from "node:http";
 import { setImmediate } from "node:timers/promises";
+import { connect } from "node:net";
 import { ConfigSchema, ProxySchema, type Config } from "../../src/shared/schema.ts";
 import { EgressService, applyProbeResult } from "../../src/core/proxy/egress.ts";
 import { isIpAddress, type IpEchoService } from "../../src/core/proxy/probe.ts";
@@ -10,6 +11,8 @@ import { runRetryChain } from "../../src/core/upstream/retry.ts";
 const TIMEOUTS = { headersTimeoutMs: 3_000, bodyTimeoutMs: 10_000 };
 
 const servers: Server[] = [];
+/** 各假服务收到的 CONNECT 目标 —— 用来确认桥接真的建了隧道。 */
+const tunnels: string[] = [];
 const services: EgressService[] = [];
 
 function deferred<T>() {
@@ -20,6 +23,22 @@ function deferred<T>() {
 
 async function serve(handler: Parameters<typeof createServer>[1]): Promise<string> {
   const server = createServer(handler);
+  /*
+   * 同时充当混合端口:桥接 dispatcher 对 http 目标也走 CONNECT 隧道,
+   * 所以把 echo 服务当混合端口用时,它要能按 CONNECT 的目标建隧道。
+   */
+  server.on("connect", (req, client, head) => {
+    tunnels.push(req.url ?? "");
+    const target = new URL(`http://${req.url ?? ""}`);
+    const upstream = connect(Number(target.port), target.hostname, () => {
+      client.write("HTTP/1.1 200 Connection Established\r\n\r\n");
+      upstream.write(head);
+      upstream.pipe(client);
+      client.pipe(upstream);
+    });
+    upstream.on("error", () => client.destroy());
+    client.on("error", () => upstream.destroy());
+  });
   servers.push(server);
   await new Promise<void>((r) => server.listen(0, "127.0.0.1", r));
   const addr = server.address();
@@ -327,7 +346,7 @@ describe("出口池代际切换", () => {
     const oldDispatcher = oldPool.get({ mode: "none" });
     const close = vi.spyOn(oldDispatcher, "close");
 
-    svc.updateTimeouts({ headersTimeoutMs: 1_000, bodyTimeoutMs: 1_000 });
+    svc.reset({ headersTimeoutMs: 1_000, bodyTimeoutMs: 1_000 });
 
     expect(close).toHaveBeenCalled();
     expect(() => oldPool.get({ mode: "none" })).toThrow("已关闭");
@@ -365,7 +384,7 @@ describe("出口池代际切换", () => {
       deps: svc.upstreamDeps(config()),
       onAttempt: (record) => {
         if (record.failure !== null) {
-          svc.updateTimeouts({ headersTimeoutMs: 1_000, bodyTimeoutMs: 1_000 });
+          svc.reset({ headersTimeoutMs: 1_000, bodyTimeoutMs: 1_000 });
         }
       },
     });
@@ -387,15 +406,15 @@ describe("出口池代际切换", () => {
     const response = await fetchUpstream({ url: echo, method: "GET", headers: {}, body: null, proxyId: null }, deps);
     const writer = await stream.promise;
     try {
-      svc.updateTimeouts({ headersTimeoutMs: 1_000, bodyTimeoutMs: 1_000 });
+      svc.reset({ headersTimeoutMs: 1_000, bodyTimeoutMs: 1_000 });
       const closing = svc.close();
       let closed = false;
       void closing.then(() => { closed = true; });
       await setImmediate();
       expect(closed).toBe(false);
       expect(svc.close()).toBe(closing);
-      expect(() => svc.updateTimeouts(TIMEOUTS)).toThrow("已关闭");
-      await expect(svc.reset()).rejects.toThrow("已关闭");
+      expect(() => svc.reset(TIMEOUTS)).toThrow("已关闭");
+      expect(() => svc.reset()).toThrow("已关闭");
       expect(() => svc.upstreamDeps(cfg)).toThrow("已关闭");
       expect(() => svc.controllerFor(cfg, "b1")).toThrow("已关闭");
       await expect(svc.probeProxy(cfg, null)).rejects.toThrow("已关闭");
@@ -404,6 +423,28 @@ describe("出口池代际切换", () => {
       await closing;
     } finally {
       writer.end();
+    }
+  });
+
+  it("destroy 切断当前池上的在途流,之后拒绝新请求", async () => {
+    const writers: ServerResponse[] = [];
+    const echo = await serve((_req, res) => {
+      res.writeHead(200);
+      res.write("first-");
+      writers.push(res);
+    });
+    const svc = egress(echo);
+    const cfg = config();
+    const deps = svc.upstreamDeps(cfg);
+    const response = await fetchUpstream({ url: echo, method: "GET", headers: {}, body: null, proxyId: null }, deps);
+    try {
+      // 先读起来:undici 只有在读者挂着时才把连接断开反映成读取失败。
+      const text = response.text();
+      svc.destroy();
+      await expect(text).rejects.toThrow();
+      expect(() => svc.upstreamDeps(cfg)).toThrow("已关闭");
+    } finally {
+      for (const w of writers) w.destroy();
     }
   });
 
@@ -434,6 +475,99 @@ describe("出口池代际切换", () => {
       release.resolve();
     }
     expect(await pending).toEqual({ ok: true, text: "198.51.100.5" });
+  });
+});
+
+describe("桥接 selector 锁在连接就绪时释放", () => {
+  function bridgeCfg(api: string, mixed: string): Config {
+    return config({
+      clash: {
+        enabled: true,
+        activeBridgeId: "b1",
+        bridges: [{ id: "b1", name: "假内核", apiBase: api, localProxyPort: Number(new URL(mixed).port) }],
+      },
+      proxies: [
+        { id: "p1", name: "节点一", type: "vless", host: "proxy.invalid", port: 443, source: "controller", bridgeable: true, bridgeId: "b1" },
+        { id: "p2", name: "节点二", type: "vless", host: "proxy.invalid", port: 443, source: "controller", bridgeable: true, bridgeId: "b1" },
+      ],
+    });
+  }
+
+  it("第一个请求还在等响应头时,第二个请求已能切 selector 并拿到响应", async () => {
+    const selects: string[] = [];
+    const api = await serve((req, res) => {
+      let body = "";
+      req.on("data", (c) => (body += c));
+      req.on("end", () => {
+        selects.push((JSON.parse(body) as { name: string }).name);
+        res.writeHead(204).end();
+      });
+    });
+    const firstArrived = deferred<void>();
+    const releaseFirst = deferred<void>();
+    const upstream = await serve((req, res) => {
+      if (req.url === "/slow") {
+        firstArrived.resolve();
+        void releaseFirst.promise.then(() => res.writeHead(200).end("slow"));
+        return;
+      }
+      res.writeHead(200).end("fast");
+    });
+    const svc = egress(upstream);
+    const cfg = bridgeCfg(api, upstream);
+    const deps = svc.upstreamDeps(cfg);
+    const send = (path: string, proxyId: string) =>
+      fetchUpstream({ url: `${upstream}${path}`, method: "GET", headers: {}, body: null, proxyId }, deps);
+
+    tunnels.length = 0;
+    const slow = send("/slow", "p1");
+    try {
+      await firstArrived.promise;
+      // 第一条的响应头仍被扣着;第二条若要等锁就会在这里超时。
+      const fast = await Promise.race([
+        send("/fast", "p2").then((r) => r.text()),
+        new Promise<string>((_, reject) => setTimeout(() => reject(new Error("第二个请求被锁住")), 1_500)),
+      ]);
+      expect(fast).toBe("fast");
+      expect(selects).toEqual(["节点一", "节点二"]);
+      // 提前释放的前提是节点在 CONNECT 时绑定;http 目标也必须走隧道。
+      expect(tunnels).toHaveLength(2);
+    } finally {
+      releaseFirst.resolve();
+    }
+    expect(await (await slow).text()).toBe("slow");
+  });
+
+  it.each([
+    ["混合端口拒绝 CONNECT", "reject"],
+    ["混合端口不可达", "down"],
+  ])("%s 时锁被释放,下一个请求照常切 selector", async (_label, mode) => {
+    const selects: string[] = [];
+    const api = await serve((req, res) => {
+      let body = "";
+      req.on("data", (c) => (body += c));
+      req.on("end", () => {
+        selects.push((JSON.parse(body) as { name: string }).name);
+        res.writeHead(204).end();
+      });
+    });
+    const upstream = await serve((_req, res) => res.writeHead(200).end("ok"));
+    const refusing = createServer();
+    refusing.on("connect", (_req, client) => client.end("HTTP/1.1 502 Bad Gateway\r\n\r\n"));
+    servers.push(refusing);
+    await new Promise<void>((r) => refusing.listen(0, "127.0.0.1", r));
+    const addr = refusing.address();
+    const port = typeof addr === "object" && addr !== null ? addr.port : 0;
+    if (mode === "down") await new Promise<void>((r) => refusing.close(() => r()));
+
+    const svc = egress(upstream);
+    const deps = svc.upstreamDeps(bridgeCfg(api, `http://127.0.0.1:${port}`));
+    const send = (proxyId: string) =>
+      fetchUpstream({ url: `${upstream}/x`, method: "GET", headers: {}, body: null, proxyId }, deps);
+
+    await expect(send("p1")).rejects.toThrow();
+    await expect(send("p2")).rejects.toThrow();
+    expect(selects).toEqual(["节点一", "节点二"]);
   });
 });
 

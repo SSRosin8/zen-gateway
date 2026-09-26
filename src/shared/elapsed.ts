@@ -20,8 +20,8 @@
  *
  * ## 为什么在 `shared/`
  *
- * 先前这个函数是 `upstream/retry.ts` 的私有实现，而 `proxy/probe.ts` 独立写了
- * 一份裸减法（第十轮审核查出）—— 两个 core 子目录各写一遍就是纪律 #4 的形态，
+ * `upstream/retry.ts` 与 `proxy/probe.ts` 都要测耗时 —— 两个 core 子目录
+ * 各写一遍（一份私有实现、一份裸减法）就是纪律 #4 的形态，
  * 而分叉方向是漏：加第三个测量点时没人会想起来夹。
  */
 export function elapsedMs(clock: () => number, startedAt: number): number {

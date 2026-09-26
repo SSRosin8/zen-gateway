@@ -173,9 +173,9 @@ describe("结构约束", () => {
           `INSERT INTO batch_probe_jobs (id, state, started_at, updated_at) VALUES ('${state}', '${state}', 0, 0)`,
         );
 
-      // 规划定义的六态全部合法 —— 包括 idle。
-      // 先前漏了 idle,而 Phase 9 的 reducer 测试会把每个状态都落一遍库,
-      // 那时才会炸在一个与真正问题无关的地方。
+      // 状态机的六态全部合法 —— 包括 idle。
+      // 漏掉一个时,reducer 测试会把每个状态都落一遍库,
+      // 炸在一个与真正问题无关的地方。
       for (const state of ["idle", "screening", "running", "paused", "cancelling", "done"]) {
         expect(insert(state), state).not.toThrow();
       }
@@ -251,7 +251,7 @@ describe("库文件权限", () => {
 
 describe("档位 2：摘要列的字节长度约束", () => {
   /*
-   * 第七轮审核实测出的绕过：SQLite 的 `length()` 与 `GLOB` 对 TEXT 都在
+   * 实测过的绕过：SQLite 的 `length()` 与 `GLOB` 对 TEXT 都在
    * 首个 NUL 字节处停止，所以档位 1 的 `length(hash) = 64` 可以被
    * 「64 个 hex + 一个 NUL + 任意明文」通过 —— 明文完整落盘，而所有读路径
    * 都在 NUL 处截断看不见它。档位 2 补 `length(CAST(... AS BLOB)) = 64`。
@@ -304,9 +304,8 @@ describe("档位 2：摘要列的字节长度约束", () => {
 
   it("从档位 1 升级到 2 不丢数据 —— 重建表要搬行", () => {
     /*
-     * 这条同时是**多档位迁移路径的首次真跑**：在 Phase 7 之前
-     * `MIGRATIONS` 只有一档，`migrate()` 的循环从未在"跨一档以上"的
-     * 情况下执行过。
+     * 这条同时守着**多档位迁移路径**：`migrate()` 的循环在"跨一档以上"的
+     * 情况下只有这里会执行。
      */
     const db = openDb(file);
     try {
@@ -321,7 +320,7 @@ describe("档位 2：摘要列的字节长度约束", () => {
       /*
        * 降档要**把后续档位建的东西也撤掉**，否则重开时档位 3 会撞上
        * 「table already exists」—— 那不是迁移的缺陷，是这个测试没把库
-       * 退回到一个真实的档位 1 状态（我第一版就漏了这步）。
+       * 退回到一个真实的档位 1 状态。
        */
       db.exec("DROP TABLE IF EXISTS gateway_rejections");
       db.exec(`CREATE TABLE model_usage_v1 AS

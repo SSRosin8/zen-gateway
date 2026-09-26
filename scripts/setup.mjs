@@ -7,7 +7,7 @@
  *
  * ## 安全边界:只扫 localhost 的固定白名单
  *
- * **绝不扫 LAN,绝不扫端口段。** 这是规划里明确列出的安全约束,理由不止是
+ * **绝不扫 LAN,绝不扫端口段。** 这是明确的安全约束,理由不止是
  * 礼貌:一个会扫网段的工具在不受控网络上运行就是一次未授权的端口扫描,
  * 而它带来的便利(自动发现别人机器上的 Clash)本项目根本不需要 ——
  * 本网关只用本机的 Clash 做桥接。
@@ -58,8 +58,8 @@ const ROOT_ARG = process.env.ZG_DATA_DIR ? undefined : ROOT;
 
 /*
  * 参数校验放在**任何副作用之前** —— 这个脚本会写 `data/config.json`，
- * 也就是唯一一份凭证存储。未识别的参数先前被静默忽略并照常执行完整导入，
- * 所以 `npm run setup -- --help` 的后果是一次真实写入而不是一段用法说明。
+ * 也就是唯一一份凭证存储。未识别的参数若被静默忽略并照常执行完整导入，
+ * `npm run setup -- --help` 的后果就是一次真实写入而不是一段用法说明。
  * 理由写在 `lib/args.mjs`。
  */
 checkArgs({
@@ -264,7 +264,7 @@ async function readController(ctrl) {
   }
 
   /*
-   * 规则的目标分组 —— `GLOBAL` 陷阱的**直接证据**（缺口 #22）。
+   * 规则的目标分组 —— `GLOBAL` 陷阱的**直接证据**。
    *
    * 拿不到就给 null，`pickSelector` 会退回按名字降级那个启发式。
    * 旧内核可能没有 `/rules`，而那不该让整个 setup 失败。
@@ -314,12 +314,12 @@ async function readController(ctrl) {
  * 只是每个 Worker 拿到的是**同一个** IP。只有 `doctor --deep` 的隔离报告
  * 会发现它,而那需要用户想到去跑。
  *
- * ## 判据从"名字"升级成"规则实际导向哪里"（缺口 #22，第九轮）
+ * ## 判据是"规则实际导向哪里"，不是"名字"
  *
- * 先前按**名字**把 `GLOBAL` 降级 —— 那是个启发式，登记时就写明了它的漏洞：
+ * 按**名字**把 `GLOBAL` 降级只是个启发式，漏洞在于：
  * 一个名字不叫 GLOBAL 却同样不参与选路的分组仍会被选中。
  *
- * 现在读 `/rules`（`routedGroups()`）：那里有每条规则的目标分组与兜底
+ * 所以读 `/rules`（`routedGroups()`）：那里有每条规则的目标分组与兜底
  * (`MATCH`) 规则。若选中的分组不出现在规则目标里，它就不参与选路；这就是直接
  * 证据，不依赖分组名称。
  *
@@ -401,9 +401,9 @@ async function main() {
    * 那对服务端是对的(首启该生成),但让 `--dry-run` 变成了一句假话:
    * 横幅打着「不会写盘」,而它刚刚落了一个 0600 文件和一个新 token。
    *
-   * `doctor.mjs` 的第 1 层早就用 `configExists` 挡了同一个陷阱
-   * （注释写着「跑一次 doctor 就把状态改了」）—— 这里当初漏了。
-   * 第八轮审核实测查出:空 data 目录跑 `--dry-run` 后出现 43 字符的 relayToken。
+   * `doctor.mjs` 的第 1 层用 `configExists` 挡了同一个陷阱
+   * （「跑一次 doctor 就把状态改了」）,这里必须同样挡住:
+   * 否则空 data 目录跑 `--dry-run` 后会出现一个新生成的 relayToken。
    */
   if (DRY_RUN && !(await configExists(ROOT_ARG))) {
     line("fail", "配置不存在");
@@ -641,7 +641,7 @@ async function main() {
      * `selectionMode` 完全不动:它默认 `auto`,而用户若改成 `manual` 并选了
      * 一个内核,那是个明确的决定。
      *
-     * **但绝不指向一个停用的内核。** 第八轮审核实测查出:更新分支刻意保留
+     * **但绝不指向一个停用的内核。** 更新分支刻意保留
      * `enabled: false`（用户可能故意停用了某个内核），而这里若把
      * `activeBridgeId` 指过去,`pickBridge` 在 manual 模式下只在**已启用**的
      * 内核里找（`pool.ts`）→ 返回 null → 每个桥接代理都失败,

@@ -8,10 +8,9 @@ import type { Overview } from "../../src/shared/contract.ts";
  * 界面会显示「全部就绪」,而实际什么都没配。这里守的就是这条路径
  * 在真实渲染下的结果,不只是 poolHealth 的返回值。
  *
- * Phase 9 起 App 读 `/api/overview`(一个聚合端点)而不是 `/health` ——
- * 这一页每个数字都必须来自**同一时刻**的状态,分多个请求拿会让
- * 「3 个 Worker / 2 个就绪 / 隔离成立」描述三个不同瞬间的系统。
- * 下面这些契约本身没变,只是数据来源换了。
+ * App 读 `/api/overview`(一个聚合端点):这一页每个数字都必须来自
+ * **同一时刻**的状态,分多个请求拿会让「3 个 Worker / 2 个就绪 / 隔离成立」
+ * 描述三个不同瞬间的系统。
  */
 
 afterEach(() => {
@@ -50,9 +49,11 @@ describe("App 首次启动", () => {
     stubOverview(fakeOverview());
     render(<App />);
 
+    // 等到真正拿到数据（向导出现），而不是停在加载态上断言。
     await waitFor(() => {
-      expect(screen.getByText("尚未配置 Worker")).toBeInTheDocument();
+      expect(screen.getByText("先把它跑起来")).toBeInTheDocument();
     });
+    expect(screen.getAllByText("尚未配置 Worker").length).toBeGreaterThan(0);
     expect(screen.queryByText("全部就绪")).not.toBeInTheDocument();
   });
 
@@ -77,14 +78,18 @@ describe("App 首次启动", () => {
     expect(tones).not.toContain("success");
   });
 
-  it("请求在途时也不显示「全部就绪」", () => {
-    // 永不 resolve —— 首次加载还没有任何数字,此时绝不能显示成功态。
+  it("请求在途时不替 Worker 池下结论", () => {
+    /*
+     * 永不 resolve —— 首次加载还没有任何数字。此时既不能显示成功态，
+     * 也不能说「尚未配置」：一个装好的系统会因此看起来需要重新配置。
+     */
     vi.stubGlobal("fetch", vi.fn(() => new Promise(() => {})));
     render(<App />);
 
     expect(screen.getByText("检测中")).toBeInTheDocument();
-    expect(screen.getByText("尚未配置 Worker")).toBeInTheDocument();
     expect(screen.queryByText("全部就绪")).not.toBeInTheDocument();
+    expect(screen.queryByText("尚未配置 Worker")).not.toBeInTheDocument();
+    expect(screen.queryByText(/npm run setup/)).not.toBeInTheDocument();
   });
 
   it("接口不可达时显示未连接,不假装运行中", async () => {

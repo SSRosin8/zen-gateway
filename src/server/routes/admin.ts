@@ -53,11 +53,10 @@ import { importSubscriptionNodes } from "../../core/proxy/subscription/import.ts
  * 3. **写入必须原子且可回退。** 复用 `saveConfig`（临时文件 → fsync →
  *    rename，0600 一出生就有），并在写之前把合并结果全量过一遍 `ConfigSchema`。
  *
- * ## 管理面的 body 上限（缺口 #9 到期）
+ * ## 管理面的 body 上限
  *
- * 规划的安全约束里有一条「管理 JSON 请求体有上限；relay 透传对多模态保持
- * 无界」。它此前是**空洞成立**的 —— 管理侧没有任何读 body 的代码。
- * 现在有了，所以闸门必须同时到位，否则这条约束会静默变成「不成立」。
+ * 安全约束里有一条「管理 JSON 请求体有上限；relay 透传对多模态保持
+ * 无界」。管理侧每个读 body 的端点都必须过闸门，否则这条约束会静默变成「不成立」。
  *
  * 上限 1 MiB：一份含 512 个 Worker 的配置补丁实测不到 100 KB，而转发面的
  * 64 MiB 是为多模态留的，管理面没有那个需求。
@@ -82,9 +81,8 @@ export type AdminDeps = {
   /**
    * 落盘并**让进程内所有读者立刻看到新配置**。
    *
-   * 由 `index.ts` 提供 —— 它是唯一持有那个可变引用的地方。缺口 #1
-   * （「配置热更新只有形状没有入口」）到期：`configOf()` 早就是函数了，
-   * 但先前没有任何东西会改它指向的对象，所以它返回的恒是启动时那份。
+   * 由 `index.ts` 提供 —— 它是唯一持有那个可变引用的地方。`configOf()` 是函数，
+   * 但没有这个入口就没有任何东西会改它指向的对象，它返回的恒是启动时那份。
    *
    * **必须换一个新对象**而不是原地改：`Scheduler.#syncedFrom` 用引用比较
    * 判断「配置换了没有」，原地改会让 Worker 池不重新 sync。
@@ -102,7 +100,7 @@ export type AdminDeps = {
    */
   readonly egress?: EgressService;
   /**
-   * 批量探测的执行器（批次 2）。不传则那两个端点报不可用。
+   * 批量探测的执行器。不传则那两个端点报不可用。
    *
    * 它需要一个打开的数据库（进度要持久化），所以与 `stats` 同理由
    * **不在装配层兜底造一个**。
@@ -111,7 +109,7 @@ export type AdminDeps = {
   readonly health: () => Overview["health"];
   readonly stats?: AdminStatsSource;
   /**
-   * 订阅拉取的注入点（Phase 10）。测试用它喂一个假 fetch。
+   * 订阅拉取的注入点。测试用它喂一个假 fetch。
    *
    * 生产不传 —— 走 `globalThis.fetch`。**刻意不经 dispatcher 池**:
    * 订阅是从机场拉配置，不是发上游请求，不该占用出口代理，
@@ -132,8 +130,8 @@ function adminError(c: Context, type: AdminErrorType, message: string) {
   /*
    * 过一遍 `AdminErrorSchema` 而不是手工拼装。
    *
-   * 那个 schema 先前**零生产引用** —— 它描述的形状与这里手写的对象各存一份，
-   * 于是「改了枚举而忘了改 handler」不会有任何症状（第十轮审核查出）。
+   * 手工拼装的话，schema 描述的形状与这里手写的对象各存一份，
+   * 于是「改了枚举而忘了改 handler」不会有任何症状。
    * 经它构造则是构造期抛错，与其余管理端点一致。
    */
   return c.json(AdminErrorSchema.parse({ error: { type, message } }), status);
@@ -151,7 +149,7 @@ export function createAdminRoutes(deps: AdminDeps): Hono {
   const refreshing = new Set<string>();
 
   /**
-   * 探针。Phase 3 就有，保留 —— `assertEveryRouteGuarded` 的测试依赖它，
+   * 探针。保留 —— `assertEveryRouteGuarded` 的测试依赖它，
    * 而且它是「管理面仅回环」这条约束最小的验证目标。
    */
   app.get("/ping", (c) => c.json({ ok: true }));
@@ -215,12 +213,12 @@ export function createAdminRoutes(deps: AdminDeps): Hono {
   });
 
   /**
-   * 统计。Phase 7 的聚合终于有了读者。
+   * 统计。
    *
    * `days` 查询参数默认 30:`requestCounts` 的 `COUNT(DISTINCT request_id)`
    * 是**唯一随行数线性变慢**的聚合(实测 100k 行 12.4ms、1M 行约 124ms),
    * 而它是**同步**调用 —— 不带 sinceDay 会阻塞事件循环那么久。
-   * 缺口 #14 明确要求「管理 API 应当总是传它」。
+   * 所以管理 API 总是传它。
    */
   app.get("/stats", (c) => {
     if (deps.stats === undefined) {
@@ -259,7 +257,7 @@ export function createAdminRoutes(deps: AdminDeps): Hono {
   /**
    * 改配置。
    *
-   * 缺口 #1 到期。整个流程:读体(有上限)→ 过 patch schema → 纯函数合并
+   * 整个流程:读体(有上限)→ 过 patch schema → 纯函数合并
    * (含全量 `ConfigSchema` 与引用完整性)→ 原子写 → 换进程内引用。
    *
    * **任何一步失败都不落盘**,而且失败类型区分开 —— 「id 打错了」(404)与
@@ -269,9 +267,9 @@ export function createAdminRoutes(deps: AdminDeps): Hono {
     let raw: Uint8Array;
     try {
       /*
-       * **有界读取**。先前是「查 content-length + 读完再量」，而
-       * `transfer-encoding: chunked` 根本不给那个头，于是整条检查被绕过
-       * （第十轮审核实测）。现在边读边数，理由见 `server/boundedBody.ts`。
+       * **有界读取**。不能「查 content-length + 读完再量」：
+       * `transfer-encoding: chunked` 根本不给那个头，于是整条检查被绕过。
+       * 所以边读边数，理由见 `server/boundedBody.ts`。
        */
       raw = await readBoundedBody(c.req.raw, MAX_ADMIN_BODY_BYTES);
     } catch (err) {
@@ -339,29 +337,28 @@ export function createAdminRoutes(deps: AdminDeps): Hono {
   /**
    * 探测出口并**把实测 IP 写回配置**。
    *
-   * ## 这个端点补的是一条结构性缺口
+   * ## 为什么需要这个端点
    *
-   * Phase 9 接上 Overview 时实测发现：`isolation` 恒为
+   * 没有它，`isolation` 恒为
    * `{ groups: [], unknownWorkerIds: [全部], isolated: false }` —— 出口隔离视图
    * **结构上永远无法成立**。两个原因叠在一起：
    *
-   * 1. `applyProbeResult()`（纯函数，把实测 IP 并回 `Proxy`）**零生产调用点** ——
-   *    探测跑了、`probe_results` 该记了，但 `config.proxies[].egressIp` 从未被写过。
-   * 2. 唯一跑探测的地方是 `doctor.mjs`，而它**自建** `EgressService` 且只读配置
+   * 1. 只探测不写回的话，`probe_results` 有记录，但 `config.proxies[].egressIp`
+   *    从未被写过 —— 把实测 IP 并回 `Proxy` 的只有 `applyProbeResult()`。
+   * 2. `doctor.mjs` **自建** `EgressService` 且只读配置
    *    —— 它的实测结果留在自己进程里，服务这边看不到。
    *
-   * 于是「按实测 `egressIp` 分组」这条规划核心要求(出口隔离正是本项目存在的
-   * 理由)一直没有数据来源。现在有了:探测走**服务自己的** `EgressService`
+   * 于是「按实测 `egressIp` 分组」这条核心要求(出口隔离正是本项目存在的
+   * 理由)需要服务侧的数据来源:探测走**服务自己的** `EgressService`
    * (与转发共用同一个 dispatcher 池与 selector 锁 —— 那是不变量 #7 的延伸,
    * 否则量到的出口不是转发实际用的那个),结果经 `applyProbeResult` 并回配置并落盘。
    *
    * ## 同步返回,不做长任务
    *
-   * 规划里批量探测是个带状态机的长任务(`idle|screening|running|paused|...`),
-   * 那属于 ProxyPool 页(下一批)。这里先给一个同步版本:本机代理数是个位数,
-   * 实测三个节点约 6 秒 —— 一个同步请求可以接受,而 Overview 需要
-   * 「点一下就能看到隔离报告」这个最小能力。长任务状态机不因此变成死代码:
-   * 几十个节点的批测仍然需要它。
+   * 批量探测是个带状态机的长任务(`idle|screening|running|paused|...`),
+   * 见 `/batch-probe`,服务于代理池页。这里是同步版本:只探在用的出口,
+   * 个位数节点约 6 秒 —— 一个同步请求可以接受,而 Overview 需要
+   * 「点一下就能看到隔离报告」这个最小能力。几十个节点的批测仍走长任务。
    */
   app.post("/probe", async (c) => {
     if (deps.egress === undefined) {
@@ -396,21 +393,20 @@ export function createAdminRoutes(deps: AdminDeps): Hono {
      * 「这个代理的出口是什么」这条已知事实消失,否则隔离视图会在每次抖动时
      * 把已确认隔离的节点退回「未知」。那条规则在纯函数里,这里只负责接线。
      *
-     * ## 合并前必须**重读**配置（第十轮审核）
+     * ## 合并前必须**重读**配置
      *
      * `probeAll` 实测约 6 秒，那几秒足够用户在 Worker 页改个名并保存。
-     * 先前这里用的是探测**开始前**那份快照，于是探测返回后写回时把用户的
+     * 若用探测**开始前**那份快照，探测返回后写回时会把用户的
      * 改动凭空覆盖掉 —— 响应 200、`changed: true`，没有任何症状。
      *
      * 同一文件的订阅刷新（`POST /subscriptions/:id/refresh`）与
-     * `batchRunner.#persist` 都显式防了这个并写明了理由；三处同类路径里
-     * 只有这一处漏了，正是纪律 #4 的形态。
+     * `batchRunner.#persist` 也防了这个；三处同类路径必须一致（纪律 #4）。
      */
     const byProxy = new Map(results.map((r) => [r.proxyId, r.outcome] as const));
     /*
      * 走 `applyProbeResults` 而不是自己 map 一遍 proxies —— 它同时处理
      * **本机直连**那条（合成 id `__direct__` → `gateway.directEgressIp`）。
-     * 先前这里只并 proxies，于是直连的测量被静默丢弃（缺口 #28）。
+     * 只并 proxies 的话，直连的测量会被静默丢弃。
      */
     const fresh = deps.configOf();
     const merged = applyProbeResults(fresh, byProxy);
@@ -429,13 +425,13 @@ export function createAdminRoutes(deps: AdminDeps): Hono {
      * 返回**每个出口的结果**，失败的也要给出原因。
      *
      * 只回「成功几个」会让「为什么那个节点探不出来」无从查证，而那恰好是
-     * 用户最需要的信息（本机实测过一次：混合端口配错时全部桥接代理传输失败，
+     * 用户最需要的信息（例如混合端口配错时全部桥接代理传输失败，
      * 而控制面是通的 —— 只有逐条的 failureKind 能指出方向）。
      */
     /*
-     * 过一遍 schema —— 与其余端点一致（缺口 #25）。
+     * 过一遍 schema —— 与其余端点一致。
      *
-     * 先前这一条是唯一绕过 schema 的管理响应。过 schema 挡的不是今天的泄漏
+     * 过 schema 挡的不是今天的泄漏
      * （今天没有），而是"将来新增一个字段时忘了想它该不该出去" ——
      * 那种漏洞没有任何症状，响应照常返回，只是多带了一样东西。
      */
@@ -454,7 +450,7 @@ export function createAdminRoutes(deps: AdminDeps): Hono {
   });
 
   /**
-   * 刷新一个订阅（Phase 10）。
+   * 刷新一个订阅。
    *
    * 三层各司其职：`fetchSubscription` 负责多 UA 协商（网络），
    * `parseSubscription` 负责认格式（纯函数），`importSubscriptionNodes`
@@ -571,7 +567,7 @@ export function createAdminRoutes(deps: AdminDeps): Hono {
   });
 
   /**
-   * 代理池（批次 2）。
+   * 代理池。
    *
    * 与 Overview 一样是**聚合**端点：这一页要同时显示代理列表、Clash 内核状态
    * 与隔离报告，而三者必须来自同一时刻 —— 分开拿会让「这个节点没出口 IP」
@@ -598,7 +594,7 @@ export function createAdminRoutes(deps: AdminDeps): Hono {
   });
 
   /**
-   * 模型列表（批次 2）。
+   * 模型列表。
    *
    * **只读缓存,绝不发请求** —— 与 Overview 同一条规则。目录拿不到时
    * `catalogAvailable: false` 且列表为空，而**不是**返回一个空列表就完事:
@@ -663,9 +659,8 @@ export function createAdminRoutes(deps: AdminDeps): Hono {
      * 再返回 500 —— 体积闸门存在的理由恰恰是"不要读那么多"，
      * 而它是否生效不该取决于另一个组件的状态。
      *
-     * 这条**先前完全没有上限** —— `MAX_ADMIN_BODY_BYTES` 是本文件的常量，
-     * 而两个写端点里只有 `PATCH /config` 用它：上限写在了调用点而不是闸门上
-     * （第十轮审核实测 8 MiB 的 body 被照常接受）。
+     * `MAX_ADMIN_BODY_BYTES` 是本文件的常量，每个写端点都必须显式用它：
+     * 上限写在调用点而不是闸门上，漏一处就是 8 MiB 的 body 被照常接受。
      */
     let action: string;
     try {

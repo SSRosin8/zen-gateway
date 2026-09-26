@@ -14,11 +14,11 @@ const execFileAsync = promisify(execFile);
 const PROJECT = resolve(import.meta.dirname, "..", "..");
 
 /**
- * Phase 4（上游协议发现）的回归守卫。
+ * 上游协议发现的回归守卫。
  *
- * ## 这一阶段的交付物与规划设想的不同,原因写在 docs/upstream-quirks.md
+ * ## 脚本为什么不做字段级发现,原因写在 docs/upstream-quirks.md
  *
- * 规划要 `discover-upstream.mjs` 去「逐字段定位被拒原因」。实测做不到:
+ * 「逐字段定位被拒原因」实测做不到:
  * 免费额度闸门**短路在请求体校验之前**(把 `messages` 写成字符串再塞一个
  * `client_metadata`,响应与合法请求逐字节相同),所以字段级怪癖探不到;
  * 而另一条路(付费模型能过体校验)要真实计费,超出本网关的范围。
@@ -211,7 +211,7 @@ describe("discover-upstream.mjs 自身是一道关卡,必须真的会失败", ()
   it("闸门开始校验请求体时退出 1 —— 那意味着字段级发现重新可做", async () => {
     /*
      * `bodySensitive` 让响应随请求体长度变化,于是「畸形体与合法体逐字节相同」
-     * 这条期望不再成立。它一旦变红,就说明 Phase 4 原本的范围
+     * 这条期望不再成立。它一旦变红,就说明字段级发现
      * (逐字段定位被拒原因)重新可行 —— 这是本项目最想知道的上游变化之一。
      */
     const { code, out } = await runDiscover({ bodySensitive: true });
@@ -244,13 +244,10 @@ describe("discover-upstream.mjs 自身是一道关卡,必须真的会失败", ()
 describe("package.json 的 script 不得指向不存在的文件", () => {
   it("每个 node scripts/*.mjs 条目的目标都存在", async () => {
     /*
-     * 规划明确定过这条规矩:「`setup`/`doctor`/`discover:upstream` 的
-     * package.json 条目**与脚本文件同阶段添加**,不预先挂空条目 ——
+     * package.json 条目**与脚本文件一起添加**,不预先挂空条目 ——
      * 指向不存在文件的 script 是清单里的假话,运行时只会得到一句
-     * `Cannot find module`」。
-     *
-     * 但它先前只是一条约定,没有守卫。Phase 8 还要加 `setup` 与 `doctor`,
-     * 那正是最容易先挂条目后写文件的时刻,所以守卫现在就装上。
+     * `Cannot find module`。新增脚本时最容易先挂条目后写文件,
+     * 约定本身挡不住,所以要有守卫。
      */
     const pkg = JSON.parse(await readFile(join(PROJECT, "package.json"), "utf8")) as {
       scripts: Record<string, string>;
@@ -339,8 +336,6 @@ describe("上游错误响应的 content-type 原样透传(怪癖 §6)", () => {
      * 发了什么,而"只有某些错误码解析不了"这种症状极难归因 —— 若网关顺手把
      * content-type 改成 application/json,这个上游 bug 就被我们藏起来了,
      * 排查的人会去怀疑自己的客户端。
-     *
-     * 这条先前没有任何断言(全仓 grep `text/plain` 在 tests/integration 下零命中)。
      */
     await startUpstream((_req, res) => {
       res.writeHead(401, { "content-type": "text/plain;charset=UTF-8" });

@@ -1,9 +1,24 @@
 <!doctype html>
-<html lang="zh-CN" data-theme="light">
+<html lang="zh-CN">
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>zen-gateway</title>
+    <!-- 首屏前解析配色，避免 React 挂载前先闪一帧浅色。键名与判定须与 lib/theme.ts 一致。 -->
+    <script>
+      (function () {
+        var pref = null;
+        try {
+          pref = window.localStorage.getItem("zg-theme");
+        } catch (e) {}
+        var dark =
+          pref === "dark" ||
+          (pref !== "light" &&
+            typeof window.matchMedia === "function" &&
+            window.matchMedia("(prefers-color-scheme: dark)").matches);
+        document.documentElement.setAttribute("data-theme", dark ? "dark" : "light");
+      })();
+    </script>
   </head>
   <body>
     <div id="root"></div>

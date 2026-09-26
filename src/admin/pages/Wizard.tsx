@@ -1,6 +1,6 @@
 import { useState } from "react";
 import type { Overview } from "../../shared/contract.ts";
-import { Mono, Panel, Strong } from "../components/Panel.tsx";
+import { Mono, Panel, SecondaryButton, Strong } from "../components/Panel.tsx";
 import { StatusIndicator } from "../components/StatusIndicator.tsx";
 import { openCodeConfigSnippet, type OpenCodeVersion } from "../lib/openCodeConfig.ts";
 
@@ -10,18 +10,19 @@ import { openCodeConfigSnippet, type OpenCodeVersion } from "../lib/openCodeConf
  * ## 它只在「还不能用」时出现
  *
  * 判据是 `pool.total === 0`（没有任何在候选池里的 Worker）—— 那时转发**一定**
- * 失败，所以引导比任何统计都重要。配好之后它自动消失，不需要一个「关闭」按钮:
- * 一个能被关掉的向导会在用户误关后再也找不回来。
+ * 失败。配好之后它自动消失，不需要「关闭」按钮：一个能被关掉的向导会在用户
+ * 误关后再也找不回来。
  *
  * ## 分步引导到「第一次成功生成」
  *
- * 规划要求的是这个 —— 不是一个功能清单。所以每一步都给**可直接跑的命令**
- * 与**可复制的配置**，并标出当前进行到哪一步（前面的步骤已完成就打勾）。
+ * 每一步给可直接执行的操作（按钮、命令或可复制的配置），并标出已完成的步骤。
+ * Worker 在 Worker 页创建并立即生效，不需要编辑配置文件或重启；
+ * `npm run setup` 只导入出口代理与 Clash 内核，不创建 Worker。
  *
  * ## Relay Token 不渲染进 DOM
  *
  * 它是凭证。向导给的是「去哪儿取」而不是值本身 —— 把它渲染出来等于让它进
- * 截图、进浏览器扩展、进 devtools 的保存。这与整个管理面同一条规则。
+ * 截图、进浏览器扩展、进 devtools 的保存。
  */
 
 type Step = {
@@ -30,7 +31,7 @@ type Step = {
   readonly body: React.ReactNode;
 };
 
-export function Wizard({ data }: { data: Overview }) {
+export function Wizard({ data, onCreateWorker }: { data: Overview; onCreateWorker: () => void }) {
   const hasProxy = data.proxies.total > 0;
   const hasWorker = data.workers.length > 0;
   const hasUsableWorker = data.pool.total > 0;
@@ -44,9 +45,7 @@ export function Wizard({ data }: { data: Overview }) {
       done: hasCatalog,
       title: "上游目录能拉到",
       body: hasCatalog ? (
-        <p className="text-text-muted">
-          已拉到 {data.catalog.freeCount} 个免费模型。
-        </p>
+        <p className="text-text-muted">已拉到 {data.catalog.freeCount} 个免费模型。</p>
       ) : (
         <>
           <p className="text-text-muted">
@@ -63,26 +62,8 @@ export function Wizard({ data }: { data: Overview }) {
       ),
     },
     {
-      done: hasProxy,
-      title: "配出口代理",
-      body: hasProxy ? (
-        <p className="text-text-muted">
-          已有 {data.proxies.total} 个代理，{data.proxies.withEgressIp} 个已实测回显出口 IP。
-        </p>
-      ) : (
-        <>
-          <p className="text-text-muted">
-            为不同 Zen 账号配置不同的出口，并用 IP 回显目标检查是否共用公网 IP。
-            回显结果只反映该目标；Zen 实际请求需在发起期间核对上游连接。一条命令自动探测
-            本机 Clash 并导入节点：
-          </p>
-          <Cmd>npm run setup</Cmd>
-        </>
-      ),
-    },
-    {
       done: hasUsableWorker,
-      title: "加 Worker（每个 Zen key 一个）",
+      title: "新增 Worker",
       body: hasUsableWorker ? (
         <p className="text-text-muted">
           {data.pool.total} 个 Worker 在候选池里，{data.pool.ready} 个就绪。
@@ -91,18 +72,34 @@ export function Wizard({ data }: { data: Overview }) {
         <>
           <p className="text-text-muted">
             {hasWorker
-              ? "已有 Worker 条目，但没有一个在候选池里 —— 多半是缺 API key 或被停用了。"
-              : "转发需要真实的 Zen API key。"}
-            匿名 Worker 可以不填 key；认证 Worker 必须填写真实的 Zen API key。
+              ? "已有 Worker 条目，但没有一个在候选池里 —— 多半是被停用了，或认证 Worker 缺少 API key。"
+              : "在 Worker 页新增一个 Worker，保存后立即生效，不需要重启。"}{" "}
+            匿名 Worker 可以不填 key；认证 Worker 需要填写你自己的 Zen API key。
           </p>
-          <p className="mt-2 text-text-muted">
-            编辑 <Mono>data/config.json</Mono> 的 <Mono>workers</Mono> 数组，
-            每个 key 一条，<Mono>proxyId</Mono> 绑不同的代理才有隔离意义：
+          <div className="mt-2">
+            {/* 次按钮：向导与所在页面同屏，页面自己的主操作仍是唯一的主按钮。 */}
+            <SecondaryButton onClick={onCreateWorker}>
+              {hasWorker ? "去 Worker 页检查" : "去新增 Worker"}
+            </SecondaryButton>
+          </div>
+        </>
+      ),
+    },
+    {
+      done: hasProxy,
+      title: "可选：配置出口代理",
+      body: hasProxy ? (
+        <p className="text-text-muted">
+          已有 {data.proxies.total} 个代理，{data.proxies.withEgressIp} 个已实测回显出口 IP。
+          在 Worker 编辑表单里选择出口即可绑定。
+        </p>
+      ) : (
+        <>
+          <p className="text-text-muted">
+            不配代理时 Worker 走本机直连。要让不同 Worker 使用不同出口，先导入本机 Clash
+            的节点（只导入代理与 Clash 内核，不创建 Worker），重启后在 Worker 编辑表单里选择出口：
           </p>
-          <Cmd>{`{ "id": "w1", "kind": "authenticated", "apiKey": "<你的 key>", "proxyId": "<代理 id>" }\n{ "id": "anon-1", "kind": "anonymous", "proxyId": "<代理 id>" }`}</Cmd>
-          <p className="mt-2 text-text-muted">
-            改完跑 <Mono>npm run restart</Mono>（或用「代理池」页的批量探测实测回显出口）。
-          </p>
+          <Cmd>{"npm run setup\nnpm run restart"}</Cmd>
         </>
       ),
     },
@@ -149,7 +146,7 @@ export function Wizard({ data }: { data: Overview }) {
             然后用真实 OpenCode CLI 验证当前可用的免费 Chat 模型。<Mono>curl</Mono>
             的请求形态不同，不能替代客户端验收：
           </p>
-          <Cmd>opencode run --model opencode/space-bunny-free &quot;Reply with exactly: OK&quot;</Cmd>
+          <Cmd>opencode run --model opencode/big-pickle &quot;Reply with exactly: OK&quot;</Cmd>
         </>
       ),
     },
@@ -160,9 +157,7 @@ export function Wizard({ data }: { data: Overview }) {
       <div className="rounded-md bg-surface-accent px-4 py-3">
         <p className="font-serif text-lg">还不能转发</p>
         <p className="mt-1 text-text-muted">
-          {hasWorker
-            ? "有 Worker 条目，但没有一个能用。"
-            : "还没有可用的 Worker —— 按下面几步配一遍。"}
+          {hasWorker ? "有 Worker 条目，但没有一个能用。" : "还没有可用的 Worker —— 按下面几步配一遍。"}
         </p>
       </div>
 
@@ -181,6 +176,18 @@ export function Wizard({ data }: { data: Overview }) {
         ))}
       </ol>
     </Panel>
+  );
+}
+
+/** 向导不完整显示的页面上的一行提示。 */
+export function WizardNotice() {
+  return (
+    <div className="rounded-md border border-border-strong bg-surface px-4 py-3" role="status">
+      <StatusIndicator tone="warn" icon="!" label="还没有可用的 Worker，转发会失败。" />{" "}
+      <a href="#overview" className="text-accent-fg underline">
+        去概览页查看首启步骤
+      </a>
+    </div>
   );
 }
 

@@ -12,7 +12,7 @@ import { ConfigSchema, type Config } from "../../src/shared/schema.ts";
 import type { ClashController } from "../../src/core/proxy/clash/controller.ts";
 
 /**
- * 第四轮审核的**控制流**侧守卫。
+ * **控制流**侧守卫。
  *
  * 这一组补的是三处"改坏了测试也不报警"的位置。其中桥接转发分支最要紧:
  * 出口隔离是这个项目存在的唯一理由,而它在**转发**侧先前只有注释没有断言
@@ -99,11 +99,10 @@ describe("桥接转发：select 与建连必须原子，且锁在响应头后释
 
   it("**`select()` 失败包成 `EgressSetupError`** —— 本机 Clash 配置错不该冷却 Worker", async () => {
     /*
-     * ## 这条是**生产验证**查出来的，五个审核 agent 都没查到
+     * ## 触发条件
      *
      * 触发条件很窄：本机 Clash 开了鉴权而 `data/config.json` 里 `apiSecret`
-     * 为空。我在第六轮的生产验证里撞上了它 —— 本机的 Clash 内核换了个
-     * 要求鉴权的版本。
+     * 为空，例如 Clash 内核换成了要求鉴权的版本。
      *
      * 切 selector 是**本机控制面**操作，它失败意味着本机配置不对（Clash 开了
      * 鉴权、secret 变了、分组改名）。`fetch.ts` 里另外四处配置错误都包成了
@@ -276,11 +275,8 @@ describe("桥接转发：select 与建连必须原子，且锁在响应头后释
       deps(config, events, async () => lazyBody, locks),
     );
 
-    // 响应头已到,响应体尚未读 —— 此时锁必须已经释放。
+    // 响应头已到,响应体尚未读 —— 此时锁必须已经释放:再发一次能立刻拿到锁。
     expect(bodyRead).toBe(false);
-    expect(locks.forBridge("k1").pending).toBe(0);
-
-    // 再发一次能立刻拿到锁,证明没被上一条的响应体堵住。
     let secondRan = false;
     await locks.forBridge("k1").run(async () => {
       secondRan = true;
@@ -297,6 +293,12 @@ describe("桥接转发：select 与建连必须原子，且锁在响应头后释
     const events: string[] = [];
     const config = bridgeConfig();
     const locks = new SelectorLockRegistry();
+    const asked: string[] = [];
+    const forBridge = locks.forBridge.bind(locks);
+    locks.forBridge = (id: string) => {
+      asked.push(id);
+      return forBridge(id);
+    };
 
     await fetchUpstream(
       { url: "http://upstream.invalid/v1/x", method: "POST", headers: {}, body: null, proxyId: null },
@@ -304,7 +306,7 @@ describe("桥接转发：select 与建连必须原子，且锁在响应头后释
     );
 
     expect(events).toEqual(["fetch"]);
-    expect(locks.size).toBe(0);
+    expect(asked).toEqual([]);
   });
 });
 

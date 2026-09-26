@@ -5,21 +5,22 @@ import type {
   SubscriptionRefresh,
 } from "../../shared/contract.ts";
 import { isActive, percentages } from "../../shared/batchProbe.ts";
+import { useState } from "react";
 import { StatusIndicator, type StatusTone } from "../components/StatusIndicator.tsx";
-import { Metric, Mono, Panel, PrimaryButton, Strong } from "../components/Panel.tsx";
+import { Metric, Mono, Panel, PrimaryButton, SecondaryButton, Strong } from "../components/Panel.tsx";
 import { DataTable, TableFilters, type Column } from "../components/DataTable.tsx";
-import type { ViewState } from "../lib/router.ts";
+import { ConfirmDialog } from "../components/ConfirmDialog.tsx";
+import { toHash, type ViewState } from "../lib/router.ts";
 import { useBatchProbe, useSubscriptionRefresh } from "../lib/api.ts";
-// 复用 Overview 那份 —— 两处各写一份会让同一个时长在两页显示成不同措辞。
-import { humanMs } from "./OverviewPage.tsx";
+import { formatLocalTime, humanMs } from "../lib/format.ts";
 
 /**
  * 代理池页。
  *
  * 两个标签：**列表**（分页）与**回显出口**（不分页）。
  *
- * 隔离视图刻意不分页 —— 规划明确：那个任务本身就是「一眼看全、找出共用出口
- * 的节点」，分页会破坏它的意义。数量大时靠浏览器原生滚动，而不是切成 6 页
+ * 隔离视图刻意不分页：那个任务本身就是「一眼看全、找出共用出口的节点」，
+ * 分页会破坏它的意义。数量大时靠浏览器原生滚动，而不是切成 6 页
  * 让用户在页间比对 IP。
  */
 
@@ -37,11 +38,7 @@ function proxyTone(p: ProxyView): "success" | "warn" | "error" | "neutral" {
  * **不能直接用 `!resolvable`**:`resolveProxy` 对**已停用**的代理返回的也是一个
  * 失败（`{kind:"disabled"}`）,而停用是用户的正常操作,不是配置错误。
  * 于是 `!resolvable` 计数会把「我故意关掉的三个节点」报成
- * 「3 个配置自身矛盾」并标红 —— 第八轮审核实测:4 个代理里 3 个仅是停用,
- * 卡片就显示「不可解析 3」,而真正坏掉的是 0 个。
- *
- * 这与 `proxyStatus` 那个 early-return 缺陷同源,只是换了载体:那次修的是
- * **单行的原因显示**,这里修的是**指标与筛选**。同一个误解在三处各有一份表现。
+ * 「3 个配置有问题」并标红，而真正坏掉的是 0 个。指标与筛选都用这个判据。
  */
 function isBroken(p: ProxyView): boolean {
   return p.enabled && !p.resolvable;
@@ -51,12 +48,11 @@ function proxyStatus(p: ProxyView): { tone: StatusTone; icon: string; label: str
   /*
    * ## 停用与不可解析要**一起**说，不是二选一
    *
-   * 第一版先判 `!enabled` 就 return「已停用」—— 而 `resolveProxy` 对
-   * 「已停用」返回的正是一个失败（`{ kind: "disabled" }`）。于是**最常见的
-   * 那条不可解析路径**永远显示不出原因，而 `unresolvableReason` 这个字段
-   * 在那种情况下是死信息。测试的输出把它暴露了出来：那一行只有「已停用」。
+   * `resolveProxy` 对「已停用」返回的正是一个失败（`{ kind: "disabled" }`）。
+   * 先判 `!enabled` 就 return「已停用」的话，最常见的那条不可解析路径
+   * 永远显示不出原因。
    *
-   * 现在停用时也把服务端给的原因带上 —— 它对「停用」这种自明的情况是冗余的，
+   * 所以停用时也把服务端给的原因带上 —— 它对「停用」这种自明的情况是冗余的，
    * 但对「引用了不存在的内核」「Clash 没开」这些就是**唯一**的线索，
    * 而那些同样会让 `resolvable` 为 false。措辞统一来自
    * `describeResolveFailure`，与转发失败时用户看到的是同一句话。
@@ -88,6 +84,7 @@ function proxyStatus(p: ProxyView): { tone: StatusTone; icon: string; label: str
 function BatchPanel({ progress, control }: { progress: BatchProgressView; control: ReturnType<typeof useBatchProbe> }) {
   const pct = percentages(progress);
   const running = isActive(progress);
+  const [confirming, setConfirming] = useState(false);
 
   const stateLabel: Record<BatchProgressView["state"], string> = {
     idle: "未开始",
@@ -127,7 +124,7 @@ function BatchPanel({ progress, control }: { progress: BatchProgressView; contro
               取消
             </SecondaryButton>
           )}
-          <PrimaryButton onClick={() => void control.send("start")} disabled={running}>
+          <PrimaryButton onClick={() => setConfirming(true)} disabled={running}>
             {running ? "进行中…" : "开始批量探测"}
           </PrimaryButton>
         </div>
@@ -171,12 +168,36 @@ function BatchPanel({ progress, control }: { progress: BatchProgressView; contro
         </p>
       )}
 
-      {control.error !== null && <p className="mt-3 text-error">{control.error}</p>}
+      <div aria-live="polite">
+        {control.error !== null && (
+          <p role="alert" className="mt-3">
+            <StatusIndicator tone="error" icon="✕" label={control.error} />
+          </p>
+        )}
+      </div>
 
       <p className="mt-3 text-text-muted">
         进度由服务端持有 —— 刷新页面或关掉再开都能接着看。桥接探测会切换
         Clash selector（那是进程外的全局状态），所以<Strong>同一时刻只允许一批</Strong>。
       </p>
+
+      <ConfirmDialog
+        open={confirming}
+        title="开始批量探测"
+        confirmLabel="开始探测"
+        onCancel={() => setConfirming(false)}
+        onConfirm={() => {
+          setConfirming(false);
+          void control.send("start");
+        }}
+      >
+        <p>
+          经 Clash 桥接的节点会逐个<Strong>切换 Clash 分组的选中节点</Strong>。那是 Clash
+          的全局状态：探测期间本机其他走这个分组的流量也会跟着换出口，结束后不会自动切回。
+        </p>
+        <p>探测成功的出口可能会自动新建对应的 Worker，结果写回配置。</p>
+        <p>探测期间可以暂停或取消。</p>
+      </ConfirmDialog>
     </Panel>
   );
 }
@@ -213,27 +234,6 @@ function ProgressBar({
         <div className="h-full bg-accent-fill" style={{ width: `${percent ?? 0}%` }} />
       </div>
     </div>
-  );
-}
-
-function SecondaryButton({
-  onClick,
-  disabled,
-  children,
-}: {
-  onClick: () => void;
-  disabled?: boolean;
-  children: React.ReactNode;
-}) {
-  return (
-    <button
-      type="button"
-      onClick={onClick}
-      disabled={disabled}
-      className="min-h-[44px] rounded-sm border border-border-strong px-3 disabled:cursor-not-allowed disabled:border-border disabled:text-text-muted"
-    >
-      {children}
-    </button>
   );
 }
 
@@ -297,7 +297,7 @@ function IsolationTab({ data }: { data: ProxyList }) {
 }
 
 /**
- * 订阅标签（Phase 10）。
+ * 订阅标签。
  *
  * ## 为什么 URL 只显示脱敏串
  *
@@ -349,13 +349,16 @@ function SubscriptionTab({ data }: { data: ProxyList }) {
                     <Mono>{s.urlRedacted}</Mono>
                   </div>
                 </div>
-                <PrimaryButton onClick={() => void refresh(s.id)} disabled={running}>
+                {/* 每行一个刷新按钮，用描边按钮：页面的主操作是批量探测。 */}
+                <SecondaryButton onClick={() => void refresh(s.id)} disabled={running}>
                   {running ? "刷新中…" : "刷新"}
-                </PrimaryButton>
+                </SecondaryButton>
               </div>
 
               <div className="mt-3 flex flex-wrap items-center gap-4">
-                <StatusIndicator {...subscriptionStatus(s)} />
+                <span title={s.lastFetchedAt ?? undefined}>
+                  <StatusIndicator {...subscriptionStatus(s)} />
+                </span>
                 <span className="text-text-muted">
                   当前 <Mono>{s.proxyCount}</Mono> 个节点
                   {s.lastFormat === null ? null : (
@@ -367,8 +370,14 @@ function SubscriptionTab({ data }: { data: ProxyList }) {
                 </span>
               </div>
 
-              {state.status === "done" && <RefreshReport result={state.result} />}
-              {state.status === "error" && <p className="mt-2 text-error">{state.message}</p>}
+              <div aria-live="polite">
+                {state.status === "done" && <RefreshReport result={state.result} />}
+                {state.status === "error" && (
+                  <p role="alert" className="mt-2">
+                    <StatusIndicator tone="error" icon="✕" label={state.message} />
+                  </p>
+                )}
+              </div>
             </li>
           );
         })}
@@ -381,8 +390,10 @@ function SubscriptionTab({ data }: { data: ProxyList }) {
  * 订阅的状态标签。
  *
  * 四态而不是两态 —— 见 `SubscriptionTab` 的说明。注意**停用**时也要把
- * 失败原因带上（如果有）：那是第八轮在 `proxyStatus` 上踩过的 early return
- * 形态，一条 `return` 会让最常见的那类输入看不到原因。
+ * 失败原因带上（如果有）：与 `proxyStatus` 同一个理由，一条 early return
+ * 会让最常见的那类输入看不到原因。
+ *
+ * 拉取时间按本地时区显示；完整 ISO 串放在外层元素的 `title` 上。
  */
 export function subscriptionStatus(s: ProxyList["subscriptions"][number]): {
   tone: StatusTone;
@@ -400,15 +411,15 @@ export function subscriptionStatus(s: ProxyList["subscriptions"][number]): {
     // 「从没拉过」不是错误 —— 但也绝不能显示成成功。
     return { tone: "warn", icon: "?", label: "从未拉取" };
   }
-  return { tone: "success", icon: "✓", label: `上次拉取 ${s.lastFetchedAt.slice(0, 19).replace("T", " ")}` };
+  return { tone: "success", icon: "✓", label: `上次拉取 ${formatLocalTime(s.lastFetchedAt)}` };
 }
 
 /** 一次刷新的结果明细。 */
 function RefreshReport({ result }: { result: SubscriptionRefresh }) {
   if (!result.ok) {
     return (
-      <p className="mt-2 text-error">
-        刷新失败（{result.failureKind}）：{result.reason}
+      <p role="alert" className="mt-2">
+        <StatusIndicator tone="error" icon="✕" label={`刷新失败（${result.failureKind}）：${result.reason}`} />
       </p>
     );
   }
@@ -457,7 +468,7 @@ export function ProxyPage({
   /*
    * 过滤与排序在前端做。
    *
-   * 数据量是几十行（本机 69 个节点），一次过滤是微秒级 —— 让服务端做会
+   * 数据量是几十行，一次过滤是微秒级 —— 让服务端做会
    * 把每次输入一个字符变成一次 HTTP 请求。而搜索词本身在 URL 里，
    * 所以刷新仍然还原同一视图。
    */
@@ -514,8 +525,7 @@ export function ProxyPage({
       header: "本地端口",
       numeric: true,
       /*
-       * 这一列必须显示 —— Phase 8 实测出的高风险字段：桥接时它是本机 Clash 的
-       * 混合端口，与内核实际 `mixed-port` 不一致会让所有桥接代理静默失败
+       * 这一列必须显示 —— 高风险字段：桥接时它是本机 Clash 的混合端口，与内核实际 `mixed-port` 不一致会让所有桥接代理静默失败
        * （而控制面是通的）。
        */
       render: (p) => <Mono>{p.port}</Mono>,
@@ -543,7 +553,7 @@ export function ProxyPage({
             hint="参与调度"
           />
           <Metric
-          label="已实测回显出口"
+            label="已实测回显出口"
             value={String(data.proxies.filter((p) => p.egressIp !== null).length)}
             hint="有公网 IP"
           />
@@ -558,20 +568,23 @@ export function ProxyPage({
 
       <BatchPanel progress={batch.progress} control={batch} />
 
-      <div className="flex gap-1">
-        <TabButton active={tab === "list"} onClick={() => navigate({ tab: "list" })} label="列表" />
-        <TabButton
-          active={tab === "isolation"}
-          onClick={() => navigate({ tab: "isolation" })}
-          label="回显出口"
-        />
-        <TabButton
-          active={tab === "subscriptions"}
-          onClick={() => navigate({ tab: "subscriptions" })}
-          label={`订阅${data.subscriptions.length > 0 ? `（${data.subscriptions.length}）` : ""}`}
-        />
+      <div className="flex flex-wrap gap-1" role="tablist" aria-label="代理池视图">
+        {TABS.map((t) => (
+          <TabLink
+            key={t.id}
+            id={t.id}
+            active={tab === t.id}
+            onSelect={() => navigate({ tab: t.id })}
+            label={
+              t.id === "subscriptions" && data.subscriptions.length > 0
+                ? `${t.label}（${data.subscriptions.length}）`
+                : t.label
+            }
+          />
+        ))}
       </div>
 
+      <div role="tabpanel" id={`proxy-panel-${tab}`} aria-labelledby={`proxy-tab-${tab}`}>
       {tab === "isolation" ? (
         <IsolationTab data={data} />
       ) : tab === "subscriptions" ? (
@@ -593,6 +606,7 @@ export function ProxyPage({
             placeholder="搜索节点名 / id / 出口 IP…"
           />
           <DataTable
+            label="代理节点"
             rows={filtered}
             columns={columns}
             rowKey={(p) => p.id}
@@ -614,29 +628,53 @@ export function ProxyPage({
           />
         </Panel>
       )}
+      </div>
     </div>
   );
 }
 
-function TabButton({
+const TABS = [
+  { id: "list", label: "列表" },
+  { id: "isolation", label: "回显出口" },
+  { id: "subscriptions", label: "订阅" },
+] as const;
+
+/**
+ * 页内标签。
+ *
+ * 语义上是 tablist/tab，元素是真实的 `<a href>`：标签状态在 hash 里，中键与
+ * 「在新标签页打开」照样可用。点击时调用 `navigate` 而不是只改 href，
+ * 让切换标签同时清掉上一个标签的页码（`navigate` 保留同页的其他状态）。
+ */
+function TabLink({
+  id,
   active,
-  onClick,
+  onSelect,
   label,
 }: {
+  id: string;
   active: boolean;
-  onClick: () => void;
+  onSelect: () => void;
   label: string;
 }) {
   return (
-    <button
-      type="button"
-      onClick={onClick}
-      aria-pressed={active}
-      className={`min-h-[44px] rounded-sm border px-4 ${
+    <a
+      role="tab"
+      id={`proxy-tab-${id}`}
+      href={toHash({ page: "proxy", tab: id, q: "", status: null, sort: null, page_: 1 })}
+      aria-selected={active}
+      aria-controls={`proxy-panel-${id}`}
+      onClick={(event) => {
+        // 修饰键点击交给浏览器（新标签页等）。
+        if (event.metaKey || event.ctrlKey || event.shiftKey || event.button !== 0) return;
+        event.preventDefault();
+        onSelect();
+      }}
+      className={`inline-flex min-h-[44px] items-center rounded-sm border px-4 no-underline ${
         active ? "border-accent-fg text-accent-fg font-medium" : "border-border-strong text-text-muted"
       }`}
     >
       {label}
-    </button>
+    </a>
   );
 }

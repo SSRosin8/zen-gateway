@@ -6,7 +6,7 @@ import {
 } from "../../src/core/proxy/subscription/fetch.ts";
 
 /*
- * 订阅拉取的多 UA 协商（Phase 10）。
+ * 订阅拉取的多 UA 协商。
  *
  * 解析本身在 `tests/unit/subscription.test.ts`（纯函数，穷举）。这里验的是
  * 只在真实网络上才存在的那些麻烦：同一个 URL 换 UA 换格式、超时预算、
@@ -165,8 +165,8 @@ describe("重定向", () => {
 
   it("重定向成环时按**跳数**停下，不是靠超时兜底", async () => {
     /*
-     * 变异测试逼出来的。第一版只断言"最终返回 false"，而把跳数上限
-     * 改成 100000 之后测试**依然全绿** —— 因为单次超时最后会把它掐断
+     * 不能只断言"最终返回 false"：把跳数上限
+     * 改成 100000 之后那样的测试**依然全绿** —— 因为单次超时最后会把它掐断
      * （四分类里的「条件被另一层顺带满足」）。
      *
      * 那不是同一件事：靠超时兜底意味着一个成环的订阅要卡满 15 秒，
@@ -267,7 +267,7 @@ describe("失败分类与脱敏", () => {
     /*
      * 订阅 URL 自带 token，而错误消息会进日志、进界面、进用户粘贴的报错。
      * 这一条扫**每一条**失败路径 —— 逐条写断言的话，下一个新增的失败分支
-     * 会不在任何断言里（那正是第八轮在字面 markdown 上踩过的形态）。
+     * 会不在任何断言里。
      */
     const failures: Array<[string, typeof fetch]> = [
       ["网络失败", vi.fn(async () => { throw new TypeError("fetch failed"); }) as unknown as typeof fetch],
@@ -296,7 +296,7 @@ describe("失败分类与脱敏", () => {
       expect(out.ok, name).toBe(false);
       if (out.ok) continue;
       expect(out.reason, name).not.toContain(TOKEN);
-      // 8 位前缀也不行 —— 查整段挡不住部分泄漏（第八轮的教训）。
+      // 8 位前缀也不行 —— 查整段挡不住部分泄漏。
       expect(out.reason, name).not.toContain(TOKEN.slice(0, 8));
     }
   });

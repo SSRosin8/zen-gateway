@@ -5,7 +5,7 @@ import type { Overview, WorkerView } from "../../src/shared/contract.ts";
 import { fakeOverview } from "./App.test.tsx";
 
 /*
- * Overview 页的组件契约（规划的「Phase 9 组件测试契约」）。
+ * Overview 页的组件契约。
  *
  * 用 Testing Library 表达，不做 HTML 字符串断言 —— 字符串断言
  * 正是字符串断言，无法迁移，其**契约意图**在这里重新表达。
@@ -50,8 +50,7 @@ describe("Worker 状态把三个事实分开", () => {
   it("停用 / 没 key / 冷却 / 就绪 各是不同的一句话", () => {
     /*
      * 这四种的下一步完全不同：去启用它 / 去填 key / 等 / 无事。
-     * 合成「不可用」就回到了 Phase 8 的状态 —— doctor 只能说
-     * 「可用(配置形态)」而用户仍然不知道原因。
+     * 合成「不可用」的话用户仍然不知道原因。
      */
     expect(workerStatus(worker({ enabled: false })).label).toBe("已停用");
     expect(
@@ -153,7 +152,7 @@ describe("出口隔离视图", () => {
      *      （「『还不知道』不算作已隔离」）本身含这三个字,子串碰撞。
      *   2. 改成「整页不含 success 色调」—— 而 Worker 行**正当地**是
      *      success:那个 Worker 确实就绪(`ready: true`),只是它的出口
-     *      没探测过。两件事互相独立,把它们绑在一起是我的断言错了。
+     *      没探测过。两件事互相独立,不能绑在一起断言。
      *
      * 真正要钉的是:**隔离这一条**不报成功。
      */
@@ -217,8 +216,11 @@ describe("空状态与目录状态", () => {
     render(<OverviewPage data={withWorkers([])} />);
 
     expect(screen.getByText(/还没有配置 Worker/)).toBeInTheDocument();
-    // 空状态的价值在于下一步 —— 与 doctor 的分层同一个理由。
-    expect(screen.getByText(/npm run setup/)).toBeInTheDocument();
+    // 空状态的价值在于下一步：指向 Worker 页，并说明匿名 Worker 不需要 key。
+    expect(screen.getByRole("link", { name: "Worker 页" })).toHaveAttribute("href", "#workers");
+    expect(screen.getByText(/匿名 Worker 不需要 key/)).toBeInTheDocument();
+    // setup 不创建 Worker，不能把它当作这里的下一步。
+    expect(screen.queryByText(/npm run setup/)).not.toBeInTheDocument();
   });
 
   it("目录拉不到显示「—」而不是 0", () => {
@@ -226,7 +228,7 @@ describe("空状态与目录状态", () => {
 
     /*
      * 「还没拿到目录」与「一个免费模型都没有」是两件事，后者才需要查
-     * freeSuffix。显示 0 会把用户引向错误方向 —— Phase 8 的 doctor 为此
+     * freeSuffix。显示 0 会把用户引向错误方向 —— doctor 为此
      * 专门分了两层。
      */
     expect(screen.getByText("—")).toBeInTheDocument();

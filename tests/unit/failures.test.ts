@@ -21,7 +21,7 @@ describe("classifyStatus", () => {
 
   it.each([
     [401, "auth"],
-    [403, "auth"],
+    [403, "forbidden"],
     [408, "timeout"],
     [429, "rate_limit"],
     [400, "bad_request"],
@@ -92,7 +92,7 @@ describe("shouldCooldown", () => {
     expect(shouldCooldown("unknown")).toBe(false);
   });
 
-  it.each(["rate_limit", "auth", "upstream_error", "transport", "timeout"] as FailureKind[])(
+  it.each(["rate_limit", "auth", "forbidden", "upstream_error", "transport", "timeout"] as FailureKind[])(
     "%s 需要冷却",
     (kind) => {
       expect(shouldCooldown(kind)).toBe(true);

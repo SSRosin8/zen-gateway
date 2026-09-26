@@ -103,11 +103,11 @@ export function applyConfigPatch(config: Config, patch: ConfigPatch): PatchResul
     const w = patch.workers;
 
     /*
-     * 同一请求里要删掉的 id —— 它们不参与"重复 id"判定（缺口 #27）。
+     * 同一请求里要删掉的 id —— 它们不参与"重复 id"判定。
      *
-     * 文件头承诺「删掉一个又同名新建的净效果是新建」，而先前的重复检查看的是
-     * `next.workers`（那里还有待删的那个），于是 `delete X` + `create X`
-     * 被拒 —— **注释与行为相反**。用户想换一个 Worker 的 id/key 时
+     * 文件头承诺「删掉一个又同名新建的净效果是新建」，而重复检查若看
+     * `next.workers`（那里还有待删的那个），`delete X` + `create X`
+     * 会被拒 —— **注释与行为相反**。用户想换一个 Worker 的 id/key 时
      * 必须发两次请求，而中间那一刻配置里少了一个 Worker。
      *
      * 只在 `create` 里排除，`update` 不排除：更新一个同请求内要删的 Worker
@@ -215,9 +215,9 @@ export function applyConfigPatch(config: Config, patch: ConfigPatch): PatchResul
   }
 
   /*
-   * `changed` 由**真的比一次**得出，而不是「有没有出现这个字段」（缺口 #26）。
+   * `changed` 由**真的比一次**得出，而不是「有没有出现这个字段」。
    *
-   * 先前每个赋值点都跟一句 `changed = true`，于是把一个字段写成它**当前的值**
+   * 若每个赋值点都跟一句 `changed = true`，把一个字段写成它**当前的值**
    * 也算"改了" —— 而管理 UI 提交的是整张表单，所以网关页每次「保存」都会触发
    * 一次原子写 + Worker 池 re-sync，即使用户什么都没动。
    * `admin.ts` 的注释承诺的正是相反的行为。

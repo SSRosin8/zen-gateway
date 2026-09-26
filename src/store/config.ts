@@ -137,7 +137,7 @@ export type LoadOptions = {
    *
    * 给 `doctor.mjs` 用。它的头部承诺「绝不写任何东西」,而默认路径会
    * `chmod` 配置文件与 `data/` 目录 —— 于是「跑一下 doctor 看看」本身
-   * 成了一次变更,且把该**报告**的问题悄悄修掉了（第八轮审核实测:
+   * 成了一次变更,且把该**报告**的问题悄悄修掉了（实测:
    * 755/644 的 data/ 与 config.json 跑完 doctor 变成 700/600）。
    *
    * 不在 doctor 里自己写一遍读取+校验:那会是第二份并行真相（纪律 #4）,
@@ -256,7 +256,7 @@ async function checkPermissions(file: string): Promise<string[]> {
  * 权限不对就修正，而不是只警告 —— 警告会被忽略，凭证不该赌这个。
  *
  * **目录也要管**:`mkdir(…, { mode })` 只在**创建时**生效,已存在且权限过松的
- * `data/` 不会被纠正。先前只修文件不修目录,于是一个 0755(或更糟)的 data/
+ * `data/` 不会被纠正。只修文件不修目录的话,一个 0755(或更糟)的 data/
  * 会让其他本地用户列目录并读到 runtime.db 与日志。
  *
  * service.mjs 里有一份等价逻辑,但任何不经 service.mjs 的入口

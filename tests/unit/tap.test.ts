@@ -128,10 +128,9 @@ describe("文本回调", () => {
 
   it("**整条流**都会回调 —— 预算不在 onText 上", async () => {
     /*
-     * ## 这条断言的契约在第六轮审核后**刻意反过来了**
+     * ## 不能断言「超出 1 MiB 后停止回调」
      *
-     * 先前这里断言的是「超出 1 MiB 后停止回调」,因为预算加在 `tapReadable` 的
-     * `onText` 上。审核查出那是个真实缺陷:`onText` 有**两个**消费者
+     * 预算加在 `tapReadable` 的 `onText` 上是个真实缺陷:`onText` 有**两个**消费者
      * (失效推理扫描、token 用量),而它们对"看流的哪一段"的要求**正好相反** ——
      * 扫描器只要开头,用量要整条流(chat/responses 的用量只在末帧,
      * Anthropic 更糟:拆在两端)。
@@ -149,8 +148,7 @@ describe("文本回调", () => {
      * `output_tokens: 1`,于是它成了预算内唯一的用量事件并被当成最终值。
      *
      * 所以预算移到了 `createOverlapScanner`(它的理由所在的那一层),
-     * 而这里断言 `onText` **覆盖整条流**。按纪律 #3 归类:断言错,
-     * 但属于"外部驱动的刻意契约变更",不是我写错了断言。
+     * 而这里断言 `onText` **覆盖整条流**。
      */
     const chunk = bytes("x".repeat(64 * 1024));
     const chunks = Array.from({ length: 24 }, () => chunk);
@@ -170,8 +168,7 @@ describe("createOverlapScanner 的扫描预算", () => {
   /*
    * 预算属于扫描器,不属于 `onText` —— 见上面那条测试的说明。
    *
-   * 这一组在第六轮新增:预算搬过来之后,它的取值先前**完全没有断言**
-   * (把它改成任意值都不会有测试变红)。
+   * 这一组钉住预算的取值:没有它,把预算改成任意值都不会有测试变红。
    */
   const test = (t: string) => t.includes("not issued to this caller");
 
@@ -276,14 +273,14 @@ describe("结束通知", () => {
      *
      * ## 这条用假 reader,且它测的不是一个可达的生产缺陷
      *
-     * 第五轮审核用可控假 reader 复现了这个时序。我随后用**真实** ReadableStream
-     * 复测两种形态(同步入队、异步延迟入队)都无法触发 —— 真实 reader 在 cancel
+     * 这个时序只能用可控假 reader 复现。用**真实** ReadableStream
+     * 测两种形态(同步入队、异步延迟入队)都无法触发 —— 真实 reader 在 cancel
      * 之后按规范以 `done: true` 兑现,不会带着值回来。
      *
      * 所以这里刻意用一个**不守规范**的假 reader:它代表"如果 reader 实现不善意"。
      * 按纪律 #1 的分类,这不是"补一个漏掉的断言",而是把
      * 「onText 与 onDone 的先后」从**依赖第三方善意**变成**本模块自己保证**。
-     * 标注清楚是必要的 —— 否则下一轮会有人以为这是个真实缺陷的回归测试。
+     * 标注清楚是必要的 —— 否则以后会有人以为这是个真实缺陷的回归测试。
      */
     const releases: Array<() => void> = [];
     const fakeReader = {
@@ -328,7 +325,7 @@ describe("结束通知", () => {
 
   it("取消发生在 read 挂起期间时,只通知一次且是取消", async () => {
     /*
-     * 这是 `finished` 幂等守卫**唯一**真正保护的路径,而我第一版测试没覆盖它。
+     * 这是 `finished` 幂等守卫**唯一**真正保护的路径。
      *
      * 上面那条"读完之后再取消"测不到:流已 close 后 `cancel()` 按规范
      * 不调用 source 的 cancel 算法,于是 `finish` 本来就只会被调一次 ——
@@ -389,9 +386,9 @@ describe("createOverlapScanner", () => {
      *
      * ## 第一块必须**长于窗口**,否则这条测试是空壳
      *
-     * 我第一版的第一次 feed 只有 43 字符,而 window 是 80 —— 于是
+     * 若第一次 feed 只有 43 字符,而 window 是 80 —— 那么
      * `combined.length > window` 为假,走的是 `tail = combined` 那一支,
-     * **`slice` 分支根本没执行**。第五轮变异测试实测:把 `slice(-window)`
+     * **`slice` 分支根本没执行**。变异测试实测:把 `slice(-window)`
      * 改成 `slice(0, window)`(保留开头而非尾巴,跨块匹配必然失效)后
      * 这条测试依然全绿。
      *

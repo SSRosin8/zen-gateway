@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
-import { ClashController, ControllerError } from "../../src/core/proxy/clash/controller.ts";
+import { ClashController, ControllerError, matchUpstreamRule } from "../../src/core/proxy/clash/controller.ts";
 
 /*
  * 用真实的本机 HTTP 服务而非 mock fetch:要验证的正是 URL 拼接与编码,
@@ -351,5 +351,51 @@ describe("delay", () => {
       .delay("n1", "http://x.invalid")
       .catch((e: unknown) => e);
     expect(err).toBeInstanceOf(ControllerError);
+  });
+});
+
+describe("upstreamRoute / matchUpstreamRule", () => {
+  const rules = [
+    { type: "DomainSuffix", payload: "example.invalid", proxy: "DIRECT" },
+    { type: "IPCIDR", payload: "10.0.0.0/8", proxy: "DIRECT" },
+    { type: "Match", payload: "", proxy: "Proxy" },
+  ];
+
+  it("企业 DNS 把上游解析到私网时，报出先命中的私网直连规则", () => {
+    const route = matchUpstreamRule(rules, "opencode.ai", ["10.1.2.3"]);
+    expect(route).toMatchObject({ kind: "matched", index: 1, proxy: "DIRECT", ip: "10.1.2.3" });
+  });
+
+  it("公网解析落到兜底分组", () => {
+    expect(matchUpstreamRule(rules, "opencode.ai", ["203.0.113.9"])).toMatchObject({ kind: "matched", proxy: "Proxy" });
+  });
+
+  it("域名后缀只匹配整段标签", () => {
+    expect(matchUpstreamRule(rules, "a.example.invalid", [])).toMatchObject({ index: 0 });
+    expect(matchUpstreamRule(rules, "badexample.invalid", [])).toMatchObject({ index: 2 });
+  });
+
+  it("DNS 读不到时 IP 规则无法判定，不跳过去误报兜底", () => {
+    expect(matchUpstreamRule(rules, "opencode.ai", null)).toEqual({ kind: "unknown", index: 1, type: "IPCIDR" });
+  });
+
+  it("无法离线复现的规则类型返回 unknown", () => {
+    const withGeo = [{ type: "GeoIP", payload: "cn", proxy: "DIRECT" }, ...rules];
+    expect(matchUpstreamRule(withGeo, "opencode.ai", ["203.0.113.9"])).toMatchObject({ kind: "unknown", index: 0 });
+  });
+
+  it("经真实 HTTP 读 /rules 与 /dns/query 判定", async () => {
+    respond = (req, res) => {
+      const url = new URL(req.url ?? "/", "http://x");
+      const json = (b: unknown) => res.writeHead(200, { "content-type": "application/json" }).end(JSON.stringify(b));
+      if (url.pathname === "/rules") return json({ rules });
+      if (url.pathname === "/dns/query") {
+        return json({ Answer: url.searchParams.get("type") === "A" ? [{ data: "proxy.invalid." }, { data: "10.9.8.7" }] : [] });
+      }
+      res.writeHead(404).end();
+    };
+    const route = await make().upstreamRoute("opencode.ai");
+    expect(route).toMatchObject({ kind: "matched", payload: "10.0.0.0/8", ip: "10.9.8.7" });
+    expect(recorded.some((r) => r.url === "/dns/query?name=opencode.ai&type=A")).toBe(true);
   });
 });

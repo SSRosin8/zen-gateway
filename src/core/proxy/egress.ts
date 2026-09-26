@@ -39,13 +39,12 @@ export type ProbeSink = {
 export type EgressServiceOptions = {
   timeouts: TimeoutConfig;
   /**
-   * 探测结果落盘（第七轮审核补上）。
+   * 探测结果落盘。
    *
    * 不传则不记 —— 大多数测试测的是探测行为本身，不该为此各建一个库。
    *
-   * 先前 `StatsStore.recordProbe()` **零调用点且零测试**（那条 SQL 从未执行过），
-   * 而 `probeAll` 的结果只存在于返回值里。于是「这个代理上周是不是换过
-   * 出口 IP」无法回答，而 `egressIp` 正是出口隔离判定的唯一依据。
+   * 生产环境要传（写入 `StatsStore.recordProbe()`）：若 `probeAll` 的结果只存在于
+   * 返回值里，「这个代理上周是不是换过出口 IP」就无法回答，而 `egressIp` 正是出口隔离判定的唯一依据。
    */
   probes?: ProbeSink;
   /** 注入以便测试;生产用默认列表。 */
@@ -256,7 +255,7 @@ export class EgressService {
    *   出口隔离报告的分组键。隔离结论会建立在错误数据上。
    * - **连接池分裂**:同一节点会有两套 keep-alive 连接,白费握手。
    *
-   * 这是 Phase 2 审核查出的不变量 #7 的自然延伸:那一条要求缓存键含节点名,
+   * 这是不变量 #7 的自然延伸:那一条要求缓存键含节点名,
    * 这一条要求**只有一个**缓存。
    */
   upstreamDeps(config: Config): {
@@ -280,13 +279,11 @@ export class EgressService {
     };
   }
 
-  /** 配置变更后让缓存失效。 */
-  async reset(): Promise<void> {
-    this.#replacePool(this.#opts.timeouts);
-  }
-
-  /** 配置热更新后同步新超时；旧连接在后台退出，不阻塞配置保存。 */
-  updateTimeouts(timeouts: TimeoutConfig): void {
+  /**
+   * 换一个新池,让缓存失效;可选同步新超时。旧连接在后台退出,不阻塞配置保存。
+   * 同步返回:它只发起旧池的关闭,不等待。
+   */
+  reset(timeouts: TimeoutConfig = this.#opts.timeouts): void {
     this.#replacePool(timeouts);
   }
 
@@ -314,6 +311,20 @@ export class EgressService {
     ]).then(() => undefined);
     return this.#closePromise;
   }
+
+  /**
+   * 立即断开当前池的连接并拒绝后续请求。停机排空超时后用它代替 `close()`。
+   *
+   * 热更新换下的旧池已在优雅关闭,undici 不再允许从外部切断它们
+   * (见 `DispatcherPool.destroy`);它们的在途流随客户端连接被服务端断开,
+   * 或随进程退出结束。
+   */
+  destroy(): void {
+    this.#closed = true;
+    this.#controllers.clear();
+    this.#controllerKeys.clear();
+    this.#pool.destroy();
+  }
 }
 
 /**
@@ -329,7 +340,7 @@ export function applyProbeResult(proxy: Proxy, outcome: ProbeOutcome): Proxy {
 }
 
 /**
- * 探测结果里的**合成 id**：本机直连出口（缺口 #28）。
+ * 探测结果里的**合成 id**：本机直连出口。
  *
  * 定义在 `shared/schema.ts` —— `IdSchema` 要拒绝它（否则一个同名代理会与
  * 直连共用身份，出口隔离失效），而那边不能 import 本文件。这里只 re-export，
@@ -342,7 +353,7 @@ export { DIRECT_EGRESS_ID };
  *
  * 抽成一个函数是因为它有**两个**调用方（`POST /api/probe` 与批量探测执行器），
  * 而"直连那一条要认合成 id"这个细节在两处各写一遍必然漏（纪律 #4）——
- * 先前就是两处都只处理了 `config.proxies`，于是直连的测量被静默丢弃。
+ * 两处都只处理 `config.proxies` 的话，直连的测量会被静默丢弃。
  */
 export function applyProbeResults(
   config: Config,

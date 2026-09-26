@@ -1,6 +1,7 @@
 import type { ClashBridge } from "../../../shared/schema.ts";
 import { safeErrorMessage } from "../../../shared/redact.ts";
 import { isGroupType } from "../../../shared/clashNodeTypes.ts";
+import { BlockList, isIP } from "node:net";
 
 /**
  * Clash / Mihomo External Controller 客户端。
@@ -41,6 +42,61 @@ export type ProxyNode = {
  * 当作「节点不可用」吞掉并返回 null,若输入错误也用那两类,一个配置错误就会被
  * 伪装成「这个节点没有延迟数据」,彻底看不见。
  */
+/**
+ * 上游 host 在规则表里的首条命中。
+ *
+ * `unknown` 表示在任何能判定的规则命中之前遇到了无法判定的规则（需要进程名、
+ * 端口、GeoIP 数据库，或 DNS 读不到时的 IP 规则）；此时不下结论。
+ */
+export type UpstreamRoute =
+  | { kind: "matched"; index: number; type: string; payload: string; proxy: string; ip: string | null }
+  | { kind: "unknown"; index: number; type: string }
+  | { kind: "none" };
+
+/** 规则类型归一化：mihomo 报 `DomainSuffix`，原版 Clash 报 `DOMAIN-SUFFIX`。 */
+function normType(type: string): string {
+  return type.toLowerCase().replace(/[-_]/g, "");
+}
+
+/**
+ * 按内核的顺序语义找首条命中：规则从上到下，第一条匹配即生效。
+ *
+ * 只判定与 host/IP 直接相关的类型；其余类型（GeoSite、GeoIP、进程、端口、
+ * 逻辑组合……）无法在进程外可靠复现，遇到时返回 `unknown` 而不是跳过 ——
+ * 跳过会让后面的私网规则被误报成命中。IP 段匹配用 `net.BlockList`。
+ */
+export function matchUpstreamRule(rules: readonly unknown[], host: string, ips: readonly string[] | null): UpstreamRoute {
+  const h = host.toLowerCase();
+  for (const [i, entry] of rules.entries()) {
+    if (entry === null || typeof entry !== "object") continue;
+    const r = entry as { type?: unknown; payload?: unknown; proxy?: unknown };
+    if (typeof r.type !== "string" || typeof r.proxy !== "string") continue;
+    const type = normType(r.type);
+    const payload = typeof r.payload === "string" ? r.payload.toLowerCase() : "";
+    const hit = (ip: string | null) =>
+      ({ kind: "matched", index: i, type: r.type as string, payload, proxy: r.proxy as string, ip }) as const;
+
+    if (type === "domain") { if (h === payload) return hit(null); continue; }
+    if (type === "domainsuffix") { if (h === payload || h.endsWith(`.${payload}`)) return hit(null); continue; }
+    if (type === "domainkeyword") { if (payload !== "" && h.includes(payload)) return hit(null); continue; }
+    if (type === "match") return hit(null);
+    if (type === "ipcidr" || type === "ipcidr6") {
+      if (ips === null) return { kind: "unknown", index: i, type: r.type };
+      const [net, bitsRaw] = payload.split("/");
+      const family = isIP(net ?? "");
+      const bits = Number(bitsRaw);
+      if (family === 0 || !Number.isInteger(bits)) return { kind: "unknown", index: i, type: r.type };
+      const list = new BlockList();
+      list.addSubnet(net!, bits, family === 6 ? "ipv6" : "ipv4");
+      const ip = ips.find((x) => list.check(x, isIP(x) === 6 ? "ipv6" : "ipv4"));
+      if (ip !== undefined) return hit(ip);
+      continue;
+    }
+    return { kind: "unknown", index: i, type: r.type };
+  }
+  return { kind: "none" };
+}
+
 export type ControllerErrorKind =
   | "unreachable"
   | "auth"
@@ -129,7 +185,7 @@ export class ClashController {
     /*
      * 用 URL 归一化 base,不做字符串拼接。
      *
-     * 先前只 `replace(/\/+$/, "")` 再直接拼路径,于是 `apiBase` 带 query 或
+     * 不能只 `replace(/\/+$/, "")` 再直接拼路径:那样 `apiBase` 带 query 或
      * fragment 时会拼出永远到不了的地址:`http://h:9090/?x=1` + `/proxies`
      * → `http://h:9090/?x=1/proxies`(路径其实是 `/`)。而 schema 的
      * `UpstreamUrlSchema` 是允许 query 的。
@@ -218,7 +274,7 @@ export class ClashController {
   }
 
   /**
-   * 规则实际把流量导向哪些分组（缺口 #22 / #4 的判据）。
+   * 规则实际把流量导向哪些分组（出口隔离与 `GLOBAL` 陷阱的判据）。
    *
    * ## 为什么需要它：`GLOBAL` 陷阱不能靠名字判断
    *
@@ -226,16 +282,16 @@ export class ClashController {
    * 而那个故障不报任何错（控制面通、切换返回 204、探测也能拿到 IP），
    * 只有按实测公网 IP 分组才会发现所有 Worker 共用一个出口。
    *
-   * `setup.mjs` 先前按**名字**把 `GLOBAL` 降级，而那是个启发式：
+   * 按**名字**把 `GLOBAL` 降级只是个启发式：
    * 一个名字不叫 GLOBAL 却同样不参与选路的分组仍会被选中。
    * 真正的判据是"规则实际导向哪个分组"，而 `/rules` 正好给出这个 ——
-   * 实测本机 556 条规则里 382 条指向 `Proxy`、173 条 `DIRECT`，
+   * 一份实测配置的 556 条规则里 382 条指向 `Proxy`、173 条 `DIRECT`，
    * 而 `GLOBAL` 出现在**零条**规则里。
    *
    * ## 兜底规则（`MATCH`）单独给出
    *
    * 它是"其余一切走哪里"，也就是转发到 `opencode.ai` 时最可能命中的那条
-   * （实测本机 MATCH → `Proxy`，且 hitCount 非零）。它比"出现次数最多"
+   * （同一份配置里 MATCH → `Proxy`，且 hitCount 非零）。它比"出现次数最多"
    * 更接近真相：一条 MATCH 覆盖所有未命中的域名。
    */
   async routedGroups(): Promise<{ targets: ReadonlyMap<string, number>; fallback: string | null }> {
@@ -262,6 +318,44 @@ export class ClashController {
       }
     }
     return { targets, fallback };
+  }
+
+  /**
+   * 上游 host 在规则表里会命中哪一条。
+   *
+   * 分组参与选路（见 `routedGroups`）不代表上游请求会走到它：在分组规则之前，
+   * 私网 `IPCIDR → DIRECT` 之类的规则可能先命中。企业 DNS 把公网域名解析到内网
+   * 地址时就是这种情况，而所有 Worker 的 Zen 请求会静默直连、共用一个出口。
+   *
+   * 解析用内核自己的 `/dns/query`，与内核判定 IP 规则时的解析一致；本机解析器
+   * 可能给出不同结果。读不到 DNS 时 IP 规则一律视为无法判定。
+   */
+  async upstreamRoute(host: string): Promise<UpstreamRoute> {
+    const body = await this.#json("rules");
+    const rules = (body as { rules?: unknown } | null)?.rules;
+    if (!Array.isArray(rules)) {
+      throw new ControllerError("/rules 的 rules 不是数组", "bad_response");
+    }
+    const ips = await this.#resolve(host);
+    return matchUpstreamRule(rules, host, ips);
+  }
+
+  async #resolve(host: string): Promise<string[] | null> {
+    if (isIP(host) !== 0) return [host];
+    const out: string[] = [];
+    try {
+      for (const type of ["A", "AAAA"]) {
+        const body = (await this.#json(`dns/query?name=${encodeURIComponent(host)}&type=${type}`)) as {
+          Answer?: Array<{ data?: unknown }>;
+        } | null;
+        for (const a of body?.Answer ?? []) {
+          if (typeof a.data === "string" && isIP(a.data) !== 0) out.push(a.data);
+        }
+      }
+    } catch {
+      return null;
+    }
+    return out;
   }
 
   /** 枚举全部 selector 分组。 */

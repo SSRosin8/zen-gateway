@@ -1,6 +1,15 @@
 import { useState } from "react";
 import type { ModelList, ModelView } from "../../shared/contract.ts";
-import { Metric, Mono, Panel, PrimaryButton, Strong } from "../components/Panel.tsx";
+import {
+  FormStatus,
+  Metric,
+  Mono,
+  Panel,
+  PrimaryButton,
+  Strong,
+  errorMessage,
+  type FormMessage,
+} from "../components/Panel.tsx";
 import { StatusIndicator, type StatusTone } from "../components/StatusIndicator.tsx";
 import { DataTable, TableFilters, type Column } from "../components/DataTable.tsx";
 import type { ViewState } from "../lib/router.ts";
@@ -43,13 +52,14 @@ export function ModelsPage({
   data: ModelList;
   view: ViewState;
   navigate: (patch: Partial<ViewState>) => void;
+  /** 刷新 `/api/models`。保存判定设置后调用。 */
   refresh?: () => void;
 }) {
   const [freeSuffix, setFreeSuffix] = useState(data.rules.freeSuffix);
   const [extraFreeIds, setExtraFreeIds] = useState(data.rules.extraFreeIds.join("\n"));
   const [enforceCatalog, setEnforceCatalog] = useState(data.rules.enforceCatalog);
   const [saving, setSaving] = useState(false);
-  const [message, setMessage] = useState<string | null>(null);
+  const [message, setMessage] = useState<FormMessage>(null);
   const q = view.q.trim().toLowerCase();
   const filtered = data.models.filter((m) => {
     if (q !== "" && !m.id.toLowerCase().includes(q)) return false;
@@ -89,11 +99,10 @@ export function ModelsPage({
       key: "surfaces",
       header: "协议面",
       /*
-       * `surfacesFor()` 的第一个生产调用点 —— 但**只作展示**。
+       * `surfacesFor()` 的结果 —— **只作展示**，不是放行闸门。
        *
-       * 缺口 #10 说清了为什么不能接成放行闸门:默认值是 ["chat","responses"]，
-       * 按它放行会让默认配置下**所有**模型的 /v1/messages 被拒 ——
-       * 而那个面 Phase 6 刚验证可用。上游并不按模型区分面，当闸门缺乏依据。
+       * 默认值是 ["chat","responses"]，按它放行会让默认配置下所有模型的
+       * /v1/messages 被拒，而上游并不按模型区分协议面，当闸门缺乏依据。
        */
       render: (m) => <span className="text-text-muted">{m.surfaces.join(" · ")}</span>,
     },
@@ -175,10 +184,11 @@ export function ModelsPage({
               },
             })
               .then(() => {
-                setMessage("已保存");
+                setMessage({ tone: "success", text: "已保存" });
+                // 判定结果在 /api/models 上，保存后立即刷新这一页自己的数据。
                 refresh?.();
               })
-              .catch((err) => setMessage(err instanceof Error ? err.message : String(err)))
+              .catch((err) => setMessage(errorMessage(err)))
               .finally(() => setSaving(false));
           }}
         >
@@ -194,8 +204,8 @@ export function ModelsPage({
             <textarea value={extraFreeIds} onChange={(e) => setExtraFreeIds(e.target.value)} rows={3} className="rounded-sm border border-border-strong bg-bg px-3 py-2 font-mono" />
           </label>
           <div className="flex items-center gap-3 sm:col-span-2">
-            <PrimaryButton type="submit" onClick={() => undefined} disabled={saving}>{saving ? "保存中…" : "保存"}</PrimaryButton>
-            {message !== null && <span className="text-text-muted">{message}</span>}
+            <PrimaryButton type="submit" disabled={saving}>{saving ? "保存中…" : "保存"}</PrimaryButton>
+            <FormStatus message={message} />
           </div>
         </form>
       </Panel>
@@ -214,6 +224,7 @@ export function ModelsPage({
           placeholder="搜索模型 id…"
         />
         <DataTable
+          label="模型列表"
           rows={filtered}
           columns={columns}
           rowKey={(m) => m.id}

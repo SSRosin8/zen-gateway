@@ -23,7 +23,7 @@
  *
  * ## 为什么目录那一层**问服务**,而不是自己去打上游
  *
- * 这是第七轮审核那条纪律(#8)的直接应用:**验证工具必须与产品代码共享
+ * 这是纪律 #8 的直接应用:**验证工具必须与产品代码共享
  * 同一套信任/配置**。服务进程与诊断进程可能使用不同 CA、代理或环境变量。
  * 若 doctor 自己 fetch 上游,它拿到的结果反映的是 **doctor 进程**，而真正要
  * 诊断的是**服务进程**。
@@ -71,8 +71,8 @@ const DEEP = process.argv.includes("--deep");
 /*
  * 端口解析复用 `src/store/port.ts` —— 与 service.mjs、vite.config.ts 同一处。
  *
- * 规划特别标注过这一条:先前这里写的诊断命令是从 `npm run status` 的输出里
- * grep 端口,而**服务没在跑时它只打印「未在运行」**,grep 拿不到数字、
+ * 不能从 `npm run status` 的输出里 grep 端口:
+ * **服务没在跑时它只打印「未在运行」**,grep 拿不到数字、
  * curl 拼出畸形 URL。`resolvePort()` 与服务是否在跑无关,所以它才是该用的。
  * 不要照抄默认端口，否则可能误问同机另一个进程并得到误导性的健康响应。
  */
@@ -134,7 +134,7 @@ async function layerConfig() {
      * 默认路径会把 `config.json` chmod 到 0600、`data/` 到 0700。那对服务是对的
      * （凭证不该赌一句警告会被看见），但对诊断工具是错的:它把该**报告**的问题
      * 悄悄修掉了,于是「权限过松」这一项永远报不出来 —— 而且「跑一下 doctor
-     * 看看」本身成了一次变更。第八轮审核实测:755/644 跑完变 700/600。
+     * 看看」本身成了一次变更(755/644 跑完会变 700/600)。
      */
     const { config, permissionIssues } = await loadConfig(
       process.env.ZG_DATA_DIR ? undefined : ROOT,
@@ -348,11 +348,10 @@ async function layerWorkers() {
   const shape = `其中 ${bound} 个绑定了出口代理,${usable.length - bound} 个走本机直连。`;
 
   /*
-   * 运行期就绪态 —— **问服务，不自己算**（缺口 #24）。
+   * 运行期就绪态 —— **问服务，不自己算**。
    *
-   * 这一层先前只报配置形态，并在输出里写着「是否就绪 doctor 查不到」。
-   * Phase 9 之后那句话不再成立：`GET /api/overview` 带 `ready` 与
-   * `cooldownRemainingMs`，而 doctor 本来就已经在问服务（第 6 层查 /v1/models）。
+   * 配置形态回答不了「是否就绪」，而 `GET /api/overview` 带 `ready` 与
+   * `cooldownRemainingMs`，doctor 本来就已经在问服务（第 6 层查 /v1/models）。
    *
    * **关键是"问"而不是"算"**：在 doctor 里重新实现一遍冷却判定会是第二份
    * 并行真相（纪律 #4），且必然与调度器分叉 —— 那时 doctor 说「就绪」而
@@ -515,8 +514,8 @@ async function layerClashControl() {
   /*
    * 顺带核对**混合端口**。
    *
-   * 这是规划特别标注的一条:本机的混合端口**不是**文档默认的 7890,
-   * 且随内核配置而变，不能使用固定默认值。
+   * 混合端口不一定是文档默认的 7890,
+   * 它随内核配置而变，不能使用固定默认值。
    * 配置里的 `localProxyPort` 若与内核实际监听的 `mixed-port` 不一致,
    * 桥接会静默连到一个**没人监听的端口** —— 症状是所有桥接代理都传输失败,
    * 而控制面明明是通的。这一层是唯一能发现它的地方。
@@ -541,13 +540,13 @@ async function layerClashControl() {
   }
 
   /*
-   * 报**择优结果**，而不只是"几个能连"（Phase 10）。
+   * 报**择优结果**，而不只是"几个能连"。
    *
    * 判据复用 `core/proxy/clash/select.ts` 的 `selectBridge` —— 与转发路径
    * 同一份逻辑。doctor 自己再实现一遍会是第三份并行真相（纪律 #4），
    * 而分叉的症状最难查：doctor 说"内核 A 可用"而网关实际在用 B。
    *
-   * 这一层也顺带回答了一个此前答不上来的问题：多内核时"现在到底走哪个"。
+   * 这一层也顺带回答多内核时"现在到底走哪个"。
    */
   const health = await probeBridges(bridges, (bridge) => new ClashController(bridge), {
     redact: safeErrorMessage,
@@ -577,7 +576,7 @@ async function layerClashControl() {
   const degraded = selectedHealthy?.alive !== true || selectedHealthy.usableNodes === 0;
 
   /*
-   * 选中的分组**真的参与选路吗**（缺口 #22/#4 的判据）。
+   * 选中的分组**真的参与选路吗**。
    *
    * `mode: rule` 下规则决定流量走哪个分组。一个从不出现在任何规则里的分组
    * （`GLOBAL` 就是典型）切了什么都不改变 —— 所有 Worker 走本机直连、
@@ -608,7 +607,7 @@ async function layerClashControl() {
           );
         } else if (routed.fallback !== null && routed.fallback !== group) {
           /*
-           * 分组出现在规则里但**不是兜底目标** —— 这正是缺口 #4 的形态:
+           * 分组出现在规则里但**不是兜底目标**:
            * 探测打 IP 回显服务、转发打上游 host，两者可能命中不同规则分支。
            * 不是错误（那个分组确实承载一部分流量），但要说清。
            */
@@ -616,6 +615,29 @@ async function layerClashControl() {
             `! 分组「${group}」承载 ${routed.targets.get(group)} 条规则，而兜底(MATCH)指向「${routed.fallback}」。`,
             `   转发到上游与探测打 IP 回显服务可能命中**不同的规则分支** ——`,
             `   --deep 仅测 IP 回显目标；Zen 实际出口需在请求期间核对 /connections 的上游连接、chains 与 rule。`,
+          );
+        }
+        /*
+         * 分组参与选路之后，还要看上游 host 自己命中哪条规则。
+         *
+         * 分组规则之前的私网 `IPCIDR → DIRECT` 会先命中：企业 DNS 把上游域名解析到
+         * 内网地址时，所有 Worker 的 Zen 请求都直连、共用一个出口，而回显探测
+         * 打的是另一个域名，报告看起来仍是隔离的。
+         */
+        const upstreamHost = new URL(cfg.gateway.baseUrl).hostname;
+        const route = await controller.upstreamRoute(upstreamHost);
+        if (route.kind === "matched" && route.proxy !== group) {
+          routingWarnings.push(
+            `⚠️ 上游 ${upstreamHost} 命中第 ${route.index} 条规则 ${route.type},${route.payload} → ${route.proxy}` +
+              `${route.ip === null ? "" : `(内核解析为 ${route.ip})`},不经过分组「${group}」。`,
+            `   后果:所有 Worker 的 Zen 请求都走 ${route.proxy},共用同一个出口;切换 selector 不改变它。`,
+            `   处理:在 Clash 规则最前面加 DOMAIN-SUFFIX,${upstreamHost},${group}` +
+              `${route.ip === null ? "" : `,或让内核用公网 DNS 解析该域名`}。`,
+          );
+        } else if (route.kind === "unknown") {
+          routingWarnings.push(
+            `! 上游 ${upstreamHost} 在第 ${route.index} 条规则(${route.type})处无法离线判定;` +
+              `Zen 实际出口需在请求期间核对 /connections。`,
           );
         }
       }
@@ -641,7 +663,7 @@ async function layerClashControl() {
 /**
  * 第 6 层:上游模型目录。
  *
- * ## 这一层有三种结局,而规划原先只识别出两种
+ * ## 这一层有三种结局
  *
  * | 结局 | HTTP | 含义 | 下一步 |
  * |---|---|---|---|
@@ -649,15 +671,14 @@ async function layerClashControl() {
  * | 拿到目录但免费集为空 | **200 + `data:[]`** | 目录通,而免费判定把它全滤掉了 | 查 `freeSuffix` / `extraFreeIds` |
  * | 正常 | 200 + 非空 | — | — |
  *
- * **实测纠正了规划的一处说法**:`docs/architecture.md` 缺口 #21 写的是
- * 「目录拉空与上游不可达在外部看起来一样,两者都让 `/v1/models` 返回
- * `data: []` 加 HTTP 200」—— 那不成立。`models.ts` 在从未成功拉到目录时
+ * 目录拉空与上游不可达在外部**看起来不一样**:并非两者都让 `/v1/models` 返回
+ * `data: []` 加 HTTP 200。`models.ts` 在从未成功拉到目录时
  * 返回的是 **502 `upstream_unreachable`**(它的注释写明了理由:空列表会让
  * OpenCode 显示「没有可用模型」,而那与「网关拿不到目录」是两件事)。
  *
  * 真正会给出 `200 + data:[]` 的是**第二种**:目录拉到了(`total: 80`)而
  * 免费集为空(`free: 0`)。实测把 `freeSuffix` 改成一个没有模型命中的值即可
- * 复现。所以这两层依然要分开 —— 只是分界线和原先记的不一样。
+ * 复现。所以这两层依然要分开,分界线如上表。
  * `zen_gateway_catalog.total` 与 `free` 两个字段正好把它们区分开。
  */
 async function layerCatalog() {

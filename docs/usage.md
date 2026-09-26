@@ -7,14 +7,25 @@
 
 需要 Node.js 24 或更高版本。
 
+网关和管理后台是两个独立进程：
+
 ```bash
 npm install
-npm start
-npm run dev       # 另开终端运行 Vite 管理后台
-npm run open
+npm start         # 终端 1：构建并后台启动网关
+npm run dev       # 终端 2：Vite 管理后台，固定 http://127.0.0.1:5173
+npm run open      # 可选：用浏览器打开 5173
 ```
 
-服务端启动前会构建产物，启动脚本会等待健康检查并打印实际 URL。
+- `npm start` 先构建，再启动网关、等待 `/health` 并打印实际 URL；端口也可用
+  `npm run status` 查看。`npm start -- --open` 在启动成功后顺带打开浏览器。
+- 网关端口只提供 `/health`、`/v1/*`、无前缀协议别名和 `/api/*`，不提供页面，
+  `GET /` 返回 404。
+- `npm run dev` 启动 Vite（端口 5173，被占用时直接失败），只把 `/api` 和
+  `/health` 代理到网关；转发请求仍要打网关端口的 `/v1`。
+- `npm run open` 和 `--open` 只确认网关健康，然后打开 5173；它们不检查 Vite 是否
+  在运行，未运行 `npm run dev` 时浏览器会连接失败。
+- `npm run dev:server` 以 `node --watch` 直接运行源码中的网关，适合开发；它不写
+  状态文件，`npm stop` 不管理它。
 
 ```bash
 npm stop
@@ -24,26 +35,45 @@ npm run doctor
 npm run doctor -- --deep
 ```
 
-`doctor` 默认只读；`--deep` 会真实探测 IP 回显目标，桥接探测期间会切换 Clash
-selector。回显结果不代表 Zen 实际连接的出口。`npm run setup -- --dry-run` 只显示导入结果，`npm run setup` 才写入
-配置。setup 支持 `--api <http://127.0.0.1:端口>` 与 `--secret <值>`；API 地址
-必须是本机 HTTP 回环地址。
+`doctor` 默认只读。`--deep` 会真实探测 IP 回显目标，桥接探测期间会切换 Clash
+selector，结束后 selector 可能停在最后一个节点；结果的含义见
+[回显 IP 的测量范围](#回显-ip-的测量范围)。
 
 端口按 `ZG_PORT`、`data/config.json` 的 `gateway.port`、默认值 9876 解析。服务端、
 service 脚本和 Vite 代理使用同一解析逻辑。数据目录可用 `ZG_DATA_DIR` 指定，
 适合测试或运行多个隔离实例。
 
+### 导入 Clash 出口
+
+```bash
+npm run setup -- --dry-run   # 只显示探测和合并结果
+npm run setup                # 写入 data/config.json
+npm run restart
+```
+
+setup 支持 `--api <http://127.0.0.1:端口>` 与 `--secret <值>`；API 地址必须是本机
+HTTP 回环地址。
+
+运行中的服务不会重新读取外部修改的配置文件。setup 写入后到重启完成前，不要在
+管理后台保存任何配置：后台保存会把进程内的旧配置整份写回磁盘，覆盖刚导入的代理
+和 Clash 内核。
+
 ## 管理后台
 
-先运行网关，再运行 `npm run dev`。后台包含概览、网关、代理池、Worker、模型和
+启动方式见[安装和运行](#安装和运行)。后台包含概览、网关、代理池、Worker、模型和
 用量六页。没有可用 Worker 时会显示首启向导。
 
 当前 UI 支持：
 
-- Worker 新增、编辑、删除；编辑时留空凭证表示保留旧值，清空必须显式操作。
+- 网关页编辑最多尝试的 Worker 数（`maxAttempts`），并按 OpenCode 1.x/2.x 生成
+  客户端配置片段（Relay Token 为占位符）。
+- Worker 新增、编辑、删除；编辑时留空凭证表示保留旧值，清空必须显式操作。删除
+  前弹出确认框；Worker 可在列表内直接编辑，出口从代理下拉框选择。
 - 模型免费后缀、显式免费名单、目录交集开关的编辑。
 - 代理分页、批量探测、按 IP 回显目标的实测公网 IP 分组的视图。
-- 订阅刷新、探测进度、统计和运行期 Worker 状态查看。
+- 订阅刷新、探测进度、统计和运行期 Worker 状态查看；启动批量探测前需要确认。
+- 深色主题：默认跟随系统，页头可切换“跟随系统 / 浅色 / 深色”。
+- 轮询失败时保留上次数据并显示“数据可能已过期”横幅，而不是清空页面。
 
 代理和 Clash 内核的增删改仍通过 `data/config.json` 完成，保存后重启网关。后台
 不会伪造一个管理端点来覆盖这些配置；Models 页中的 `defaultSurfaces` 与
@@ -87,33 +117,43 @@ OpenCode 2.x 使用复数 `providers`/`settings`。只覆盖已有 `opencode` pr
 
 选择对应版本的片段放进 `~/.config/opencode/opencode.json` 或项目根目录，token 是
 占位符，仍需填入真实值。不要把具体模型或 SDK package 从 OpenCode 配置复制到这里，
-否则会覆盖 OpenCode 自己维护的目录。用真实 OpenCode CLI 验证：
+否则会覆盖 OpenCode 自己维护的目录。
+
+转发面用 `Authorization: Bearer <Relay Token>` 鉴权；`/v1/messages` 另外接受
+`x-api-key: <Relay Token>`，便于 Anthropic 形态的客户端直接使用；两者同时出现时以
+Bearer 为准，其余路径只认 Bearer。客户端的 `x-api-key` 不会转发到上游。
+
+### 客户端验收
+
+用真实 OpenCode CLI 验证：
 
 ```bash
-opencode run --model opencode/space-bunny-free "Reply with exactly: OK"
+opencode run --model opencode/big-pickle "Reply with exactly: OK"
 ```
 
-当前免费模型的真实 CLI 验收范围是 Chat Completions 和 Responses；Messages 的
-网关协议链路已完成，但当前没有可验的免费 Zen 模型。停止服务后重复命令应连接
-失败，重启后恢复，借此确认客户端确实经过本网关。手工 curl 的请求形态与真实
-CLI 不同，不能把某个探针的结果推广到所有客户端。
-
-OpenCode 2.0.12 的隔离实测确认，`providers.opencode.settings` 会覆盖
-`baseURL`/`apiKey`，但只对客户端自身模型目录中已存在的模型发起请求。CLI 报
-`Model unavailable` 表示客户端目录没有该模型，不是网关没有接管 Base URL。验收匿名
-Worker 时为每次测试使用新的会话和隔离的 `PWD`、`OPENCODE_CONFIG`、
-`XDG_CONFIG_HOME`、`XDG_DATA_HOME`、`XDG_STATE_HOME`；否则旧的认证会话亲和会优先于
-`anonymous_first`。模型目录首次获取失败按契约返回 `502 upstream_unreachable`；若日志
-包含 `unable to get local issuer certificate`，请在启动服务前设置服务进程的
-`NODE_EXTRA_CA_CERTS`。
+- 确认经过网关：停止服务后重复命令应连接失败，重启后恢复。
+- 手工 curl 的请求头和请求体与真实 CLI 不同，某个探针得到的 403 或 500 不能推广
+  到所有客户端。
+- OpenCode 2.0.12 的隔离实测确认，`providers.opencode.settings` 会覆盖
+  `baseURL`/`apiKey`，但只对客户端自身模型目录中已存在的模型发起请求。CLI 报
+  `Model unavailable` 表示客户端目录没有该模型，不是网关没有接管 Base URL。
+- 验收匿名 Worker 时为每次测试使用新的会话和隔离的 `PWD`、`OPENCODE_CONFIG`、
+  `XDG_CONFIG_HOME`、`XDG_DATA_HOME`、`XDG_STATE_HOME`；已有会话的亲和绑定优先于
+  `anonymous_first`，会继续使用原 Worker。
+- 实际承接的 Worker 以响应头 `x-zen-gateway-worker` 和运行库为准，官方控制台记录
+  不能单独证明本机中继用了哪个 Worker。
+- 当前免费模型的真实验收范围是 Chat Completions 和 Responses；Messages 的状态见
+  [需求文档 §13](requirements.md#13-当前未实现或需要外部配合的范围)。
+- `/v1/models` 返回 `502 upstream_unreachable` 表示目录从未成功取得；若日志包含
+  `unable to get local issuer certificate`，见[企业 CA](#企业-ca)。
 
 ## 配置文件
 
-首次启动创建 `data/config.json`，权限为 0600。配置必须包含 `version`、`gateway`
-和 `relayToken`，其余字段按 schema 默认值补齐；未知字段会拒绝启动。损坏配置不会
+首次启动创建 `data/config.json`，权限为 0600。配置必须包含 `version` 和
+`gateway.relayToken`，其余字段按 schema 默认值补齐；未知字段会拒绝启动。损坏配置不会
 自动覆盖。引用不存在的 Worker、代理、订阅或 Clash 内核也会拒绝启动。
 
-下面是完整配置的最小结构示例（凭证为占位符）：
+下面是包含主要顶层字段及其默认值的配置示例（凭证为占位符，`routing` 省略时取默认值）：
 
 ```jsonc
 {
@@ -177,6 +217,37 @@ Worker 时为每次测试使用新的会话和隔离的 `PWD`、`OPENCODE_CONFIG
   后缀和名单放行的行为。
 - 免费判定是 `(freeSuffix 命中 ∪ extraFreeIds) ∩ 在架目录`。目录从未成功拉取时，
   `/v1/models` 返回 502；目录成功但免费集为空时才返回 `200` 与空 `data`。
+  `/v1/models` 触发的刷新失败后同样进入退避，退避期内直接用旧目录或返回 502，不再
+  逐请求打上游。
+
+### 调度 `routing`
+
+`routing` 可省略，省略时全部取默认值。后台没有编辑入口，修改后需重启。
+
+| 字段 | 默认值 | 含义 |
+|---|---|---|
+| `strategy` | `anonymous_first` | 就绪 Worker 的排序：`anonymous_first` 匿名优先、`authenticated_first` 认证优先、`mixed` 按配置顺序；同类内保持配置顺序，会话亲和命中优先于策略 |
+| `cooldown.rateLimitMs` | 900000 | 429 冷却；上游给了 `Retry-After` 时以它为准 |
+| `cooldown.authFailMs` | 60000 | 401 的固定短冷却 |
+| `cooldown.forbiddenMs` | 5000 | 403 的短冷却（范围 1000–600000，附最多 25% 抖动）；免费闸门按请求形态返回 403，不代表 Worker 故障 |
+| `cooldown.transportBaseMs` | 2000 | 传输、超时、上游 5xx 指数退避的起点 |
+| `cooldown.transportMaxMs` | 120000 | 上述指数退避的上限 |
+| `affinityTtlMs` | 3600000 | 会话亲和的滑动闲置时长，范围 60000–86400000 |
+
+```jsonc
+{
+  "routing": {
+    "strategy": "anonymous_first",
+    "cooldown": { "rateLimitMs": 900000, "authFailMs": 60000, "forbiddenMs": 5000, "transportBaseMs": 2000, "transportMaxMs": 120000 },
+    "affinityTtlMs": 3600000
+  }
+}
+```
+
+目录尚未核验的模型收到上游 401 时，网关不把它记为该 Worker 的鉴权失败，因为
+免 key 请求不存在的模型同样返回 401。“已核验”指开启 `enforceCatalog` 且判定依据不是
+`*_unverified`。不归咎 Worker 的失败（坏请求、出口配置错误、上述 401）不增加也不
+清零连续失败次数，只有成功才清零。
 
 ### Worker 和凭证写入
 
@@ -217,13 +288,35 @@ SOCKS4 和 SOCKS5；其它协议必须经 Clash 桥接。桥接配置的结构�
 示例端口当作通用值。`selectorGroup` 应是规则实际导向的专用选择器；`GLOBAL` 在
 rule 模式下可能不参与选路，在 global 模式下则会影响本机其它流量。
 
+分组参与选路还不够，上游域名自己也要命中这个分组。企业 DNS 会把 `opencode.ai`
+解析到内网地址，这时排在前面的私网 `IPCIDR,10.0.0.0/8,DIRECT` 之类规则先命中，
+所有 Worker 的 Zen 请求直连、共用一个出口，而回显报告仍显示各自独立。
+`npm run doctor` 第 5 层会用内核自己的 DNS 解析上游域名，按规则顺序找出首条
+命中；不经过所选分组时给出告警。处理方式是在 Clash 规则最前面加
+`DOMAIN-SUFFIX,opencode.ai,<selectorGroup>`，或让内核用公网 DNS 解析该域名。
+
 `manual` 严格使用 `activeBridgeId`，不会因为它失联而悄悄切换；`auto` 在有健康的
 当前内核时保持粘滞，否则按 priority 选择。转发路径不会逐请求探活或自动切换。
 批量探测会锁定一个内核，避免两批任务同时改动 Clash 的全局 selector。
 
-`egressIp` 只能由探测写回。它按 IP 回显目标的实测公网 IP 分组，`null` 是“尚未测量”，
-不代表该目标已与其它出口独立；探测目标与 Zen 可能命中不同规则，真实上游出口需在请求
-期间核对 Clash `/connections`。
+桥接模式下 selector 锁覆盖“切换节点 + 建立连接”，连接建立后即释放，不再等到响应
+头到达，所以长时间生成的非流式请求不会阻塞同一内核下的其他 Worker。为保证 Clash
+在切换后才选路，桥接连接统一经 HTTP CONNECT 隧道建立。
+
+`egressIp` 只能由探测写回，`null` 是“尚未测量”，不代表已与其它出口独立。
+
+### 回显 IP 的测量范围
+
+后台回显出口报告、批量探测和 `npm run doctor -- --deep` 测的都是 IP 回显服务（优先
+`api.ipify.org`）看到的公网 IP，而不是 Zen 请求的出口：
+
+- 回显服务和 `opencode.ai` 可能命中 Clash 的不同规则；回显走了所选节点，Zen 请求
+  仍可能走 `DIRECT`。多个回显 IP 不同不能证明 Zen 请求已隔离。
+- 两个代理 NAT 到同一个公网 IP 时属于共用出口；未测出 IP 的不计为独立。
+- selector 切换成功、节点延迟正常同样不能作为 Zen 选路证据。
+- 要确认 Zen 实际出口，在真实 CLI 请求期间读 Clash `/connections`，核对目标为
+  `opencode.ai` 的连接的 `chains` 与 `rule`；排查细节见
+  [debug-egress](../.claude/skills/debug-egress/SKILL.md)。
 
 ## 订阅和批量探测
 
@@ -239,7 +332,7 @@ rule 模式下可能不参与选路，在 global 模式下则会影响本机其�
 ## 管理 API
 
 所有 `/api/*` 端点都只接受本机回环 TCP 对端，Host 必须是回环主机；有 Origin 时
-也必须是回环 HTTP(S) 来源。
+也必须是回环 HTTP(S) 来源。本表是端点清单的唯一维护处。
 
 | 方法与路径 | 用途 | 是否写配置 |
 |---|---|---|
@@ -248,14 +341,11 @@ rule 模式下可能不参与选路，在 global 模式下则会影响本机其�
 | `GET /api/stats?days=N\|all` | 用量与拒绝统计 | 否 |
 | `GET /api/proxies` | 代理列表、引用者和解析失败原因 | 否 |
 | `GET /api/models` | 含付费模型的目录与判定理由 | 否 |
-| `PATCH /api/config` | 网关设置、模型规则、Worker CRUD | 是 |
+| `PATCH /api/config` | 网关设置（`maxAttempts`、两个超时、Relay Token）、模型规则、Worker CRUD | 是 |
 | `POST /api/probe` | 探测在用出口并写回 IP | 是 |
 | `GET /api/batch-probe` | 查看批量探测进度 | 否 |
 | `POST /api/batch-probe` | `start`、`pause`、`resume`、`cancel` | 可能 |
 | `POST /api/subscriptions/:id/refresh` | 拉取、解析并合并一个订阅 | 是 |
-
-Vite 开发服务器只代理 `/health` 和 `/api`；转发请求必须使用网关端口和 `/v1`，
-不能拿开发服务器端口测试上游转发。
 
 ## 诊断和故障排查
 
@@ -273,7 +363,7 @@ doctor 按配置、服务、统计库、Worker、Clash、模型目录、出口�
 |---|---|
 | 401 | Relay Token 缺失或不匹配；也可能是上游返回的认证失败，结合响应头与日志判断 |
 | 403 `model_not_allowed` | 不符合免费规则，或符合规则但目录显示已下架 |
-| 403 `FreeTierError` | 上游免费额度闸门，取决于请求形态 |
+| 403 `FreeTierError` | 上游免费额度闸门，取决于请求形态；Worker 只短暂冷却 |
 | 400 `Model is unavailable` | 上游目录已变化或账号看不到该模型 |
 | 502 `upstream_unreachable` | 上游、出口、DNS 或 TLS 不可达 |
 | 503 `egress_unavailable` | 代理停用、Clash 不可用、selector 或 secret 配置错误 |
@@ -298,6 +388,10 @@ store 的写入失败会计入健康信息；若启动时打不开数据库，�
 探测会停用，日志与统计 API 会报告不可用，但目前健康写失败计数仍可能为零。
 因此排查时也要检查日志和用量页。数据库及其 WAL/SHM 文件可在停止服务后删除，
 启动时会重建；这不会删除 `config.json`。
+
+`npm stop` 或 SIGTERM/SIGINT 触发优雅关闭：先停止接收新请求，在有界时间内等待在途
+请求完成（最多 5 秒，超时后强制断开），再关闭出口连接池和数据库。客户端中途断开的
+请求以 499 结束，不记为转发失败。
 
 用量区分请求数与上游尝试数，也区分上游没有上报用量和网关未能完整解析。后台用量
 页默认显示最近 30 天，传 `days=all` 查询全部聚合数据。

@@ -11,10 +11,9 @@ import { readUsage, type TokenUsage } from "../models/usage.ts";
  * `x-opencode-session` 头。这让 `sessionHashFrom` 的「体内优先于头」那条接线
  * 第一次真的可执行 —— 在只有 chat 面的时候它**结构上无法执行**
  * (`chatSurface.sessionKeyFrom` 恒返回 `undefined`,且它是唯一注册的面),
- * 第五轮审核把这种情况归为「调用点存在但输入集为空」,当时只能用假面补测。
- * 现在那个假面有了对应的真实现。
+ * 属于「调用点存在但输入集为空」,只能用假面补测。本面是那个假面对应的真实现。
  *
- * ## 体内指针优先于头,理由与先前写的一致
+ * ## 体内指针为什么优先于头
  *
  * 客户端可以在同一个 `x-opencode-session` 里发起互不相关的多条 response 链,
  * 也可以跨 session 续同一条链。`previous_response_id` 说的是**这次要接哪个

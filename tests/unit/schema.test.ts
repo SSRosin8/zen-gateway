@@ -64,10 +64,10 @@ describe("嵌套默认值真的生效（prefault 回归守卫）", () => {
     /*
      * 2026-09-22 以上游权威目录核实（`GET /zen/v1/models`，免鉴权）：
      * 76 个在架模型，9 个带 -free 后缀，外加 big-pickle 一个零费率无后缀模型。
-     * 这是**默认值**而非代码里的硬编码判定 —— 用户可改，Phase 6 定时刷新会纠正。
+     * 这是**默认值**而非代码里的硬编码判定 —— 用户可改，目录定时刷新会纠正。
      *
-     * 先前这里断言过 grok-code，来源是 models.dev 的 opencode provider。
-     * 它在 Zen 自己的目录与定价页里都不存在 —— models.dev 那份当日有 23 个
+     * 不能加 grok-code：它出现在 models.dev 的 opencode provider 里，
+     * 却在 Zen 自己的目录与定价页里都不存在 —— models.dev 那份当日有 23 个
      * 零费率条目已下架。第三方聚合站不能当权威目录用。
      */
     const cfg = ConfigSchema.parse(base());
@@ -378,7 +378,7 @@ describe("未知字段", () => {
 });
 
 /* ================================================================== *
- * 补丁 schema 也必须 strict（第十轮审核）
+ * 补丁 schema 也必须 strict
  * ================================================================== */
 
 describe("ConfigPatchSchema 拒绝拼错的字段名", () => {
@@ -386,7 +386,7 @@ describe("ConfigPatchSchema 拒绝拼错的字段名", () => {
    * `schema.ts` 每一层都是 `strictObject`，理由是「手工编辑是预期用法，
    * 拼错字段名必须立刻报错，而不是静默忽略后让人困惑『我明明改了』」。
    *
-   * 而补丁那一侧先前全用 `z.object` —— 实测六种拼错**全部"成功"**，
+   * 补丁那一侧若用 `z.object` —— 实测六种拼错**全部"成功"**，
    * 产出一个空 patch，`applyConfigPatch` 返回 `changed: false`，
    * 响应 `{"ok":true,"changed":false}`。用户看到成功、刷新后值没变。
    *
@@ -407,7 +407,7 @@ describe("ConfigPatchSchema 拒绝拼错的字段名", () => {
 
   it("**凭证不能同时 set 与 clear** —— 「以为清了其实没清」的方向不安全", () => {
     /*
-     * union 的第一个分支先前会吃掉这个对象并把 `clear` 剥掉，于是用户想清空
+     * 否则 union 的第一个分支会吃掉这个对象并把 `clear` 剥掉，于是用户想清空
      * 却换成了新值。凭证字段上这个方向是不安全的那一侧。
      */
     expect(
@@ -434,7 +434,7 @@ describe("ConfigPatchSchema 拒绝拼错的字段名", () => {
 });
 
 /* ================================================================== *
- * 保留 id（第十轮审核）
+ * 保留 id
  * ================================================================== */
 
 describe("`__direct__` 是保留 id", () => {
@@ -491,8 +491,8 @@ describe("`__direct__` 是保留 id", () => {
 
   it("常量与 dispatcher / egress 用的是同一个值", () => {
     /*
-     * 判据从**唯一真相**取（纪律 #4）：先前 `dispatcher.ts` 写的是字面量
-     * `"__direct__"`，与 `egress.ts` 的常量并行两份。这条钉住它们同源。
+     * 判据从**唯一真相**取（纪律 #4）：`dispatcher.ts` 不能写字面量
+     * `"__direct__"` 与 `egress.ts` 的常量并行两份。这条钉住它们同源。
      */
     expect(DIRECT_EGRESS_ID).toBe("__direct__");
     expect(IdSchema.safeParse(DIRECT_EGRESS_ID).success).toBe(false);

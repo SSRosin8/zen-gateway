@@ -3,7 +3,7 @@ import { isRecord, readModelField, readStreamField } from "./types.ts";
 import { readUsage, type TokenUsage } from "../models/usage.ts";
 
 /**
- * OpenAI Chat Completions 面 —— Phase 3 的第一个面。
+ * OpenAI Chat Completions 面 —— 第一个实现的协议面。
  *
  * 选它做第一个不是随意:OpenCode 默认就用这个面访问 Zen,
  * 所以它是「第一个真实请求端到端成功」这个门槛唯一能验的面。
@@ -65,10 +65,9 @@ export const chatSurface: ProtocolSurface = {
 export const MODELS_PATHS = ["/v1/models", "/models"] as const;
 
 /*
- * 这里先前有一个 `looksLikeChatBody(body)` —— 注释写着「用于 400 早退」，
- * 而**全仓零引用**（连测试都没有）。第九轮建了那道关卡之后删掉它。
+ * 这里不提供 `looksLikeChatBody(body)` 这类「用于 400 早退」的形状校验。
  *
- * 为什么是删而不是留着加白名单：它声称的职责已经由 `relay.ts` 第 2 步
+ * 它声称的职责已经由 `relay.ts` 第 2 步
  * （解析副本 + 免费判定）实际承担了，而一个"看起来该用却没人用"的校验函数
  * 是个陷阱 —— 下一个人会以为请求体形状已经被它挡过一道。
  *

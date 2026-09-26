@@ -1,19 +1,19 @@
 import type { StatsView } from "../../shared/contract.ts";
 import { Metric, Mono, Panel, Strong } from "../components/Panel.tsx";
+import { FilterChip, SimpleTable, type Column } from "../components/DataTable.tsx";
 import { StatusIndicator } from "../components/StatusIndicator.tsx";
 
 /**
- * 用量页 —— Phase 7 的聚合终于有了界面。
+ * 用量页。
  *
  * ## 三处「不估算」的地方，每一处都比数字本身重要
  *
  * 1. **请求 ≠ 尝试**：一条 `w1 限流 → w2 成功` 的重试链是**一个**请求、
- *    **两次**尝试。两个数字都显示，且标注清楚 —— 这是本页最容易被当成
- *    同一个量的两个数。
+ *    **两次**尝试。两个数字都显示，且标注清楚。
  * 2. **缺失的 usage 如实显示为缺失**：免费模型的响应未必带 usage。
- *    把没报的按均值补上会让「缓存命中率」凭空变好看，而那比没有数字更糟。
- * 3. **`dropped` 单独一栏**：那是**我们自己**没解析完整（响应过大/中途断流），
- *    不是上游没报。处置方向相反 —— 前者要改我们的界定常量，后者不用改。
+ *    把没报的按均值补上会让「缓存命中率」凭空变好看。
+ * 3. **「未完整解析」单独一栏**：那是网关没能读完整个响应（响应过大或中途断流），
+ *    不是上游没报。前者是网关侧的限制，后者是上游的行为，排查方向不同。
  */
 
 /** 比值的显示。**null 是「没有数据」而不是 0%** —— 显示为「—」。 */
@@ -40,6 +40,46 @@ const REJECTION_LABEL: Record<string, string> = {
   no_worker: "没有可用 Worker",
 };
 
+type ModelStat = StatsView["models"][number];
+type WorkerStat = StatsView["workers"][number];
+
+const MODEL_COLUMNS: ReadonlyArray<Column<ModelStat>> = [
+  { key: "model", header: "模型", render: (m) => <Mono>{m.model}</Mono> },
+  { key: "in", header: "输入", numeric: true, render: (m) => compact(m.inputTokens) },
+  { key: "out", header: "输出", numeric: true, render: (m) => compact(m.outputTokens) },
+  { key: "cache", header: "命中读", numeric: true, render: (m) => compact(m.cacheReadTokens) },
+  { key: "with", header: "有用量", numeric: true, render: (m) => m.requestsWithUsage },
+  // 「上游未报」与「未完整解析」分两列 —— 一个是上游的行为，一个是网关侧的限制。
+  { key: "without", header: "未报", numeric: true, render: (m) => m.requestsWithoutUsage },
+  {
+    key: "dropped",
+    header: "未完整解析",
+    numeric: true,
+    render: (m) => (
+      <span className={m.requestsDroppedUsage > 0 ? "text-warn" : ""}>{m.requestsDroppedUsage}</span>
+    ),
+  },
+];
+
+const WORKER_COLUMNS: ReadonlyArray<Column<WorkerStat>> = [
+  { key: "id", header: "Worker", render: (w) => <Mono>{w.workerId}</Mono> },
+  { key: "attempts", header: "尝试", numeric: true, render: (w) => w.attempts },
+  { key: "ok", header: "成功", numeric: true, render: (w) => w.successes },
+  {
+    key: "fail",
+    header: "失败",
+    numeric: true,
+    render: (w) => <span className={w.failures > 0 ? "text-warn" : ""}>{w.failures}</span>,
+  },
+  {
+    key: "status",
+    header: "最近状态码",
+    numeric: true,
+    render: (w) =>
+      w.lastStatus === null ? <span className="text-text-muted">—</span> : <Mono>{w.lastStatus}</Mono>,
+  },
+];
+
 export function UsagePage({
   data,
   days,
@@ -56,25 +96,18 @@ export function UsagePage({
       <Panel
         title="用量"
         action={
-          <div className="flex gap-1">
+          <div className="flex gap-1" role="group" aria-label="时间范围">
             {[
               { value: "7", label: "7 天" },
               { value: "30", label: "30 天" },
               { value: "all", label: "全部" },
             ].map((opt) => (
-              <button
+              <FilterChip
                 key={opt.value}
-                type="button"
+                active={days === opt.value}
                 onClick={() => onDays(opt.value)}
-                aria-pressed={days === opt.value}
-                className={`min-h-[44px] rounded-xs border px-3 ${
-                  days === opt.value
-                    ? "border-accent-fg text-accent-fg font-medium"
-                    : "border-border-strong text-text-muted"
-                }`}
-              >
-                {opt.label}
-              </button>
+                label={opt.label}
+              />
             ))}
           </div>
         }
@@ -101,14 +134,7 @@ export function UsagePage({
         <p className="mt-5 border-t border-border pt-4 text-text-muted">
           统计范围：
           {data.sinceDay === null ? "全部历史" : `${data.sinceDay} 起`}
-          {data.sinceDay !== null && (
-            <>
-              {" "}
-              —— 默认带时间窗是<Strong>刻意的</Strong>：那个请求计数要全表扫（
-              <Mono>COUNT(DISTINCT request_id)</Mono>）且是同步调用，
-              不限范围会阻塞事件循环。
-            </>
-          )}
+          {data.sinceDay !== null && "。选「全部」统计全部历史，数据多时会慢一些。"}
         </p>
 
         {data.rates.droppedUsageCount > 0 && (
@@ -116,11 +142,11 @@ export function UsagePage({
             <StatusIndicator
               tone="warn"
               icon="!"
-              label={`${data.rates.droppedUsageCount} 次响应我们没解析完整`}
+              label={`${data.rates.droppedUsageCount} 次响应网关未完整解析`}
             />
             <p className="mt-1 text-text-muted">
-              这是<Strong>我们自己</Strong>丢了用量（响应过大或中途断流），<Strong>不是</Strong>上游没报 ——
-              两者的处置方向相反。非 0 说明要看我们的界定常量。
+              这些响应过大或中途断流，网关没能读到其中的用量；<Strong>不是</Strong>上游没报。
+              它们的 token 数没有计入上面的统计。
             </p>
           </div>
         )}
@@ -135,42 +161,13 @@ export function UsagePage({
             </p>
           </div>
         ) : (
-          <table className="w-full border-collapse text-left">
-            <thead>
-              <tr className="border-b border-border-strong text-text-muted">
-                <th className="py-2 font-medium">模型</th>
-                <th className="py-2 font-medium" data-numeric="">输入</th>
-                <th className="py-2 font-medium" data-numeric="">输出</th>
-                <th className="py-2 font-medium" data-numeric="">命中读</th>
-                <th className="py-2 font-medium" data-numeric="">有用量</th>
-                <th className="py-2 font-medium" data-numeric="">未报</th>
-                <th className="py-2 font-medium" data-numeric="">我们丢了</th>
-              </tr>
-            </thead>
-            <tbody>
-              {data.models.map((m) => (
-                <tr
-                  key={m.model}
-                  className="border-b border-border last:border-0"
-                  style={{ height: "44px" }}
-                  data-model={m.model}
-                >
-                  <td>
-                    <Mono>{m.model}</Mono>
-                  </td>
-                  <td data-numeric="">{compact(m.inputTokens)}</td>
-                  <td data-numeric="">{compact(m.outputTokens)}</td>
-                  <td data-numeric="">{compact(m.cacheReadTokens)}</td>
-                  <td data-numeric="">{m.requestsWithUsage}</td>
-                  {/* 「上游没报」与「我们丢了」分两列 —— 处置方向相反。 */}
-                  <td data-numeric="">{m.requestsWithoutUsage}</td>
-                  <td data-numeric="" className={m.requestsDroppedUsage > 0 ? "text-warn" : ""}>
-                    {m.requestsDroppedUsage}
-                  </td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
+          <SimpleTable
+            label="按模型用量"
+            rows={data.models}
+            columns={MODEL_COLUMNS}
+            rowKey={(m) => m.model}
+            rowAttr="data-model"
+          />
         )}
       </Panel>
 
@@ -178,43 +175,13 @@ export function UsagePage({
         {data.workers.length === 0 ? (
           <p className="text-text-muted">还没有上游尝试记录。</p>
         ) : (
-          <table className="w-full border-collapse text-left">
-            <thead>
-              <tr className="border-b border-border-strong text-text-muted">
-                <th className="py-2 font-medium">Worker</th>
-                <th className="py-2 font-medium" data-numeric="">尝试</th>
-                <th className="py-2 font-medium" data-numeric="">成功</th>
-                <th className="py-2 font-medium" data-numeric="">失败</th>
-                <th className="py-2 font-medium" data-numeric="">最近状态码</th>
-              </tr>
-            </thead>
-            <tbody>
-              {data.workers.map((w) => (
-                <tr
-                  key={w.workerId}
-                  className="border-b border-border last:border-0"
-                  style={{ height: "44px" }}
-                  data-worker-stat={w.workerId}
-                >
-                  <td>
-                    <Mono>{w.workerId}</Mono>
-                  </td>
-                  <td data-numeric="">{w.attempts}</td>
-                  <td data-numeric="">{w.successes}</td>
-                  <td data-numeric="" className={w.failures > 0 ? "text-warn" : ""}>
-                    {w.failures}
-                  </td>
-                  <td data-numeric="">
-                    {w.lastStatus === null ? (
-                      <span className="text-text-muted">—</span>
-                    ) : (
-                      <Mono>{w.lastStatus}</Mono>
-                    )}
-                  </td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
+          <SimpleTable
+            label="按 Worker 用量"
+            rows={data.workers}
+            columns={WORKER_COLUMNS}
+            rowKey={(w) => w.workerId}
+            rowAttr="data-worker-stat"
+          />
         )}
       </Panel>
 
@@ -241,8 +208,7 @@ export function UsagePage({
             {data.rejections["not_free"] !== undefined && data.rejections["retired"] !== undefined && (
               <p className="mt-3 text-text-muted">
                 <Strong>「不是免费模型」与「已下架」的处置不同</Strong>：前者改客户端用的模型名，
-                后者删 <Mono>extraFreeIds</Mono> 里那个条目。哪种多正是
-                「该改文档还是该改配置」的那个数字。
+                后者从模型页的无后缀免费名单（<Mono>extraFreeIds</Mono>）里删掉那个条目。
               </p>
             )}
           </>
