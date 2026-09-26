@@ -12,4 +12,28 @@ import { cleanup } from "@testing-library/react";
  */
 afterEach(() => {
   cleanup();
+  window.localStorage.clear();
+  delete document.documentElement.dataset.theme;
 });
+
+/*
+ * jsdom 没有实现 `HTMLDialogElement.showModal/close`。
+ *
+ * 这里只补状态：`open` 属性与 close 事件。模态本身的焦点圈定、背景 inert
+ * 属于浏览器行为，不在组件测试范围内；截图验证覆盖真实渲染。
+ * 只在缺失时补，避免 jsdom 将来实现后被这里覆盖。
+ */
+const proto = window.HTMLDialogElement?.prototype;
+if (proto !== undefined && typeof proto.showModal !== "function") {
+  proto.showModal = function showModal(this: HTMLDialogElement) {
+    this.setAttribute("open", "");
+  };
+  proto.show = function show(this: HTMLDialogElement) {
+    this.setAttribute("open", "");
+  };
+  proto.close = function close(this: HTMLDialogElement) {
+    if (!this.hasAttribute("open")) return;
+    this.removeAttribute("open");
+    this.dispatchEvent(new Event("close"));
+  };
+}

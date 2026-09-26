@@ -62,7 +62,7 @@ export type SubscriptionFormat = "clash" | "sip008" | "uri-list" | "empty";
  *
  * 订阅体里的 `mixed-port` / `external-controller` 只是**提示**，
  * 不是真相：真正在跑的内核可能用了别的端口（用户改过、或多内核并存）。
- * 真相只能从 Controller 的 `/configs` 读（那是 Phase 8 实测钉下的结论）。
+ * 真相只能从 Controller 的 `/configs` 读（那是实测钉下的结论）。
  * 所以这些字段只用于"猜一个默认值填进表单"，绝不能直接拿来配桥接。
  */
 export type ClashHints = {

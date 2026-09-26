@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { createServer, type Server } from "node:http";
 import { fetch } from "undici";
 import {
@@ -58,7 +58,6 @@ describe("dispatcher 缓存", () => {
     const p = pool();
     const target: EgressTarget = { mode: "direct", proxy: proxy() };
     expect(p.get(target)).toBe(p.get(target));
-    expect(p.size).toBe(1);
   });
 
   it("端口变了就重建,不复用连到旧地址的那个", () => {
@@ -66,8 +65,8 @@ describe("dispatcher 缓存", () => {
     const first = p.get({ mode: "direct", proxy: proxy({ port: 1080 }) });
     const second = p.get({ mode: "direct", proxy: proxy({ port: 1081 }) });
     expect(second).not.toBe(first);
-    // 仍是同一个 id,所以缓存里只有一个条目。
-    expect(p.size).toBe(1);
+    // 仍是同一个 id:回到旧端口也得新建,说明旧条目已被替换而不是并存。
+    expect(p.get({ mode: "direct", proxy: proxy({ port: 1080 }) })).not.toBe(first);
   });
 
   it("主机变了就重建", () => {
@@ -131,15 +130,15 @@ describe("dispatcher 缓存", () => {
 
   it("不同代理各占一个条目", () => {
     const p = pool();
-    p.get({ mode: "direct", proxy: proxy({ id: "p1" }) });
-    p.get({ mode: "direct", proxy: proxy({ id: "p2" }) });
-    expect(p.size).toBe(2);
+    const p1 = p.get({ mode: "direct", proxy: proxy({ id: "p1" }) });
+    const p2 = p.get({ mode: "direct", proxy: proxy({ id: "p2" }) });
+    expect(p2).not.toBe(p1);
+    expect(p.get({ mode: "direct", proxy: proxy({ id: "p1" }) })).toBe(p1);
   });
 
   it("mode=none 复用同一个本机出口 dispatcher", () => {
     const p = pool();
     expect(p.get({ mode: "none" })).toBe(p.get({ mode: "none" }));
-    expect(p.size).toBe(1);
   });
 
   it("桥接模式按内核与本地端口缓存", () => {
@@ -225,26 +224,20 @@ describe("协议支持", () => {
 });
 
 describe("生命周期", () => {
-  it("reset 清空缓存", async () => {
-    const p = pool();
-    p.get({ mode: "direct", proxy: proxy() });
-    expect(p.size).toBe(1);
-    await p.reset();
-    expect(p.size).toBe(0);
-  });
-
   it("close 之后拒绝再取", async () => {
     const p = pool();
     await p.close();
     expect(() => p.get({ mode: "none" })).toThrow(DispatcherError);
   });
 
-  it("reset 后可继续使用", async () => {
+  it("destroy 立即断开缓存中的 dispatcher,之后拒绝再取", () => {
     const p = pool();
-    await p.reset();
-    expect(() => p.get({ mode: "none" })).not.toThrow();
-  });
-});
+    const current = p.get({ mode: "direct", proxy: proxy() });
+    const destroy = vi.spyOn(current, "destroy");
+    p.destroy();
+    expect(destroy).toHaveBeenCalled();
+    expect(() => p.get({ mode: "none" })).toThrow(DispatcherError);
+  });});
 
 describe("超时确实生效", () => {
   it("headersTimeout 掐断迟迟不发响应头的上游", async () => {

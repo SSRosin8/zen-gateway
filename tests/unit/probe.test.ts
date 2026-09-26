@@ -192,7 +192,15 @@ describe("probeEgress", () => {
       expect(out.ok).toBe(true);
       // 顺序必须是先切换后请求;反过来就是从上一个节点出去了。
       expect(calls).toEqual(["select:GLOBAL/🇺🇲 节点 A", "fetch"]);
-      expect(lock.pending).toBe(0);
+      // 探测结束后锁已释放:新任务立即执行,不排在任何残留任务之后。
+      let next = false;
+      const probe = lock.run(async () => {
+        next = true;
+      });
+      await Promise.resolve();
+      await Promise.resolve();
+      expect(next).toBe(true);
+      await probe;
     } finally {
       await dispatcher.close();
       await s.close();
@@ -376,15 +384,15 @@ describe("buildIsolationReport", () => {
 });
 
 /* ================================================================== *
- * latencyMs 的边界（第十轮审核）
+ * latencyMs 的边界
  * ================================================================== */
 
 describe("probeEgress 的 latencyMs 是非负整数", () => {
   /*
-   * 先前这里是裸的 `now() - started`，而 `elapsedMs()` 只存在于
-   * `upstream/retry.ts` 内部（两个 core 子目录各写一遍 —— 纪律 #4）。
+   * 不能用裸的 `now() - started` 各写一遍（纪律 #4），耗时要从同一个
+   * `elapsedMs()` 取。
    *
-   * 两个后果都实测过：
+   * 裸减法的两个后果都实测过：
    * - `probe_results.latency_ms` 是 STRICT 表的 INTEGER 列，非整数被拒后
    *   `recordProbe` 整条事务回滚；
    * - `ProbeResultSchema` 要求 `.int().nonnegative()`，而 `POST /api/probe`

@@ -2,27 +2,31 @@
 
 zen-gateway 是一个运行在本机的 OpenCode Zen 网关。它接收 OpenAI 兼容的
 Chat Completions、Responses，以及 Anthropic Messages 请求，只放行配置为免费
-模型的请求，并按 Worker 选择配置的直连或 Clash 出口；后台的公网 IP 探测只反映
-IP 回显目标，Zen 实际出口需在请求期间核对上游连接。
+模型的请求，并按 Worker 选择配置的直连或 Clash 出口。
 
 这是单用户工具：上游固定为 Zen，管理面只监听本机回环地址，不提供多租户或
 对外服务。请求体按原始字节转发，网关只解析路由、模型和流式事件所需的字段。
 
 ## 快速开始
 
-需要 Node.js 24 或更高版本。
+需要 Node.js 24 或更高版本。网关和管理后台是两个进程：
 
 ```bash
 npm install
-npm start
-npm run dev       # 另开终端启动管理后台
-npm run open      # 打开管理后台
+npm start         # 终端 1：构建并启动网关，端口用 npm run status 查看
+npm run dev       # 终端 2：Vite 管理后台，http://127.0.0.1:5173
+npm run open      # 可选：用浏览器打开 5173
 ```
+
+网关端口只提供 `/health`、`/v1/*`、无前缀协议别名和 `/api/*`，不提供页面
+（`GET /` 返回 404）。后台页面只在 `npm run dev` 运行时可用；`npm run open` 和
+`npm start -- --open` 只检查网关、不检查 Vite 是否在运行。完整说明见
+[`docs/usage.md`](docs/usage.md#安装和运行)。
 
 首次启动会创建 `data/config.json` 并生成 Relay Token。管理后台的 Worker 页可
 新增、编辑和删除 Worker；认证 Worker 填 Zen API key，匿名 Worker 不发送任何
 上游凭证。代理和 Clash 内核可以手工写入配置，也可以用 `npm run setup` 探测
-本机 Controller。
+本机 Controller：
 
 ```bash
 npm run setup -- --dry-run
@@ -31,41 +35,26 @@ npm run restart
 npm run doctor
 ```
 
-`setup` 会写入配置，但运行中的服务不会自动加载这些变更；第一次使用建议先运行
-`--dry-run`，写入后执行 `npm run restart`。`doctor` 默认只读；
-`npm run doctor -- --deep` 会真实探测 IP 回显目标的出口，并在桥接模式下切换
-Clash selector；它不单独证明 Zen 实际请求的出口。
+`setup` 写入后必须重启；重启前不要在后台保存配置，原因见
+[`docs/usage.md`](docs/usage.md#导入-clash-出口)。
 
 ## 配置 OpenCode
 
-网关实际端口由 `ZG_PORT`、`data/config.json` 的 `gateway.port`、默认值 9876
-依次决定。先运行 `npm run status` 查看当前端口，再按
-[`docs/usage.md`](docs/usage.md) 的兼容 OpenCode 1/2 配置示例替换端口和 Relay
-Token。后台网关页可选择 1.x 或 2.x 格式生成对应配置块；两种格式都只覆盖 Base URL
-和 API Key，Relay Token 仍是占位符，模型与 SDK 继续由 OpenCode 自己管理。
-
-OpenCode 2.0.12 的隔离实测确认，`providers.opencode.settings` 会把已在客户端模型
-目录中的模型请求指向本地网关；不要为了补齐客户端目录而在这里复制 `package` 或
-`models`。若 CLI 报 `Model unavailable`，先检查它自己的模型目录，不能据此判断网关
-没有接管 Base URL。
-
-用真实 OpenCode CLI 验证当前可用的 Chat Completions 模型：
+先运行 `npm run status` 查看网关实际端口，再按
+[`docs/usage.md`](docs/usage.md#客户端接入) 的 OpenCode 1.x/2.x 示例替换端口和
+Relay Token；后台网关页也能生成对应片段。两种格式都只覆盖 Base URL 和 API Key，
+模型与 SDK 继续由 OpenCode 自己管理。
 
 ```bash
-opencode run --model opencode/space-bunny-free "Reply with exactly: OK"
+opencode run --model opencode/big-pickle "Reply with exactly: OK"
 ```
 
-当前 Zen 免费模型的真实 CLI 验收以 Chat Completions 和 Responses 为范围；
-Messages 路由已完成网关级实现，但当前没有可验的免费上游模型。手工 curl 与真实
-客户端的请求头和请求体可能不同，某一种请求得到的 403 或 500 不能推广为所有
-客户端的结论。停止网关后重复同一条 CLI 命令应连接失败，重启后恢复，这可以
-确认请求确实经过网关。
-验收匿名 Worker 时必须使用新的 OpenCode 会话和隔离状态目录；已有会话的亲和绑定优先
-于 `anonymous_first`，会继续使用原认证 Worker，这是保持上游推理连续性的设计。
-临时网关的运行库和 `x-zen-gateway-worker` 响应头才是判断实际 Worker 的依据，官方
-控制台记录不能单独证明本机中继使用了哪个 Worker。`/v1/models` 若返回 502，先核对
-服务进程的 `NODE_EXTRA_CA_CERTS` 和日志中的证书链错误；这表示目录从未成功取得，
-不表示匿名请求带上了认证 key。
+验收要点（详见 [`docs/usage.md`](docs/usage.md#客户端验收)）：
+
+- 用真实 OpenCode CLI 验收，手工 curl 的结果不能推广到客户端。
+- 停止网关后同一命令应失败、重启后恢复，以此确认请求经过网关。
+- 匿名 Worker 验收使用全新会话和隔离状态目录，否则旧亲和会继续用原 Worker。
+- CLI 报 `Model unavailable` 先查客户端自己的模型目录。
 
 ## 主要能力
 
@@ -76,7 +65,7 @@ Messages 路由已完成网关级实现，但当前没有可验的免费上游�
 - Worker 会话粘滞、故障冷却和有限重试。Responses 的 `previous_response_id` 与
   成功响应的 `response.id` 都参与绑定。
 - 每个 Worker 绑定一个直连代理、Clash 桥接代理或本机直连出口；批量探测按 IP
-  回显目标的实测公网 IP 分组，真实 Zen 出口需核对上游连接。
+  回显目标的实测公网 IP 分组（[测量范围](docs/usage.md#回显-ip-的测量范围)）。
 - 管理后台提供概览、网关、代理池、Worker、模型、用量六页，以及批量探测和
   订阅刷新。
 
@@ -104,14 +93,12 @@ npm run validate
 - `data/zen-gateway.log`：脱敏日志，不记录对话正文。
 - `opencode.json`、`data/`、`.env*`：不要提交，项目已在 `.gitignore` 中忽略。
 
-管理 API 请求体上限为 1 MiB，转发请求体上限为 64 MiB。上游目录从未成功拉取
-过时，`/v1/models` 返回 502 `upstream_unreachable`；目录已拉取但免费集为空
-时才返回空的模型列表。自定义 CA、代理出口和 Clash 的排查步骤见
-[`docs/usage.md`](docs/usage.md)。
+自定义 CA、代理出口和 Clash 的排查步骤见 [`docs/usage.md`](docs/usage.md)。
 
 ## 文档
 
 - [`docs/usage.md`](docs/usage.md)：安装、配置、API、出口和故障排查。
+- [`docs/requirements.md`](docs/requirements.md)：功能边界与验收矩阵。
 - [`docs/architecture.md`](docs/architecture.md)：模块边界和请求流程。
 - [`docs/upstream-quirks.md`](docs/upstream-quirks.md)：带日期和请求范围的上游观察。
 - [`AGENTS.md`](AGENTS.md)：开发约定与验证关卡。

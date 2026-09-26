@@ -81,8 +81,7 @@ describe("代理池页", () => {
     stubIdleBatch();
     /*
      * 密度选宽松（行高 44px）的直接后果是一屏约 12 行，而代理池可能有几十个
-     * 节点（本机实测 69 个）。所以分页是**必需项**，且页长必须与密度一致 ——
-     * 规划里先前写 20，那与自己的密度结论矛盾。
+     * 节点。所以分页是**必需项**，且页长必须与密度一致。
      */
     expect(PAGE_SIZE).toBe(12);
 
@@ -113,7 +112,7 @@ describe("代理池页", () => {
     expect(container.textContent).toContain("代理 p1 已停用");
   });
 
-  it("本地端口必须显示 —— 它是 Phase 8 实测出的高风险字段", () => {
+  it("本地端口必须显示 —— 它是高风险字段", () => {
     stubIdleBatch();
     const { container } = render(
       <ProxyPage data={proxyList([proxy({ port: 7897 })])} view={view} navigate={noop} />,
@@ -196,7 +195,7 @@ describe("代理池页", () => {
      * 「没有匹配」还是「翻过头了」。URL 可手编（`?page=99`）也会走到这里。
      *
      * 变异测试逼出来的:去掉 `Math.min(Math.max(1, page), totalPages)` 之后
-     * 整套 83 条测试**依然全绿** —— 没有一条覆盖这条路径。
+     * 整套测试**依然全绿** —— 没有一条覆盖这条路径。
      */
     const rows = Array.from({ length: 15 }, (_, i) =>
       proxy({ id: `p${i}`, name: `节点${i}`, usedBy: [] }),
@@ -286,7 +285,7 @@ describe("模型页", () => {
 
   it("显示协议面（`surfacesFor` 的第一个生产调用点，只作展示）", () => {
     render(<ModelsPage data={modelList()} view={parseHash("#models")} navigate={noop} />);
-    // 缺口 #10:它不能接成放行闸门(默认值会让 /v1/messages 全被拒)。
+    // 只作展示:它不能接成放行闸门(默认值会让 /v1/messages 全被拒)。
     expect(screen.getAllByText("chat").length).toBeGreaterThan(0);
   });
 
@@ -366,11 +365,19 @@ describe("用量页", () => {
     expect(screen.getAllByText("—").length).toBeGreaterThanOrEqual(2);
   });
 
-  it("「上游没报」与「我们丢了」是两列", () => {
+  it("「上游未报」与「未完整解析」是两列", () => {
     render(<UsagePage data={stats()} days="30" onDays={noop} />);
-    // 处置方向相反:前者是上游的性质，后者说明我们的界定常量要改。
-    expect(screen.getByText("未报")).toBeInTheDocument();
-    expect(screen.getByText("我们丢了")).toBeInTheDocument();
+    // 一个是上游的行为，一个是网关侧的限制，排查方向不同。
+    expect(screen.getByRole("columnheader", { name: "未报" })).toBeInTheDocument();
+    expect(screen.getByRole("columnheader", { name: "未完整解析" })).toBeInTheDocument();
+  });
+
+  it("不向用户展示实现细节", () => {
+    const { container } = render(<UsagePage data={stats()} days="30" onDays={noop} />);
+    const text = container.textContent ?? "";
+    expect(text).not.toContain("COUNT(DISTINCT");
+    expect(text).not.toContain("事件循环");
+    expect(text).not.toContain("我们");
   });
 
   it("dropped 非 0 时单独告警并说明它不是上游的问题", () => {
@@ -381,7 +388,7 @@ describe("用量页", () => {
         onDays={noop}
       />,
     );
-    expect(screen.getByText(/4 次响应我们没解析完整/)).toBeInTheDocument();
+    expect(screen.getByText(/4 次响应网关未完整解析/)).toBeInTheDocument();
     /*
      * 用**整段的 textContent** 匹配,而不是 `getByText(/不是.*上游没报/)`。
      *
@@ -389,11 +396,11 @@ describe("用量页", () => {
      * 而 Testing Library 的默认匹配是逐节点的 —— 跨节点的正则匹配不到。
      * 用户看到的字一个没变,变的只是 DOM 结构。
      *
-     * 这也是第八轮审核发现「六个页面渲染出字面 `**`」时,既有测试全都没报警的
+     * 这也是页面渲染出字面 `**` 时,关键词断言全都不报警的
      * 原因:它们用的正则（`/不要写/`、`/GLOBAL/`）恰好落在星号之间,
      * 于是对「有没有星号」完全不敏感。
      */
-    const banner = screen.getByText(/4 次响应我们没解析完整/).closest("section");
+    const banner = screen.getByText(/4 次响应网关未完整解析/).closest("section");
     expect(banner?.textContent).toMatch(/不是[\s\S]*上游没报/);
     // 同时钉住「不渲染字面 markdown」—— 那是这次真正要防的回归。
     expect(banner?.textContent).not.toContain("**");
@@ -403,7 +410,7 @@ describe("用量页", () => {
     render(<UsagePage data={stats()} days="30" onDays={noop} />);
     expect(screen.getByText("不是免费模型")).toBeInTheDocument();
     expect(screen.getByText("已下架")).toBeInTheDocument();
-    expect(screen.getByText(/该改文档还是该改配置/)).toBeInTheDocument();
+    expect(screen.getByText(/无后缀免费名单/)).toBeInTheDocument();
   });
 
   it("这些请求从未到达上游 —— 要说清楚", () => {
@@ -601,7 +608,7 @@ describe("首启向导", () => {
       catalog: { slots: [], freeCount: 10 },
       proxies: { total: 3, enabled: 3, withEgressIp: 3 },
     });
-    const { container } = render(<Wizard data={data} />);
+    const { container } = render(<Wizard data={data} onCreateWorker={noop} />);
 
     expect(container.querySelectorAll("[data-step]")).toHaveLength(4);
     // 目录与代理都齐了 → 前两步打勾。
@@ -612,7 +619,7 @@ describe("首启向导", () => {
   it("给出的配置只覆盖网关地址与凭证占位符", () => {
     const data = fakeOverview();
     data.gateway.port = 19876;
-    render(<Wizard data={data} />);
+    render(<Wizard data={data} onCreateWorker={noop} />);
     const snippet = screen.getByText(/"providers":/, { selector: "pre" }).textContent ?? "";
     expectLocalOpenCodeProvider(snippet, 19876);
     expect(screen.getByText(/OpenCode 配置格式/)).toBeInTheDocument();
@@ -623,14 +630,14 @@ describe("首启向导", () => {
     const user = userEvent.setup();
     const data = fakeOverview();
     data.gateway.port = 19876;
-    render(<Wizard data={data} />);
+    render(<Wizard data={data} onCreateWorker={noop} />);
     await user.selectOptions(screen.getByRole("combobox", { name: "OpenCode 版本" }), "1");
     const snippet = screen.getByText(/"provider":/, { selector: "pre" }).textContent ?? "";
     expectLocalOpenCodeProvider(snippet, 19876, "1");
   });
 
   it("每一步都给可直接跑的命令", () => {
-    const { container } = render(<Wizard data={fakeOverview()} />);
+    const { container } = render(<Wizard data={fakeOverview()} onCreateWorker={noop} />);
     // 空状态的价值在于下一步 —— 与 doctor 的分层同一个理由。
     expect(container.textContent).toContain("npm run setup");
     expect(container.textContent).toContain("opencode run");
@@ -638,7 +645,7 @@ describe("首启向导", () => {
   });
 
   it("说明匿名与认证 Worker 的 key 要求不同", () => {
-    render(<Wizard data={fakeOverview()} />);
+    render(<Wizard data={fakeOverview()} onCreateWorker={noop} />);
     expect(screen.getByText(/匿名 Worker 可以不填 key/)).toBeInTheDocument();
   });
 });
@@ -649,7 +656,7 @@ describe("首启向导", () => {
 
 describe("文案不渲染字面 markdown", () => {
   /*
-   * 第八轮审核发现:六个页面共二十多处文案带着字面 `**` 显示给用户,
+   * 文案带着字面 `**` 显示给用户的问题,
    * 而且集中在**最要紧的那些警告**上 —— GLOBAL 分组陷阱、mixed-port 陷阱、
    * 「免 key 通道已关闭」、「只能用真实 CLI」。也就是说最需要被看清的句子
    * 显示得最糟。
@@ -681,7 +688,7 @@ describe("文案不渲染字面 markdown", () => {
     ["Worker", () => <WorkersPage data={fakeOverview()} view={parseHash("#workers")} navigate={noop} />],
     ["模型", () => <ModelsPage data={modelList()} view={parseHash("#models")} navigate={noop} />],
     ["用量", () => <UsagePage data={stats()} days="30" onDays={noop} />],
-    ["向导", () => <Wizard data={fakeOverview()} />],
+    ["向导", () => <Wizard data={fakeOverview()} onCreateWorker={noop} />],
   ];
 
   for (const [name, mount] of pages) {
@@ -710,7 +717,7 @@ describe("文案不渲染字面 markdown", () => {
 });
 
 /* ================================================================== *
- * 订阅标签（Phase 10）
+ * 订阅标签
  * ================================================================== */
 
 function subView(over: Partial<ProxyList["subscriptions"][number]> = {}): ProxyList["subscriptions"][number] {
@@ -762,7 +769,7 @@ describe("订阅标签", () => {
 
   it("停用时也把失败原因带上 —— 不是一条 early return 就完事", () => {
     /*
-     * 第八轮在 `proxyStatus` 上踩过这个形态：`if (!enabled) return "已停用"`
+     * `proxyStatus` 上出现过这个形态：`if (!enabled) return "已停用"`
      * 让最常见的那类输入永远看不到原因。这里是同一个教训的预防。
      */
     const s = subscriptionStatus(subView({ enabled: false, lastErrorKind: "timeout" }));

@@ -8,7 +8,7 @@ import { ANTHROPIC_VERSION } from "../../src/core/protocols/messages.ts";
 import { ConfigSchema, type Config } from "../../src/shared/schema.ts";
 
 /**
- * Phase 6 的集成测试 —— 三个协议面 + 目录交集 + 用量,对着**真实 HTTP 假上游**跑。
+ * 协议面集成测试 —— 三个协议面 + 目录交集 + 用量,对着**真实 HTTP 假上游**跑。
  *
  * ## 为什么这些必须是集成测试
  *
@@ -17,7 +17,7 @@ import { ConfigSchema, type Config } from "../../src/shared/schema.ts";
  * Messages 面的 `x-api-key` 恰好是一个**会被剥离规则命中**的头名,
  * 所以"面返回了它"与"上游收到了它"是两件不同的事,而只有后者才是我们要的性质。
  *
- * 同理,Phase 6 的验收条件(新增面不动路由与鉴权)只能在装配层验。
+ * 同理,「新增面不动路由与鉴权」这一性质只能在装配层验。
  */
 
 const TOKEN = "phase6-test-token-x";
@@ -118,14 +118,12 @@ function relayCalls() {
   return calls.filter((c) => c.method === "POST");
 }
 
-describe("Phase 6 验收:新增两个面不动路由与鉴权", () => {
+describe("新增协议面不动路由与鉴权", () => {
   it("三个面六条路径全部可路由到上游", async () => {
     /*
-     * 规划的验收条件原话:「Phase 6 通过注册表新增 responses 与 messages
-     * 来证明机制成立 —— 若新增一个面还需改路由或调度,抽象即失败」。
-     *
-     * 这一轮实际改动:`app.ts` 里两行 `.register(...)`。路由、鉴权守卫、
-     * 调度、重试、透传都一行未改。
+     * 通过注册表新增 responses 与 messages 来证明机制成立 —— 若新增一个面
+     * 还需改路由或调度,抽象即失败。新增面在 `app.ts` 里只应是 `.register(...)`,
+     * 路由、鉴权守卫、调度、重试、透传都不该跟着改。
      */
     const bodies: Record<string, unknown> = {
       "/v1/chat/completions": { model: "big-pickle", messages: [{ role: "user", content: "hi" }] },
@@ -156,16 +154,12 @@ describe("Phase 6 验收:新增两个面不动路由与鉴权", () => {
     }
   });
 
-  it("**无前缀别名同样有鉴权** —— 第四轮那个免鉴权中继不会复现", async () => {
+  it("**无前缀别名同样有鉴权** —— 免鉴权中继不会复现", async () => {
     /*
-     * 第四轮审核的最严重缺陷:守卫挂的是 `/v1/*` + `/chat/*` + `/models`
-     * 三条**字面量**,而路由从 `registry.paths()` 动态挂载。审核按注释自己
-     * 承诺的 Phase 6 形态注册两个面后实测:`/v1/responses` 有鉴权,
+     * 若守卫挂的是 `/v1/*` + `/chat/*` + `/models` 三条**字面量**,而路由从
+     * `registry.paths()` 动态挂载,注册两个面后 `/v1/responses` 有鉴权,
      * 而**无前缀别名 `/responses` 完全绕过** —— 成为本机任意进程可用的、
-     * 消耗用户 Worker key 的免鉴权中继。
-     *
-     * 那时这是个假想(面还没注册)。**现在两个面真的在了**,所以这条
-     * 从"按假想构造"变成了"对真实装配的回归守卫"。
+     * 消耗用户 Worker key 的免鉴权中继。这条对真实装配逐条路径验证。
      */
     for (const path of buildRegistry().paths()) {
       const res = await app().request(path, {
@@ -234,8 +228,8 @@ describe("Messages 面的凭证镜像 —— 少了它整池 Worker 会被冷却
      * 原样转发等于把它泄露给上游。Messages 面的镜像必须用**我们的** key,
      * 而不是客户端发来的那个。
      *
-     * 头值用纯 ASCII:HTTP 头是 ISO-8859-1,我第一版在头值里放了中文,
-     * 于是 Hono 在构造请求时就抛 ByteString 转换错误 —— 那是一个**真实客户端
+     * 头值用纯 ASCII:HTTP 头是 ISO-8859-1,头值里放中文时
+     * Hono 在构造请求时就抛 ByteString 转换错误 —— 那是一个**真实客户端
      * 根本发不出来**的请求形态,测它没有意义(纪律 #1 的第一类:
      * 测的路径根本不存在)。
      */
@@ -250,14 +244,69 @@ describe("Messages 面的凭证镜像 —— 少了它整池 Worker 会被冷却
   });
 });
 
+describe("Messages 面接受 x-api-key 形式的 Relay Token", () => {
+  const messagesBody = { model: "big-pickle", max_tokens: 8, messages: [] };
+  const withHeaders = (headers: Record<string, string>) => ({
+    method: "POST",
+    headers: { "content-type": "application/json", ...headers },
+    body: JSON.stringify(messagesBody),
+  });
+
+  it("只带 x-api-key 的 Messages 请求放行,且上游收不到客户端的 x-api-key", async () => {
+    for (const path of ["/v1/messages", "/messages"]) {
+      calls = [];
+      const res = await app().request(path, withHeaders({ "x-api-key": TOKEN }));
+      expect(res.status, path).toBe(200);
+      const sent = relayCalls()[0]?.headers;
+      // 认证 Worker 的 key 被镜像进去,而 Relay Token 绝不能到上游。
+      expect(sent?.["x-api-key"]).toBe("fake-key-w1-not-real");
+      expect(JSON.stringify(sent)).not.toContain(TOKEN);
+    }
+  });
+
+  it("匿名 Worker 转发时不带任何 x-api-key,客户端那个也不漏过去", async () => {
+    const cfg = config({
+      workers: [{ id: "a1", name: "", kind: "anonymous", apiKey: "", enabled: true, proxyId: null }],
+    });
+    const res = await app(cfg).request("/v1/messages", withHeaders({ "x-api-key": TOKEN }));
+    expect(res.status).toBe(200);
+    const sent = relayCalls()[0]?.headers;
+    expect(sent?.["x-api-key"]).toBeUndefined();
+    expect(sent?.["authorization"]).toBeUndefined();
+  });
+
+  it("错误的 x-api-key 返回 401,且不打上游", async () => {
+    const res = await app().request("/v1/messages", withHeaders({ "x-api-key": "wrong-token-not-real-000" }));
+    expect(res.status).toBe(401);
+    expect(relayCalls()).toHaveLength(0);
+  });
+
+  it("Bearer 优先:Bearer 错时不因 x-api-key 对而放行", async () => {
+    const res = await app().request(
+      "/v1/messages",
+      withHeaders({ authorization: "Bearer wrong-token-not-real-000", "x-api-key": TOKEN }),
+    );
+    expect(res.status).toBe(401);
+  });
+
+  it("其余面与目录只认 Bearer:只带 x-api-key 时 401", async () => {
+    for (const path of buildRegistry().paths()) {
+      if (buildRegistry().byPath(path)?.acceptsApiKeyHeader === true) continue;
+      const res = await app().request(path, withHeaders({ "x-api-key": TOKEN }));
+      expect(res.status, path).toBe(401);
+    }
+    const models = await app().request("/v1/models", { headers: { "x-api-key": TOKEN } });
+    expect(models.status).toBe(401);
+    expect(relayCalls()).toHaveLength(0);
+  });
+});
+
 describe("Responses 面的体内会话指针", () => {
   it("`previous_response_id` 被用作亲和键 —— 用**真实**面,不是假面", async () => {
     /*
-     * 第五轮审核把这条归为「调用点存在但输入集为空」:
-     * `chatSurface.sessionKeyFrom` 恒返回 undefined 且它是唯一注册的面,
-     * 于是 relay 里「体内指针优先于头」**结构上无法执行**,只能用假面补测。
-     *
-     * 现在有了真实现。断言方式是行为:同一个 `previous_response_id`
+     * 若只有 `chatSurface`(其 `sessionKeyFrom` 恒返回 undefined),relay 里
+     * 「体内指针优先于头」**结构上无法执行**,只能用假面测 —— 调用点存在
+     * 但输入集为空。这条用真实的 responses 面。断言方式是行为:同一个 `previous_response_id`
      * 的两次请求落到同一个 Worker,**即使头不同** ——
      * 若体内指针没被读到,两次会各按头分别绑定。
      */
@@ -283,7 +332,7 @@ describe("Responses 面的体内会话指针", () => {
     /*
      * 第二次是粘滞命中,而不是碰巧同一个策略顺序。
      *
-     * reason 的取值是 `"sticky"`(我第一版写了 `"session"`,凭记忆猜的 ——
+     * reason 的取值是 `"sticky"`(不是 `"session"` ——
      * 实际集合是 sticky/blob_hint/strategy/all_cooling/empty,见 `select.ts`)。
      * 这条断言正是为了把"两次同一个 Worker"与"两次都恰好排第一"区分开:
      * 没有它,把体内指针读取整个删掉后测试仍会绿(三个 Worker 的策略顺序稳定)。
@@ -295,12 +344,11 @@ describe("Responses 面的体内会话指针", () => {
 describe("目录交集(免费判定的 ∩ 在架目录)", () => {
   it("**已下架**的 -free 模型被拒,且不打上游", async () => {
     /*
-     * 规划给 Phase 6 定的门槛:「注入一个已下架 id(如 glm-5-free)后,
-     * 它被交集自动剔除」。
+     * 注入一个已下架 id(如 glm-5-free)后,它应被交集自动剔除。
      *
-     * `glm-5-free` 后缀命中,所以 Phase 5 的判定会放行它,再由上游返回
+     * `glm-5-free` 后缀命中,所以只看后缀的免费判定会放行它,再由上游返回
      * 400 `Model is unavailable.` —— 用户看到上游措辞,指不到真实原因。
-     * 现在在本机就拒掉,而且**省掉一次上游往返**。
+     * 交集让它在本机就被拒掉,而且**省掉一次上游往返**。
      */
     const cfg = config();
     const catalog = await warmCatalog(cfg);
@@ -367,11 +415,10 @@ describe("目录交集(免费判定的 ∩ 在架目录)", () => {
 
   it("转发路径**不为每个请求**拉目录", async () => {
     /*
-     * 这条守的是我自己写坏过的一处:第一版在每个转发请求上调
-     * `refreshIfStale`,于是一次客户端请求变成两次上游请求(POST + GET),
-     * 而拉取失败不填缓存 → 下个请求又发一次 → 稳态永久 ×2。
+     * 若在每个转发请求上调 `refreshIfStale`,一次客户端请求就变成两次
+     * 上游请求(POST + GET),而拉取失败不填缓存 → 下个请求又发一次 →
+     * 稳态永久 ×2。
      *
-     * 13 条既有集成测试当时一起红("expected length 1 but got 2"),
      * 那正是纪律里"跨请求的状态机必须配集成测试"的又一个实例:
      * 纯单测看不见"一次请求发了几次上游"。
      */
@@ -387,7 +434,7 @@ describe("目录交集(免费判定的 ∩ 在架目录)", () => {
 
   it("判出「已下架」时刷一次目录 —— 上游**新上架**的模型能自愈", async () => {
     /*
-     * 第六轮审核查出这行刷新**没有任何断言覆盖**:删掉它后 1274 条测试全绿。
+     * 没有这条时,删掉这行刷新后全量测试仍全绿。
      *
      * 它收口的是 `catalog.ts` 文件头点名为"更糟的那一侧"的那个:
      * **缓存里没有而上游有** → 网关误拒一个可用模型。与另一侧(缓存里多一个 →
@@ -427,7 +474,6 @@ describe("目录交集(免费判定的 ∩ 在架目录)", () => {
      * 排空后台刷新。必须过**宏任务** —— 只 await 微任务排不到
      * `#fetchOnce` 的 `.finally` 那一层（`#inFlight.delete` 在那里），
      * 于是"第二次没发请求"的真实原因会变成合流去重还没清理。
-     * 这个坑我在 Phase 6 的 `settle()` 上栽过一次。
      */
     for (let i = 0; i < 20; i += 1) {
       await new Promise((r) => {
@@ -454,7 +500,7 @@ describe("目录交集(免费判定的 ∩ 在架目录)", () => {
      * 真的已下架的模型(比如配置里残留的旧 id),不该每次都触发一次上游查询。
      *
      * 没有这条,把 `refreshIfStale` 改成无条件 `ensure` 也不会有测试变红,
-     * 而那正是 Phase 6 第一版那个"每请求刷目录"缺陷的变体。
+     * 而那正是"每请求刷目录"缺陷的变体。
      */
     const cfg = config();
     const catalog = await warmCatalog(cfg);
@@ -471,7 +517,7 @@ describe("目录交集(免费判定的 ∩ 在架目录)", () => {
 
   it("**槽位由推导决定,不是硬写** —— 没有可用 Worker 时读的是 keyless 槽", async () => {
     /*
-     * 第六轮审核查出的纪律 #4 分叉:读侧先前硬写 `cached("keyed")`,
+     * 守的是纪律 #4 分叉:读侧若硬写 `cached("keyed")`,
      * 而写侧(retired 那支的刷新)用 `catalogIdentityOf` **推导**槽位。
      *
      * 支撑硬写的注释推错了时序:免费判定是**第 3 步**,选 Worker 是**第 5 步** ——
@@ -523,14 +569,12 @@ describe("目录交集(免费判定的 ∩ 在架目录)", () => {
     /*
      * ## 这条补的是一个"注入替换掉了被测的那段"的缺口
      *
-     * 第六轮审核查出:本文件每个用例都把 `catalog` 直接注入 `createApp`,而
-     * `app.ts` 里「转发面与 `/v1/models` **共用同一个**缓存」这条接线,恰好就被
-     * 那个注入替换掉了。实测把 models 路由换成 `new ModelCatalog()` 之后
-     * **1279 条测试全绿**。
+     * 本文件其他用例都把 `catalog` 直接注入 `createApp`,而 `app.ts` 里
+     * 「转发面与 `/v1/models` **共用同一个**缓存」这条接线,恰好就被那个注入
+     * 替换掉了。实测把 models 路由换成 `new ModelCatalog()` 之后全量测试全绿。
      *
-     * 这正是第四轮那个最严重空壳的同一形态:那条名为"本文件最重要的断言"的
-     * 回环测试注入了 `addressOf`,而被替换掉的正是会去读 `X-Forwarded-For` 的
-     * 代码路径。**凡是注入了依赖的测试,都要问"我注入的这个,是不是正好是
+     * 同一形态也见于回环测试:注入 `addressOf` 会替换掉正要去读
+     * `X-Forwarded-For` 的代码路径。**凡是注入了依赖的测试,都要问"我注入的这个,是不是正好是
      * 我要测的那段"。**
      *
      * ## 不共用时的后果:交集整体静默失效
@@ -565,9 +609,8 @@ describe("目录交集(免费判定的 ∩ 在架目录)", () => {
   it("放行但**未经在架核验**时带 `x-zen-gateway-free` 头", async () => {
     /*
      * `judgeFree` 为此造了 `suffix_unverified`/`extra_unverified` 两个 reason,
-     * 而第六轮审核 grep 出**全仓没有任何读者** —— 那是第四轮 `streaming` 字段
-     * 的形态(声明了、被文档说明、却没有一处读它),只是藏在一个看起来被用到的
-     * 联合类型分支里。
+     * 若全仓没有任何读者,就成了死字段的形态(声明了、被文档说明、
+     * 却没有一处读它),只是藏在一个看起来被用到的联合类型分支里。
      *
      * 没有它时,用户遇到上游 400 `Model is unavailable` 无法区分
      * 「目录说它在架但上游拒了」与「我们压根没拿到目录」—— 后者要查出口/网络,
@@ -596,8 +639,8 @@ describe("目录交集(免费判定的 ∩ 在架目录)", () => {
     /*
      * 这个头要回答的问题恰好是一次失败:上游返回 400 时,是"目录说它在架但
      * 上游拒了"还是"我们压根没拿到目录"?只在成功路径设置它,等于在唯一需要
-     * 它的时候缺席 —— 而那正是第五轮查出的 `x-zen-gateway-route` 那个缺陷
-     * (我写文档教用户失败时看它,而它只在成功时存在)。
+     * 它的时候缺席 —— `x-zen-gateway-route` 也有过同样的问题
+     * (文档教用户失败时看它,而它只在成功时存在)。
      */
     handler = (_req, res) => {
       res.writeHead(400, { "content-type": "application/json" });
@@ -694,10 +737,8 @@ describe("/v1/models 的缓存", () => {
 describe("用量解析接到了流上(parseUsage 的生产调用点)", () => {
   it("非流式响应的用量被读到,且按面归一化", async () => {
     /*
-     * `parseUsage` 若只有接口与实现而没有调用点,就是第四轮那个
-     * `streaming` 字段的形态:声明了却不设防。这条验它真的接在流上。
-     *
-     * 眼下的消费方式是日志 —— Phase 7 才写进 runtime.db。
+     * `parseUsage` 若只有接口与实现而没有调用点,就是声明了却不设防的
+     * 死字段形态。这条从日志侧验它真的接在流上。
      */
     const logs: string[] = [];
     handler = (_req, res) => {
@@ -724,9 +765,8 @@ describe("用量解析接到了流上(parseUsage 的生产调用点)", () => {
      * 所以"只留尾部窗口"会丢输入,"只扫开头预算"会丢输出。
      *
      * 注意这条用 200 个 delta,流只有约 12 KB —— 它**测不到预算边界**
-     * (默认 1 MiB)。跨预算那件事由下面两条专门测,而我原先在这里写的
-     * "中间刻意塞很多 delta,让两端相距足够远"是**假的**:12 KB 距 1 MiB
-     * 还差两个数量级,于是预算那条分支从未被执行(第六轮审核查出)。
+     * (默认 1 MiB)。跨预算那件事由下面两条专门测:12 KB 距 1 MiB
+     * 还差两个数量级,在这里塞再多 delta 也执行不到预算那条分支。
      */
     const logs: string[] = [];
     handler = (_req, res) => {
@@ -753,16 +793,14 @@ describe("用量解析接到了流上(parseUsage 的生产调用点)", () => {
 
   it("**超过 1 MiB 的流**:Messages 面的用量仍然正确 —— 不是 out=1", async () => {
     /*
-     * 第六轮审核查出的最严重缺陷的回归守卫。
-     *
-     * 先前 `SCAN_BUDGET_BYTES`(1 MiB)加在 `tapReadable` 的 `onText` 上,而
+     * 若 `SCAN_BUDGET_BYTES`(1 MiB)加在 `tapReadable` 的 `onText` 上,而
      * `onText` 有**两个**消费者:失效推理扫描(只需开头)与 token 用量
      * (需要整条流)。两个相反的需求共用一个闸门,牺牲的是后者。
      *
      * Anthropic 面的后果是**算错**而不是漏掉:`message_start` 真的带
      * `output_tokens: 1`(协议形态),超出预算后它成了唯一收到的用量事件,
      * 于是报出 `in=812 out=1 total=813` —— 一个看起来有据可依的错数字。
-     * Phase 7 会把它记成一行完整记录,usage 覆盖率显示 100%,
+     * 统计会把它记成一行完整记录,usage 覆盖率显示 100%,
      * 而输出 token 系统性等于 1。
      *
      * 按真实 chunk 尺寸估算约 1 万个输出 token 就跨过 1 MiB,
@@ -837,9 +875,9 @@ describe("用量解析接到了流上(parseUsage 的生产调用点)", () => {
 
   it("用量日志里的 model id 过脱敏 —— 换行不能伪造一条日志行", async () => {
     /*
-     * 第六轮审核查出:`model` 是客户端可控的任意字符串,而它先前被原样拼进
-     * 日志格式串。`readModelField` 只保证"非空且无首尾空白",既不限长也不管
-     * 控制字符 —— 它的职责是取字段,不是净化日志。
+     * `model` 是客户端可控的任意字符串,不能原样拼进日志格式串。
+     * `readModelField` 只保证"非空且无首尾空白",既不限长也不管控制字符 ——
+     * 它的职责是取字段,不是净化日志。
      *
      * 实测后果:model 里一个 `\n` 就能让 `data/zen-gateway.log`
      * (append-only 且无轮转)多出一条形态与真实记录**无法区分**的用量行。

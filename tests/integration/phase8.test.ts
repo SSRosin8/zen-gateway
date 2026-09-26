@@ -14,7 +14,7 @@ const SETUP = join(PROJECT, "scripts", "setup.mjs");
 const ENTRY = join(PROJECT, "dist", "server", "server", "index.js");
 
 /*
- * Phase 8 的两个脚本。
+ * setup 与 doctor 两个脚本。
  *
  * 只有真把脚本跑起来才测得到它们:`tsc` 看不到 `.mjs`,而这两个脚本的
  * 价值全在「分层判断对不对」「会不会改坏配置」上,那些都是行为。
@@ -121,7 +121,7 @@ async function startFakeClash(opts: {
   selectors?: Record<string, string[]>;
   nodes?: string[];
   /**
-   * `/rules` 的目标分组（缺口 #22 的判据）。
+   * `/rules` 的目标分组（选分组的判据）。
    *
    * `undefined` = 不提供 `/rules`（旧内核形态）→ setup 退回按名字降级。
    * 给了就形如 `{ MATCH: "Proxy", Domain: ["DIRECT", "Proxy"] }` ——
@@ -136,6 +136,10 @@ async function startFakeClash(opts: {
    * 而那条默认值只有在 `/configs` 不可读时才走到，所以要能造出这个形态。
    */
   noConfigs?: boolean;
+  /** 显式规则表（含 payload），给了就代替 `rules`。 */
+  ruleList?: Array<{ type: string; payload: string; proxy: string }>;
+  /** `/dns/query` 对 A 记录的应答；不给则返回 404。 */
+  dnsA?: string[];
 }): Promise<void> {
   const secret = opts.secret ?? "";
   const nodes = opts.nodes ?? ["节点A", "节点B"];
@@ -166,6 +170,16 @@ async function startFakeClash(opts: {
       if (opts.socksPort !== undefined) body["socks-port"] = opts.socksPort;
       return json(body);
     }
+    if (url.pathname === "/dns/query") {
+      if (opts.dnsA === undefined) {
+        res.writeHead(404);
+        res.end();
+        return;
+      }
+      const answer = url.searchParams.get("type") === "A" ? opts.dnsA.map((data) => ({ data })) : [];
+      return json({ Answer: answer });
+    }
+    if (url.pathname === "/rules" && opts.ruleList !== undefined) return json({ rules: opts.ruleList });
     if (url.pathname === "/rules") {
       if (opts.rules === undefined) {
         res.writeHead(404);
@@ -255,8 +269,6 @@ describe("doctor 是只读的", () => {
 
   it("**不改权限** —— 过松的 config.json 与 data/ 要被报出来而不是被悄悄修掉", async () => {
     /*
-     * 第八轮审核实测查出的一个真实缺陷。
-     *
      * `loadConfig` 默认会把 `config.json` chmod 到 0600、`data/` 到 0700。
      * 那对**服务**是对的（凭证不该赌一句警告会被看见），但对诊断工具是错的,
      * 而 doctor 的文件头明写着「不改权限」。实测:755/644 跑完 doctor
@@ -348,7 +360,7 @@ describe("doctor 只报第一个失败的层", () => {
 
     expect(result.code).toBe(1);
     expect(result.stdout).toContain("服务未在运行");
-    // 这条提示是规划要求「进交付物」的那条 —— 漏了它症状是「目录为空但不报错」。
+    // 漏了这条提示，症状是「目录为空但不报错」。
     expect(result.stdout).toContain("NODE_EXTRA_CA_CERTS");
   });
 });
@@ -389,7 +401,7 @@ describe("setup 的探测范围", () => {
     const result = await run(SETUP, ["--dry-run"]);
 
     /*
-     * 这是规划明确列出的安全约束。断言输出里报告的候选**全部**是 127.0.0.1,
+     * 这是安全约束。断言输出里报告的候选**全部**是 127.0.0.1,
      * 且数量是个小的固定集合 —— 若有人把它改成扫端口段,数量会爆掉。
      */
     const tried = /已探测\(仅 127\.0\.0\.1\):(.+)/.exec(result.stdout)?.[1] ?? "";
@@ -602,10 +614,10 @@ describe("setup 对 GLOBAL 分组的处置", () => {
     expect(after.clash.bridges[0]!.selectorGroup).toBe("Proxy");
   });
 
-  it("**按规则的实际目标选分组** —— 名字启发式会选错的那个形态（缺口 #22）", async () => {
+  it("**按规则的实际目标选分组** —— 名字启发式会选错的那个形态", async () => {
     /*
      * 先前的判据是**名字**：rule 模式下把叫 `GLOBAL` 的降级。
-     * 登记时就写明了它的漏洞：一个名字不叫 GLOBAL 却同样不参与选路的分组
+     * 它的漏洞是：一个名字不叫 GLOBAL 却同样不参与选路的分组
      * 仍会被选中。
      *
      * 这里构造正是那个形态：两个分组 `Airport`（节点多）与 `Proxy`（节点少），
@@ -642,7 +654,7 @@ describe("setup 对 GLOBAL 分组的处置", () => {
      * 为什么兜底更优先：转发到 `opencode.ai` 时命中的是兜底那条规则
      * —— 一条 MATCH 覆盖所有没被前面规则匹配掉的域名。一个只承载
      * 「某几个国内域名走它」的分组即使规则条数更多，也不是上游流量实际
-     * 走的那个。这正是缺口 #4（探测目标与转发目标不同域）的核心。
+     * 走的那个。这正是「探测目标与转发目标不同域」的核心。
      *
      * 构造：`Partial` 节点更多（按节点数会选它）且承载一条规则，
      * 而兜底指向节点更少的 `Fallback`。少了 rank 0 这一档，两者都是
@@ -665,7 +677,7 @@ describe("setup 对 GLOBAL 分组的处置", () => {
     expect(result.stdout).not.toContain("分组「Partial」");
   }, 40_000);
 
-  it("**doctor 报出「选中的分组不参与选路」**（缺口 #22/#4）", async () => {
+  it("**doctor 报出「选中的分组不参与选路」**", async () => {
     /*
      * 这是那个"不报任何错"的故障：控制面通、切换返回 204、探测也能拿到 IP，
      * 只是每个 Worker 拿到**同一个** IP。先前只有 `--deep` 的隔离报告会发现它，
@@ -724,6 +736,97 @@ describe("setup 对 GLOBAL 分组的处置", () => {
      */
     expect(result.stdout).toMatch(/! 1\/1 个 Clash 内核可连通/);
     expect(result.stdout).not.toMatch(/✓ 1\/1 个 Clash 内核可连通/);
+  }, 40_000);
+
+  it("doctor 报出上游 host 先命中私网直连规则（企业 DNS 解析到内网）", async () => {
+    /*
+     * 分组参与选路、也是兜底目标，但上游域名被解析到私网地址，
+     * 于是更靠前的 `IPCIDR,10.0.0.0/8,DIRECT` 先命中：所有 Worker 的 Zen 请求
+     * 直连、共用一个出口，而回显探测打另一个域名，报告仍显示隔离。
+     */
+    const nodes = ["节点A", "节点B"];
+    await startFakeClash({
+      mode: "rule",
+      nodes,
+      selectors: { Proxy: nodes },
+      ruleList: [
+        { type: "DomainSuffix", payload: "proxy.invalid", proxy: "DIRECT" },
+        { type: "IPCIDR", payload: "10.0.0.0/8", proxy: "DIRECT" },
+        { type: "Match", payload: "", proxy: "Proxy" },
+      ],
+      dnsA: ["10.20.30.40"],
+    });
+    await writeConfig({
+      workers: [{ id: "w1", kind: "authenticated", apiKey: "fake-key-not-real", proxyId: "p1" }],
+      proxies: [
+        {
+          id: "p1", name: "桥接节点", type: "anytls", host: "127.0.0.1", port: 7897,
+          source: "controller", bridgeId: "b1", clashNodeName: "节点A",
+          direct: false, bridgeable: true, egressIp: null,
+        },
+      ],
+      clash: {
+        enabled: true,
+        selectionMode: "manual",
+        activeBridgeId: "b1",
+        bridges: [
+          {
+            id: "b1", name: "假内核", apiBase: fakeApi(), apiSecret: "",
+            localProxyPort: 7897, selectorGroup: "Proxy",
+          },
+        ],
+      },
+    });
+    await startServer();
+
+    const result = await run(DOCTOR);
+
+    expect(result.stdout).toContain("IPCIDR,10.0.0.0/8 → DIRECT");
+    expect(result.stdout).toContain("内核解析为 10.20.30.40");
+    expect(result.stdout).toContain("DOMAIN-SUFFIX,opencode.ai,Proxy");
+    expect(result.stdout).toMatch(/! 1\/1 个 Clash 内核可连通/);
+  }, 40_000);
+
+  it("上游解析到公网时不报私网直连", async () => {
+    const nodes = ["节点A", "节点B"];
+    await startFakeClash({
+      mode: "rule",
+      nodes,
+      selectors: { Proxy: nodes },
+      ruleList: [
+        { type: "IPCIDR", payload: "10.0.0.0/8", proxy: "DIRECT" },
+        { type: "Match", payload: "", proxy: "Proxy" },
+      ],
+      dnsA: ["203.0.113.9"],
+    });
+    await writeConfig({
+      workers: [{ id: "w1", kind: "authenticated", apiKey: "fake-key-not-real", proxyId: "p1" }],
+      proxies: [
+        {
+          id: "p1", name: "桥接节点", type: "anytls", host: "127.0.0.1", port: 7897,
+          source: "controller", bridgeId: "b1", clashNodeName: "节点A",
+          direct: false, bridgeable: true, egressIp: null,
+        },
+      ],
+      clash: {
+        enabled: true,
+        selectionMode: "manual",
+        activeBridgeId: "b1",
+        bridges: [
+          {
+            id: "b1", name: "假内核", apiBase: fakeApi(), apiSecret: "",
+            localProxyPort: 7897, selectorGroup: "Proxy",
+          },
+        ],
+      },
+    });
+    await startServer();
+
+    const result = await run(DOCTOR);
+
+    expect(result.stdout).toContain("── 5. Clash 控制面 ──");
+    expect(result.stdout).not.toContain("不经过分组");
+    expect(result.stdout).toMatch(/✓ 1\/1 个 Clash 内核可连通/);
   }, 40_000);
 
   it("读不到选路模式时**仍然检查**（默认按 rule，保守的那一侧）", async () => {
@@ -829,8 +932,7 @@ describe("setup 刻意不创建 Worker", () => {
     const after = JSON.parse(await readFile(configFile(), "utf8")) as Config;
 
     /*
-     * 规划原文是「为每个可用出口建匿名 Worker」,而匿名(免 key)通道已被
-     * 上游关闭。建一批没有 key 的 Worker 只会得到一池必定失败的条目 ——
+     * 不为每个可用出口建匿名 Worker:匿名(免 key)通道已被上游关闭。建一批没有 key 的 Worker 只会得到一池必定失败的条目 ——
      * `isUsable()` 把它们全过滤掉,而用户看到「已建 N 个 Worker」却一个都不能用。
      */
     expect(after.workers).toHaveLength(0);
@@ -911,14 +1013,14 @@ describe("两个脚本都不回显凭证", () => {
 });
 
 /* ================================================================== *
- * doctor 第 4 层报运行期就绪态（缺口 #24）
+ * doctor 第 4 层报运行期就绪态
  * ================================================================== */
 
 describe("doctor 第 4 层问服务要就绪态，而不是自己算", () => {
   it("服务在跑时报的是**就绪**数，不只是配置形态", async () => {
     /*
-     * 这一层先前只报配置形态，并在输出里写着「是否就绪 doctor 查不到」——
-     * 而 Phase 9 之后那句话不再成立：`GET /api/overview` 带 `ready` 与
+     * 这一层若只报配置形态，就得写「是否就绪 doctor 查不到」—— 而那句话
+     * 不成立：`GET /api/overview` 带 `ready` 与
      * `cooldownRemainingMs`，且 doctor 本来就已经在问服务（第 6 层查 /v1/models）。
      *
      * **关键是"问"而不是"算"**：在 doctor 里重新实现一遍冷却判定会是第二份
@@ -945,9 +1047,9 @@ describe("doctor 第 4 层问服务要就绪态，而不是自己算", () => {
      * 服务可能刚好在重启，或 `/api/overview` 因某个原因不可用。
      * 那时配置形态本身仍然是有效信息 —— 报不出就绪态不该让整层变红。
      *
-     * ## 这个 fixture 花了两次
+     * ## 为什么不用假服务器冒充
      *
-     * 第一版用一个**假服务器**冒充（只答 /health，其余 404）。不成立：
+     * 用一个**假服务器**冒充（只答 /health，其余 404）不成立：
      * 第 2 层的身份判定**正确地**把它报成「端口被另一个进程占用」，
      * 于是第 4 层根本不执行 —— 那是「路径不存在」那一类，断言测不到降级。
      * 而那个拒绝恰好证明了身份判定是承重的。
@@ -987,14 +1089,14 @@ describe("doctor 第 4 层问服务要就绪态，而不是自己算", () => {
 });
 
 /* ================================================================== *
- * 未识别的参数（第十轮审核实际踩到的那个）
+ * 未识别的参数
  * ================================================================== */
 
 describe("两个脚本都拒绝未识别的参数", () => {
   /*
-   * 这不是假想的形态 —— 第十轮审核的一个子 agent 想看用法，敲了
-   * `npm run setup - --help`，而 setup 把两个参数都静默忽略并**执行了完整的
-   * 真实导入**：写 `data/config.json`（代理 3→72、桥接 2→3）加一个 `.bak`。
+   * 这不是假想的形态 —— 想看用法时敲 `npm run setup - --help`，若 setup
+   * 把两个参数都静默忽略，就会**执行完整的真实导入**：
+   * 改写 `data/config.json` 并留一个 `.bak`。
    * `data/config.json` 是唯一一份凭证存储（Worker apiKey、Relay Token、
    * Controller secret），所以「想读用法反而改写了凭证」是最坏的一种误用后果。
    *
@@ -1021,7 +1123,7 @@ describe("两个脚本都拒绝未识别的参数", () => {
     await expect(stat(configFile())).rejects.toThrow();
   });
 
-  it("裸 `-` 也算未识别 —— 那正是审核踩到的写法", async () => {
+  it("裸 `-` 也算未识别 —— `npm run setup - --help` 会产生它", async () => {
     const result = await run(SETUP, ["-", "--help"]);
 
     /*

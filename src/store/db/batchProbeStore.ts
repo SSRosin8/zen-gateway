@@ -6,7 +6,7 @@ import { BATCH_STATES, INITIAL, type BatchProgress, type BatchState } from "../.
  *
  * ## 为什么进度必须归服务端所有
  *
- * 规划要求「刷新页面能接着看，不依赖前端内存」。理由不只是便利:探测**已经在跑**
+ * 需求要求「刷新页面能接着看，不依赖前端内存」。理由不只是便利:探测**已经在跑**
  * （它在切 Clash selector、在发真实网络请求），而前端内存里的进度只是它的一个
  * 倒影。把真相放在前端意味着刷新之后**真相就没了** —— 而那批探测还在跑，
  * 用户此时看到「空闲」并再点一次开始，就会有两批并发互相换掉对方的出口节点。
@@ -26,6 +26,11 @@ const JOB_ID = "SINGLETON";
 export class BatchProbeStore {
   #writeFailures = 0;
   #lastWriteError: string | null = null;
+  /**
+   * 读失败后停用持久化。读不出的库(页损坏、列类型被改)再写也多半失败,
+   * 而写成功会用一份全新进度盖掉可能还能手工救回的旧行。
+   */
+  #disabled = false;
 
   #upsert: StatementSync;
   #read: StatementSync;
@@ -47,10 +52,9 @@ export class BatchProbeStore {
         cancel_requested = excluded.cancel_requested,
         added_worker_ids = excluded.added_worker_ids,
         failure_kind     = excluded.failure_kind,
-        -- started_at 也要更新（缺口 #28）：先前它不在这个列清单里，于是第一次
-        -- 批测写下的值会存一辈子。当时没有读者所以不出症状，而那正是"死信息"
-        -- 的形态 —— 一旦有人显示「已跑多久」就会得到一个荒谬的数字。
-        -- 现在 BatchProgress.elapsedMs 读它，所以这一行是承重的。
+        -- started_at 也要更新：不在这个列清单里的话，第一次批测写下的值会
+        -- 存一辈子，「已跑多久」就会得到一个荒谬的数字。
+        -- BatchProgress.elapsedMs 读它，所以这一行是承重的。
         started_at       = excluded.started_at,
         updated_at       = excluded.updated_at
     `);
@@ -84,6 +88,7 @@ export class BatchProbeStore {
 
   /** 落盘当前进度。 */
   save(progress: BatchProgress, now: number, startedAt?: number): void {
+    if (this.#disabled) return;
     this.#safe("saveBatchProgress", () => {
       this.#upsert.run(
         JOB_ID,
@@ -106,7 +111,20 @@ export class BatchProbeStore {
    * 「从未跑过」与「空闲」对前端是同一件事，多一个 null 分支只会让调用点更长。
    */
   load(): { progress: BatchProgress; startedAt: number | null } {
-    const row = this.#read.get(JOB_ID) as Record<string, unknown> | undefined;
+    /*
+     * 读失败与写失败同一处置:计数、可诊断、不抛。启动路径(`recoverInterrupted`、
+     * `BatchProbeRunner` 构造)都调它,抛出会让一个坏掉的进度表拖垮整个网关。
+     */
+    let row: Record<string, unknown> | undefined;
+    let readOk = false;
+    this.#safe("loadBatchProgress", () => {
+      row = this.#read.get(JOB_ID) as Record<string, unknown> | undefined;
+      readOk = true;
+    });
+    if (!readOk) {
+      this.#disabled = true;
+      return { progress: INITIAL, startedAt: null };
+    }
     if (row === undefined) return { progress: INITIAL, startedAt: null };
 
     /*

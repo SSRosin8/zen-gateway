@@ -4,7 +4,7 @@ import type { TokenUsage } from "../../core/models/usage.ts";
 /**
  * 统计的写入与聚合。
  *
- * ## 这一层的语义边界（Phase 7 最容易搞错的地方）
+ * ## 这一层的语义边界（统计最容易搞错的地方）
  *
  * **客户端请求 ≠ 上游尝试。** 一条 `w1 限流 → w2 成功` 的重试链是
  * **一个**客户端请求、**两次**上游尝试。两个数字都要能查到，而且每次尝试
@@ -127,13 +127,13 @@ export type DerivedRates = {
  * 同一个策略（那里也是「宁可饱和，不要溢出」）。放在 SQL 而不是读出来再夹：
  * 读出来那一步就已经抛了。
  *
- * ## 为什么是 `total()` 而不是 `SUM()`（缺口 #18，第九轮补上）
+ * ## 为什么是 `total()` 而不是 `SUM()`
  *
  * `MIN(SUM(x), MAX_SAFE)` 只挡住了「JS 转换阶段的越界」—— **`SUM` 的累加
  * 本身是 int64**，所以在它溢出的那一刻 `MIN` 还没拿到值。实测 **1025 个
  * 饱和行**（每行 MAX_SAFE = 2^53，2^53 × 1024 = 2^63）时 SQLite 直接抛
- * `integer overflow`，整条查询失败 —— 也就是先前那个注释声称的性质
- * **比实际强**：它只在 int64 还没溢出的区间内成立。
+ * `integer overflow`，整条查询失败 —— 「`MIN` 夹住就不会越界」这个性质
+ * 只在 int64 还没溢出的区间内成立。
  *
  * SQLite 的 `total()` 与 `SUM()` 的差别正在这里：它**恒返回 REAL**，
  * 而 IEEE754 双精度不会溢出（超出范围只会损失精度，最坏到 Infinity）。
@@ -264,7 +264,7 @@ export class StatsStore {
    *
    * 吞异常是对的（见类注释），但**吞掉不等于可以不知道** ——
    * 一个一直写失败的统计库会安静地给出全 0 的报表，而那看起来像「没人用」。
-   * Phase 8 的 `doctor` 应当报这个数。
+   * `doctor` 经 `/health` 的 `storeWriteFailures` 报这个数。
    */
   writeFailures(): { count: number; lastError: string | null } {
     return { count: this.#writeFailures, lastError: this.#lastWriteError };
@@ -364,16 +364,13 @@ export class StatsStore {
   /**
    * 记一次出口探测。
    *
-   * 生产调用点是 `EgressService.probeProxy`（第七轮审核补上的汇合点）——
+   * 生产调用点是 `EgressService.probeProxy`（汇合点）——
    * `probeAll` 只是并发调它，所以记在 `probeProxy` 里不会漏掉单个探测的调用方。
    * 这与 catalog 那条「记账放汇合点，不在四条 return null 上各写一遍」同构。
    *
-   * 先前这条 SQL **从未执行过**（零调用点且零测试），而 `probeAll` 的结果
-   * 只存在于返回值里 —— 于是「这个代理上周是不是换过出口 IP」无法回答，
-   * 而 `egressIp` 正是出口隔离判定的唯一依据。
-   *
-   * Phase 9 的出口隔离视图要按实测 `egressIp` 分组，`probe_results` 的形状
-   * （含 `at`）正是为那个问题准备的。
+   * 不落盘的话 `probeAll` 的结果只存在于返回值里 —— 「这个代理上周是不是
+   * 换过出口 IP」就无法回答，而 `egressIp` 正是出口隔离判定的唯一依据。
+   * `probe_results` 的形状（含 `at`）正是为这个问题准备的。
    */
   recordProbe(row: {
     proxyId: string;
@@ -491,7 +488,7 @@ export class StatsStore {
     };
   }
 
-  /** 网关拒绝的按天聚合。规划要求的第六项统计。 */
+  /** 网关拒绝的按天聚合。 */
   rejections(sinceDay?: string): RejectionTotals[] {
     const where = sinceDay === undefined ? "" : "WHERE day >= ?";
     const stmt = this.#db.prepare(`
@@ -532,7 +529,7 @@ export class StatsStore {
     /*
      * ⚠️ **这是唯一随行数线性变慢的聚合。** `COUNT(DISTINCT request_id)` 全表扫：
      * 实测 100k 行 **12.4ms**、1M 行约 124ms，而它是**同步**调用 ——
-     * 接 HTTP 端点后会阻塞事件循环那么久（第七轮审核实测）。
+     * 经 HTTP 端点调用时会阻塞事件循环那么久。
      *
      * 所以给了 `sinceDay`（走 `idx_attempts_at`），与 `modelUsage`/`rates`
      * 的签名一致。管理 API 应当**总是**传它。
@@ -561,7 +558,7 @@ export class StatsStore {
    * 聚合所需的信息已经在 `worker_stats` 与 `model_usage` 里（按天，不按毫秒），
    * 所以删明细**不损失统计能力** —— 那正是这两张表分开存在的理由。
    *
-   * `probe_results` 一起清：它同样是明细，且将来会带 `egress_ip`
+   * `probe_results` 一起清：它同样是明细，且带 `egress_ip`
    * （那是去匿名化材料，比现有数据更敏感）。
    */
   pruneDetailsBefore(before: number): number {

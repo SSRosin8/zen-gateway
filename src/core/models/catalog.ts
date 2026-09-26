@@ -7,14 +7,15 @@ import { classifyStatus } from "../failures.ts";
 import { usableTargets } from "../routing/select.ts";
 import { resolveProxy } from "../proxy/pool.ts";
 import { safeErrorMessage } from "../../shared/redact.ts";
+import { credentialFingerprint } from "../proxy/credentialFingerprint.ts";
 
 /**
  * 上游在架目录 —— 免费集那个交集里的「∩ 在架目录」。
  *
  * ## 这个交集要解决的具体问题
  *
- * 免费判定先前是纯函数：`(后缀命中 ∪ extraFreeIds)`。它**放得偏宽** ——
- * 一个已下架的 `glm-5-free` 后缀命中，于是被放行，然后由上游返回
+ * 只用纯函数 `(后缀命中 ∪ extraFreeIds)` 做免费判定会**放得偏宽** ——
+ * 一个已下架的 `glm-5-free` 后缀命中就会被放行，然后由上游返回
  * 400 `Model is unavailable.`。交集让下架项自动消失，而这是唯一的自动机制。
  *
  * **不对称要说清**：交集能自动剔除下架的，但**新出现的无后缀免费模型无法
@@ -38,8 +39,8 @@ import { safeErrorMessage } from "../../shared/redact.ts";
  *    并写进 `architecture.md` 说"缓存键必须含 Worker 身份"。
  * 2. **09-23(两个账号)**:两个账号看到的**差异项完全相同**,于是推翻上一条,
  *    改写成"按带 key／免 key 两种**身份**区分,不按账号个体"。
- * 3. **09-23 晚(三个账号,本阶段实测)**:**上一条也是错的。** 三个付费账号里
- *    两个看到 41 个模型,一个看到 79 个(三轮稳定,且全部经同一个本机出口发出,
+ * 3. **09-23 晚(三个账号)**:**上一条也是错的。** 三个付费账号里
+ *    两个看到 41 个模型,一个看到 79 个(三轮稳定,且全部经同一个出口发出,
  *    排除了地域差异)。所以**账号个体差异真实存在**。
  *
  * 那为什么还用两个槽位?因为**差异全在付费模型上,免费子集三个账号完全一致**
@@ -50,10 +51,10 @@ import { safeErrorMessage } from "../../shared/redact.ts";
  * 但它是被测量支持的那一条。
  *
  * **它没有本地测试守着,也守不住**:那是上游的性质,不是本仓代码的性质,
- * 单测无论怎么写都只是在断言我自己造的 fixture。记录在
+ * 单测无论怎么写都只是在断言本仓自己造的 fixture。记录在
  * `docs/upstream-quirks.md` §7,复核办法是拿多个账号各拉一次目录比对免费子集。
- * (我第一版注释在这里声称"catalog.test.ts 钉住了它" —— 那是假的,
- * 正是纪律 #7 那类"把代码里有的能力写成用户能看到它"的变体。)
+ * 不要声称"catalog.test.ts 钉住了它" —— 那正是纪律 #7 那类
+ * "把代码里有的能力写成用户能看到它"的变体。
  *
  * 本地测试能守的是**这条假设不成立时的处置**,而那已经配了用例:
  *
@@ -62,12 +63,12 @@ import { safeErrorMessage } from "../../shared/redact.ts";
  * - 缓存里**没有**而某 Worker 有 → 网关误拒一个可用模型。这一侧更糟,
  *   所以 `judgeFree` 判出 `retired` 时会触发一次目录刷新(见 `relay.ts`)。
  *
- * 真出现那天的修法是规划里记的"并集":`/v1/models` 取所有启用 Worker 的并集,
+ * 真出现那天的修法是"并集":`/v1/models` 取所有启用 Worker 的并集,
  * 而路由时按该 Worker 自己的目录校验。代价是 N 次上游请求,眼下不值得。
  *
  * ## 缓存必须「校验过的最后成功」
  *
- * 先前 `/v1/models` 每次请求都打一次上游，于是**上游抖动时目录跟着消失** ——
+ * 若 `/v1/models` 每次请求都打一次上游，**上游抖动时目录就跟着消失** ——
  * 而目录消失等于免费集为空，等于网关拒绝一切。所以：
  *
  * 1. 只有**校验通过**的响应才替换缓存。一个 200 带 `{"data":[]}` 会把免费集
@@ -80,7 +81,7 @@ import { safeErrorMessage } from "../../shared/redact.ts";
  *
  * ## 为什么没有定时器
  *
- * 规划写的是"启动预热 + 定时刷新"。这里用**启动预热 + 访问时发现过期就后台
+ * 不是"启动预热 + 定时刷新"，而是**启动预热 + 访问时发现过期就后台
  * 刷新**，不用 `setInterval`：定时器会吊住进程（本项目的 shutdown 已经要
  * 显式关 dispatcher 池才能退出），而一个完全空闲的网关目录过期没有任何后果 ——
  * 没人在问。繁忙的网关则每 TTL 自然刷新一次，可观察行为与定时刷新相同。
@@ -164,23 +165,23 @@ export type CatalogSnapshot = {
  * 刻意不做截断:截断会静默丢掉免费模型,而丢掉哪些取决于上游的排序,
  * 症状是"某个模型时有时无"。
  *
- * ## 它守的是**条目数**,不是体积 —— 先前的注释把范围说宽了
+ * ## 它守的是**条目数**,不是体积
  *
  * 这道闸门在 `parseCatalog` 里,也就是 `upstream.json()` **已经把整个体读进内存
  * 并解析完**之后。所以条目数少而体积巨大的响应不受任何约束 ——
  * 实测一个单条目、40 MiB 的目录响应被照常采纳。
  *
- * 先前注释说它防的是"劫持、错配的 baseUrl、返回聚合列表的代理",而**劫持**
+ * 不能说它防的是"劫持、错配的 baseUrl、返回聚合列表的代理":**劫持**
  * 恰好能以小条目数、大体积的形态出现。所以它防的准确范围是
  * **条目数爆炸导致的判定集污染**,不是 DoS。
  *
- * **体积那一半由 `MAX_CATALOG_BYTES` 挡住（缺口 #7，第九轮补上）** ——
+ * **体积那一半由 `MAX_CATALOG_BYTES` 挡住** ——
  * 有界读取放在 `JSON.parse` 之前，所以"单条目 40 MiB"那种形态不再能进内存。
  */
 const MAX_CATALOG_ENTRIES = 4096;
 
 /**
- * 目录响应的体积上限（缺口 #7）。
+ * 目录响应的体积上限。
  *
  * 与条目数上限是**两层**，各自挡不同的东西：条目数挡"一万个模型"，
  * 体积挡"一个模型但它的 description 有 40 MiB"。实测过后者能通过
@@ -267,12 +268,10 @@ export function parseCatalog(payload: unknown, slot: CatalogSlot, now: number): 
  *
  * 两者都可能高频,而退避把"每次触发一发"压成"每 30 秒最多一发"。
  *
- * > **这段先前描述的是一个已经不存在的形态。** 原文写的是
- * > "`refreshIfStale` 在每个转发请求上调用",那是 Phase 6 第一版的错误耦合
- * > (一次客户端请求 → 两次上游请求,稳态永久 ×2),**已在同一轮改掉**:
- * > 现在转发路径只在 `retired` 那一支刷新。留着那句会让下一轮读到的人
- * > 以为"退避只是为了压住每请求刷新",于是若哪天删掉 `retired` 支的调用,
- * > 会误以为退避可以一起删 —— 而 `ensure` 那条路径仍然需要它。
+ * 转发路径**不**在每个请求上调 `refreshIfStale`(那会让一次客户端请求 →
+ * 两次上游请求,稳态永久 ×2),只在 `retired` 那一支刷新。退避也不只是为了
+ * 压住某一个触发点:若哪天删掉 `retired` 支的调用,退避不能一起删 ——
+ * `ensure` 那条路径仍然需要它。
  *
  * 30 秒是这样定的:目录以天为单位变化,所以"晚 30 秒恢复"没有代价;
  * 而它足够短,不会让一次网络抖动把目录冻住很久。
@@ -282,6 +281,11 @@ export function parseCatalog(payload: unknown, slot: CatalogSlot, now: number): 
  * 一个自保参数,用户没有理由调它。
  */
 const FAILURE_BACKOFF_MS = 30_000;
+
+/** 退避键不含明文 key:它与连接缓存同样用 `credentialFingerprint` 表示凭证身份。 */
+function backoffKeyOf(identity: CatalogIdentity): string {
+  return `${credentialFingerprint(identity.apiKey)}|${identity.proxyId ?? ""}`;
+}
 
 export type ModelCatalogOptions = {
   /** 注入以便测试推进时间。 */
@@ -293,8 +297,13 @@ export class ModelCatalog {
   readonly #slots = new Map<CatalogSlot, CatalogSnapshot>();
   /** 同槽位的并发请求合流 —— 否则启动瞬间的一批请求各打一次上游。 */
   readonly #inFlight = new Map<CatalogSlot, Promise<CatalogSnapshot | null>>();
-  /** 上次失败的时刻,按槽位。见 FAILURE_BACKOFF_MS。 */
-  readonly #failedAt = new Map<CatalogSlot, number>();
+  /**
+   * 上次失败的时刻,按**身份**(key 指纹 + 出口)而不是槽位。
+   *
+   * `/v1/models` 在首个身份失败后会换同槽位的下一个身份;按槽位退避会让
+   * 一个出口坏掉的 Worker 把后面健康 Worker 的目录拉取一起压住。见 FAILURE_BACKOFF_MS。
+   */
+  readonly #failedAt = new Map<string, number>();
   readonly #clock: () => number;
   readonly #log: ((message: string) => void) | undefined;
 
@@ -307,7 +316,7 @@ export class ModelCatalog {
    * 已缓存的那份，不发起任何请求。
    *
    * **转发路径只用这个。** 没有缓存时返回 null，调用方据此退回"不做交集"
-   * （行为等同 Phase 5），而不是拒绝请求 —— 见 `judgeFree` 的说明。
+   * （只看后缀／名单），而不是拒绝请求 —— 见 `judgeFree` 的说明。
    */
   cached(slot: CatalogSlot): CatalogSnapshot | null {
     return this.#slots.get(slot) ?? null;
@@ -317,13 +326,13 @@ export class ModelCatalog {
   /**
    * 这份快照是否还在 TTL 内。
    *
-   * `now` 可省 —— 省略时用**本类自己的**时钟。这一点要紧:先前
-   * `models.ts` 传的是 `Date.now()`,而 `fetchedAt` 来自注入的 `#clock`,
-   * 于是同一个响应体里两个字段来自**两个不同的时间源**。注入时钟的环境下
+   * `now` 可省 —— 省略时用**本类自己的**时钟。这一点要紧:若
+   * `models.ts` 传 `Date.now()`,而 `fetchedAt` 来自注入的 `#clock`,
+   * 同一个响应体里两个字段就来自**两个不同的时间源**。注入时钟的环境下
    * `fresh` 恒为 false(刚拉到的目录报告为"不新鲜"),生产环境下恒为 true ——
-   * 两种情况下都无法用断言区分新鲜与过期,所以它是全仓唯一一个**无法被验证**
+   * 两种情况下都无法用断言区分新鲜与过期,它会成为一个**无法被验证**
    * 的诊断字段。而 `architecture.md` 正把它当作目录状态的观察手段,
-   * Phase 8 的 `doctor.mjs` 还要读它:一个会说假话的诊断字段比没有更糟。
+   * `doctor.mjs` 也读它:一个会说假话的诊断字段比没有更糟。
    *
    * 修法不是给 `models.ts` 补一个 `clock` 依赖(那只是把同样的口子挪个位置,
    * 而 `status(now)` 是同一个形状,下一个调用点会照抄),而是让**时钟来源在这个
@@ -331,7 +340,7 @@ export class ModelCatalog {
    *
    * ## 这里刻意**没有**时钟回拨守卫,而 `refreshIfStale` 里有
    *
-   * 两处的比较看起来该对称,其实不是 —— 第六轮审核穷举验证过:
+   * 两处的比较看起来该对称,其实不是(穷举验证过):
    *
    * - 本方法:`catalogTtlMs` 的 schema 下界是 `60_000`(恒为正),所以
    *   `age < 0` **蕴含** `age < ttl`。加一条 `if (age < 0) return true`
@@ -340,7 +349,7 @@ export class ModelCatalog {
    * - `refreshIfStale`:那里比的是**退避窗口**,方向相反 —— 负 age 会让
    *   `age < FAILURE_BACKOFF_MS` 恒真,于是刷新被**永久冻住**。那条守卫是承重的。
    *
-   * 先前两处都写着守卫、注释也一样,于是一条是死的、一条是活的而读者分不出来。
+   * 两处都写守卫、注释也一样的话,一条是死的、一条是活的而读者分不出来。
    * **保留一行永远不改变结果的代码比删掉它更危险**:下一个人会以为它在守什么,
    * 并据此推断本方法对时钟回拨有特殊处理。
    */
@@ -368,6 +377,9 @@ export class ModelCatalog {
     const now = this.#clock();
     const have = this.#slots.get(slot);
     if (have !== undefined && this.isFresh(have, config, now)) return have;
+    // 退避窗口内不再打上游:`/v1/models` 按身份逐个调用本方法,上游故障时
+    // 每次模型列表请求都会放大成 N 次失败拉取。退避中仍返回旧缓存,没有才是 null。
+    if (this.#inBackoff(identity, now)) return have ?? null;
 
     const fetched = await this.#fetchOnce(identity, config, upstreamOf);
     // 拉失败 → 用旧的（哪怕过期）。这是"上游抖动时目录不跟着消失"的落点。
@@ -400,14 +412,18 @@ export class ModelCatalog {
      * `age < 0` 是时钟回拨 —— 当作"退避已过"处理(宁可多试一次,
      * 也不要因为一次 NTP 校正把目录冻住)。
      */
-    const failedAt = this.#failedAt.get(slot);
-    if (failedAt !== undefined) {
-      const age = now - failedAt;
-      if (age >= 0 && age < FAILURE_BACKOFF_MS) return;
-    }
+    if (this.#inBackoff(identity, now)) return;
 
     // 必须吞掉异常：这是无人 await 的后台任务，抛出会变成 unhandledRejection。
     void this.#fetchOnce(identity, config, upstreamOf).catch(() => null);
+  }
+
+  /** 该身份是否处在失败退避窗口内。`ensure` 与 `refreshIfStale` 共用这一份判定。 */
+  #inBackoff(identity: CatalogIdentity, now: number): boolean {
+    const failedAt = this.#failedAt.get(backoffKeyOf(identity));
+    if (failedAt === undefined) return false;
+    const age = now - failedAt;
+    return age >= 0 && age < FAILURE_BACKOFF_MS;
   }
 
   /**
@@ -415,16 +431,13 @@ export class ModelCatalog {
    *
    * `now` 可省,与 `isFresh` 同理:时钟来源在本类里唯一,调用方不各自决定。
    *
-   * ## 生产调用点:`GET /api/overview`（Phase 9 批次 1 起）
+   * ## 生产调用点:`GET /api/overview`
    *
-   * `routes/admin.ts` 读它填 `catalog.slots`,Models 页显示每个槽位的条目数与年龄
-   * —— 正是下面那段曾经预期的用途。
+   * `routes/admin.ts` 读它填 `catalog.slots`,Models 页显示每个槽位的条目数与年龄。
    *
-   * > 这里先前写着"⚠️ 本方法当前没有生产调用点,全仓只有 `catalog.test.ts` 在调它"。
-   * > 第八轮审核查出那已经过期,且 `shared/contract.ts` 里同时写着"它此前没有
-   * > 生产读者"—— 同一事实两处副本互相矛盾。这是纪律 #4 在**注释**这个载体上的
-   * > 形态:"有没有读者"这件事的真相只能是调用点本身,手写标注必然漂。
-   * > 登记在案的那个关卡（断言每个导出成员都有非测试引用）才是正解。
+   * 不要在这里手写"有没有生产调用点"的标注:那种标注必然漂,且会与别处的
+   * 副本互相矛盾 —— 纪律 #4 在**注释**这个载体上的形态。"有没有读者"的真相
+   * 只能是调用点本身,由断言每个导出成员都有非测试引用的那个关卡守着。
    *
    * `CatalogSnapshot.slot` 字段仍**只被本方法读**(`#slots` 这个 Map 的键来自
    * `slotOf()`,不是来自 `snapshot.slot`),那一条标注仍然成立。
@@ -459,10 +472,10 @@ export class ModelCatalog {
     const task = this.#doFetch(identity, slot, config, upstreamOf)
       .then((snapshot) => {
         if (snapshot === null) {
-          this.#failedAt.set(slot, this.#clock());
+          this.#failedAt.set(backoffKeyOf(identity), this.#clock());
         } else {
           // 成功了就清掉退避,否则一次成功之后的下一次过期还会被压住。
-          this.#failedAt.delete(slot);
+          this.#failedAt.delete(backoffKeyOf(identity));
         }
         return snapshot;
       })
@@ -508,7 +521,7 @@ export class ModelCatalog {
     }
 
     /*
-     * 先限**体积**，再解析（缺口 #7）。
+     * 先限**体积**，再解析。
      *
      * `MAX_CATALOG_ENTRIES` 的闸门在 `parseCatalog` 里，也就是 `json()` 已经
      * 把整个体读进内存**之后** —— 实测一个单条目、40 MiB 的响应被照常采纳。

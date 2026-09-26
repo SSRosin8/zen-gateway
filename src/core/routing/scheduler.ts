@@ -2,7 +2,7 @@ import type { Config } from "../../shared/schema.ts";
 import { RoutingConfigSchema } from "../../shared/schema.ts";
 import { shouldCooldown, type FailureKind } from "../failures.ts";
 import type { AttemptRecord, AttemptTarget } from "../upstream/retry.ts";
-import { AffinityMap, containsStaleReasoning } from "./affinity.ts";
+import { AffinityMap } from "./affinity.ts";
 import type { AffinitySink, RestoredBinding } from "./affinity.ts";
 import { WorkerPool } from "./workerPool.ts";
 import { select, type Selection } from "./select.ts";
@@ -15,7 +15,7 @@ import { select, type Selection } from "./select.ts";
  *
  * 四块各自是纯函数或纯数据结构,但它们之间有次序约束(选之前要 sync、
  * 结算要在流结束之后、亲和绑定与冷却必须看同一个 `now`)。这些约束若散在
- * 路由里,Phase 6 新增协议面时会被复制一遍,而复制的两份必然分叉。
+ * 路由里,每新增一个协议面就会被复制一遍,而复制的两份必然分叉。
  *
  * 路由层因此只看得到三个动作:`plan` → `record` → `settleStream`。
  *
@@ -72,7 +72,7 @@ export class Scheduler {
   readonly #jitter: () => number;
 
   /**
-   * `affinitySink` 传入则亲和绑定镜像落盘（Phase 7）。
+   * `affinitySink` 传入则亲和绑定镜像落盘。
    *
    * 不传则纯内存 —— 全部既有单测走这条路，而它们测的是调度逻辑，
    * 不该为此各自建一个临时数据库。
@@ -119,28 +119,22 @@ export class Scheduler {
    * 三条分支,而分支条件**从 `shouldCooldown` 推导**而不是另写一份:
    *
    * - **成功** → `markSuccess`(清零 + 解除冷却)。上游用行为证明了它现在能用。
-   * - **不归咎 Worker,或该类别本就不冷却** → `markNotBlamed`(清零,**保留冷却**)
+   * - **不归咎 Worker,或该类别本就不冷却** → 什么都不改:冷却与连续失败数原样保留
    * - 其余 → `markFailure`,按类别冷却
+   *
+   * ## 第二条为什么不清零
+   *
+   * 不归咎的结局(坏请求、出口配置错误、未核验模型的 401)对 Worker 是否可用
+   * 零信息:它既不该让退避升级(所以不走 `markFailure`),也不该打断真实故障的
+   * 连续计数 —— `transport, bad_request, transport` 仍是连续两次真实故障,
+   * 清零会让一个夹在中间的坏请求把指数退避拉回起点。只有成功才重置计数。
    *
    * ## 第二条为什么要带上 `!shouldCooldown`
    *
-   * 这是第五轮审核查出的第四处「两份并行判断」(纪律 #4)。先前分支只看
-   * `blameWorker`,而 `shouldCooldown()` 把 `bad_request` 与 `unknown`
-   * **同等对待**(都不冷却)—— 两份判断不是同一个真相。后果实测:
-   *
-   * ```
-   * 5x bad_request 后一次 transport 冷却 = 2000 ms
-   * 5x unknown     后一次 transport 冷却 = 64000 ms  (上限 120000)
-   * ```
-   *
    * `unknown` 的 `blameWorker` 为 true(`retry.ts` 只对出口配置错误置 false),
-   * 于是它走 `markFailure`:计数 +1 而冷却为 null,计数无界膨胀,把后续**真实**
-   * 故障的退避直接推到上限。这正是 `markSuccess` 注释声称已防住的问题,
-   * 只是入口从 `bad_request` 换成了 `unknown`。
-   *
-   * 代价是一个取舍:`transport, unknown, transport, unknown…` 交替时退避
-   * 不会升级。接受它 —— `unknown` 只来自非 `Error` 抛出物(`classifyError`),
-   * 极少见;而「我们没看懂的失败」本就不该拿 Worker 的可用性去赌。
+   * 只看 `blameWorker` 会让它走 `markFailure`:计数 +1 而冷却为 null,计数无界
+   * 膨胀,把后续**真实**故障的退避直接推到上限。「该不该冷却」只有
+   * `shouldCooldown` 一份真相(纪律 #4)。
    */
   record(record: AttemptRecord, config: Config, now: number): void {
     this.#ensureSynced(config);
@@ -161,10 +155,7 @@ export class Scheduler {
       return;
     }
 
-    if (!record.blameWorker || !shouldCooldown(record.failure)) {
-      this.#pool.markNotBlamed(record.workerId);
-      return;
-    }
+    if (!record.blameWorker || !shouldCooldown(record.failure)) return;
 
     this.#pool.markFailure({
       workerId: record.workerId,
@@ -231,7 +222,7 @@ export class Scheduler {
      * 所以在那里编一个 workerId 是**死信息** —— 它会让读代码的人以为
      * 失败路径也在按 Worker 记账。
      *
-     * 先前这里传的是 `result.attempts.at(-1)?.workerId ?? ""`,变异测试
+     * 不要在失败路径传 `result.attempts.at(-1)?.workerId ?? ""`:变异测试
      * 把它换成 `""` 后全部测试依然绿 —— 那正是"这个值根本没被用"的证据,
      * 而不是测试的漏洞。
      */
@@ -261,52 +252,7 @@ export class Scheduler {
   }
 
   /**
-   * 非流式响应的结算。
-   *
-   * 与 `settleStream` 分开只为让调用点读起来清楚 —— 非流式下响应体已经
-   * 完整送达,不存在"不完整"这一态。内部委托同一套逻辑,不复制判断。
-   */
-  settleBuffered(input: {
-    readonly workerId: string;
-    readonly sessionHash: string | null;
-    readonly blobHashes: readonly string[];
-    readonly status: number;
-    readonly bodyText: string;
-    readonly now: number;
-  }): void {
-    this.settleStream({
-      workerId: input.workerId,
-      sessionHash: input.sessionHash,
-      blobHashes: input.blobHashes,
-      status: input.status,
-      staleHit: containsStaleReasoning(input.bodyText),
-      complete: true,
-      now: input.now,
-    });
-  }
-
-  /**
-   * Worker 就绪数与总数。
-   *
-   * ⚠️ **本方法仍没有生产调用点，而那是对的。**
-   *
-   * Phase 9 的 `/api/overview` 需要的是**与 Worker 列表同源**的计数
-   * （`admin/project.ts` 的 `poolCounts` 从 `workerViews` 推导）——
-   * 若这里再问一次，同一个响应里的 `pool.ready` 与 `workers[].ready`
-   * 就来自两次独立查询，中间状态可能变过，而用户会把它们当成一句话读
-   * （「3 个 Worker，2 个就绪」后面跟着一张三行的表）。
-   *
-   * 先前这里写的是「供 `/health` 与管理后台」—— 而 `/health` 的 handler
-   * 完全不调 scheduler（第七轮审核查出那是个**假的调用点声明**）。
-   * 保留 + 标注，与 `snapshot()`/`status()` 同格式。
-   */
-  counts(config: Config, now: number): { ready: number; total: number } {
-    this.#ensureSynced(config);
-    return this.#pool.counts(now);
-  }
-
-  /**
-   * Worker 的运行期状态 —— 管理 API 的数据来源（Phase 9）。
+   * Worker 的运行期状态 —— 管理 API 的数据来源。
    *
    * ## 为什么不直接用 `snapshot()`
    *
@@ -351,9 +297,9 @@ export class Scheduler {
    * 丢掉过期与指向已删除 Worker 的亲和条目。
    *
    * ⚠️ **仍无生产调用点**，理由见 `AffinityMap.prune`（不接上是有意的）。
-   * 这里先前写着「由管理面或定期任务调用」—— 那是个**假的调用点声明**：
-   * 全仓只有单测调它（第十轮审核实测）。而同一个事实在邻居文件里写对了，
-   * 也就是同一事实两份副本、一份失实（纪律 #4）。
+   * 这里不写「由管理面或定期任务调用」—— 那会是个**假的调用点声明**：
+   * 全仓只有单测调它。同一事实只在 `AffinityMap.prune` 写一份，
+   * 免得两份副本一份失实（纪律 #4）。
    *
    * 「有没有读者」这件事的唯一真相是调用点本身，而
    * `tests/unit/exportsReferenced.test.ts` 已经把它做成了关卡 ——

@@ -3,8 +3,7 @@ import { z } from "zod";
 /**
  * server ⇄ admin ⇄ CLI 的唯一契约。
  *
- * Phase 0 只放最小集合以打通类型链路；配置与存储的完整 schema 在 Phase 1。
- * 规则：三端都从这里导入推导类型，任何一端改字段，另两端 typecheck 失败。
+ * 配置 schema 在 `schema.ts`。规则：三端都从这里导入推导类型，任何一端改字段，另两端 typecheck 失败。
  */
 
 export const HealthSchema = z.object({
@@ -25,10 +24,9 @@ export const HealthSchema = z.object({
    *
    * 两个 store 都吞掉写异常（诊断设施不该让转发失败），但**吞掉不等于可以
    * 不知道**：一个一直写失败的库会安静地给出全 0 报表，而那看起来像
-   * 「没人用」。第七轮审核指出那个计数此前**没有任何生产读者** ——
-   * 与 `Scheduler.snapshot()` 同一形态。
+   * 「没人用」。所以这个计数必须有生产读者。
    *
-   * 放在 `/health` 而不是等 Phase 8 的 `doctor`：`service.mjs` 本来就在轮询
+   * 放在 `/health` 而不是只给 `doctor`：`service.mjs` 本来就在轮询
    * 这个端点，而 doctor 也可以读它 —— 一个出口服务两个消费者。
    *
    * 0 是正常值。非 0 说明库有问题（磁盘满／权限／档位），统计数字不可信。
@@ -53,7 +51,7 @@ export function poolHealth(counts: { ready: number; total: number }): PoolHealth
 }
 
 /* ------------------------------------------------------------------ *
- * 管理 API（Phase 9）
+ * 管理 API
  * ------------------------------------------------------------------ */
 
 /**
@@ -93,8 +91,8 @@ export type SecretPresence = z.infer<typeof SecretPresenceSchema>;
  * 合并是这个端点存在的全部理由：`config.json` 知道「配了什么」，
  * `Scheduler` 知道「现在能不能用」，而用户问的那个问题
  * （「它为什么没在用我这个账号」）**必须两者一起才能回答**。
- * 先前 `npm run status` 只报进程信息、`doctor` 只能报配置形态，
- * 就是因为没有任何地方同时持有这两半。
+ * `npm run status` 只知道进程信息、`doctor` 只知道配置形态，
+ * 只有服务进程同时持有这两半。
  */
 export const WorkerViewSchema = z.object({
   id: z.string(),
@@ -114,8 +112,8 @@ export const WorkerViewSchema = z.object({
   /**
    * 现在是否就绪（不在冷却中）。`inPool` 为假时恒为 false。
    *
-   * 这是 Phase 8 的 `doctor` 明确报不了的那个字段（运行期状态住在服务进程里，
-   * 进程外没有出口）—— 现在有了。
+   * 这是进程外的 `doctor` 报不了的那个字段（运行期状态住在服务进程里，
+   * 进程外没有出口），只能由服务端经这里给出。
    */
   ready: z.boolean(),
   /** 冷却剩余毫秒。0 = 不在冷却。 */
@@ -207,7 +205,7 @@ export type Overview = z.infer<typeof OverviewSchema>;
  * 统计视图。对应 `StatsStore` 的四个聚合函数。
  *
  * `requests` 与 `attempts` **必须分开**：一条重试链是一个请求、多次尝试。
- * 这是 Phase 7 最容易被当成同一个的两个量。
+ * 这是统计里最容易被当成同一个的两个量。
  */
 export const StatsViewSchema = z.object({
   /** 起始日（UTC 日期键）；null = 全部历史。 */
@@ -275,14 +273,14 @@ export type AdminError = z.infer<typeof AdminErrorSchema>;
 /**
  * 错误类型的联合 —— 供 `adminError()` 的形参用。
  *
- * 先前 `routes/admin.ts` 手写了一份同样的五项联合，而这里的 `z.enum` 是
- * 同一事实的另一份副本（纪律 #4）。从 schema 推导让「加一种错误类型」
+ * 不在 `routes/admin.ts` 手写一份同样的五项联合：那与这里的 `z.enum` 是
+ * 同一事实的两份副本（纪律 #4）。从 schema 推导让「加一种错误类型」
  * 只需要改一处，而漏改的方向是 typecheck 失败而不是运行期分叉。
  */
 export type AdminErrorType = AdminError["error"]["type"];
 
 /* ------------------------------------------------------------------ *
- * 写入方向（Phase 9）
+ * 写入方向
  * ------------------------------------------------------------------ */
 
 /**
@@ -379,10 +377,10 @@ export const ModelRulesPatchSchema = z.strictObject({
  * 回传完整列表，而前端**拿不到 apiKey 的原值** —— 它只有 `present`，
  * 于是任何覆盖式写入都会抹掉所有 key。这是那条「投影窄于存储」的第二个后果。
  *
- * ## 补丁侧一律 `strictObject`（第十轮审核）
+ * ## 补丁侧一律 `strictObject`
  *
  * `schema.ts` 每一层都是 `strictObject`，理由是「手工编辑是预期用法，拼错
- * 字段名必须立刻报错」。而这里先前用的是 `z.object`，于是**拼错的字段被
+ * 字段名必须立刻报错」。这里若用 `z.object`，**拼错的字段会被
  * 静默丢弃**：`maxAttempt`（少个 s）、`freeSuffixes`、`workers.deletes`、
  * worker patch 里的 `enable` 实测全部"成功"，产出一个空 patch →
  * `applyConfigPatch` 返回 `changed: false` → 响应 `{"ok":true,"changed":false}`。
@@ -411,7 +409,7 @@ export const ConfigPatchSchema = z.strictObject({
 export type ConfigPatch = z.infer<typeof ConfigPatchSchema>;
 
 /* ------------------------------------------------------------------ *
- * 其余页面的视图（Phase 9 批次 2）
+ * 其余页面的视图
  * ------------------------------------------------------------------ */
 
 /**
@@ -469,7 +467,7 @@ export const ModelViewSchema = z.object({
 export type ModelView = z.infer<typeof ModelViewSchema>;
 
 /**
- * 订阅的投影（Phase 10）。
+ * 订阅的投影。
  *
  * **URL 是凭证**（token 通常带在 query 或 path 里），所以这里**绝不**给原值
  * —— 只给一个脱敏后的展示串加一个"配没配"的标记，与 apiKey 同一条规则。
@@ -520,13 +518,13 @@ export const SubscriptionRefreshSchema = z.object({
 export type SubscriptionRefresh = z.infer<typeof SubscriptionRefreshSchema>;
 
 /**
- * 一次出口探测的逐条结果（缺口 #25，第九轮补上）。
+ * 一次出口探测的逐条结果。
  *
  * ## 为什么这个端点也要有 schema
  *
  * 其余管理端点都是 `XxxSchema.parse(...)` + 由 `admin/project.ts` 构造，
- * 而 `POST /api/probe` 先前手工拼装 `ProbeOutcome` 的字段 —— 它是唯一
- * 绕过投影层与 schema 的管理响应。
+ * `POST /api/probe` 也不例外 —— 手工拼装 `ProbeOutcome` 的字段
+ * 会让它成为唯一绕过投影层与 schema 的管理响应。
  *
  * 今天不泄漏凭证（`reason` 来自 `safeErrorMessage`/`describeResolveFailure`，
  * 而 `probe.ts` 明确拒绝把响应正文放进 `reason`），**但那条纪律的全部价值
@@ -577,7 +575,7 @@ export const ProxyListSchema = z.object({
   clash: OverviewSchema.shape.clash,
   /** 回显出口报告，与 Overview 同一份逻辑；不证明 Zen 实际出口隔离。 */
   isolation: IsolationViewSchema,
-  /** 订阅列表（Phase 10）—— 代理池页要能看到"这些节点从哪来"。 */
+  /** 订阅列表 —— 代理池页要能看到"这些节点从哪来"。 */
   subscriptions: z.array(SubscriptionViewSchema),
 });
 export type ProxyList = z.infer<typeof ProxyListSchema>;
@@ -618,9 +616,8 @@ export const BatchProgressSchema = z.object({
    * 由服务端从 `started_at` 算 —— 前端算不了：它不知道这一批是什么时候
    * 开始的（刷新页面后内存里那份就没了，而进度本身归服务端所有）。
    *
-   * 这也给了 `batch_probe_jobs.started_at` 第一个读者（缺口 #28）。
-   * 先前它**建行之后永不更新**，于是第一次批测写下的值会存一辈子 ——
-   * 没有读者所以不出症状，而那正是"死信息"的形态。
+   * 这是 `batch_probe_jobs.started_at` 的读者，所以每批都要更新它，
+   * 否则第一次批测写下的值会存一辈子（见 `batchProbeStore.ts`）。
    */
   elapsedMs: z.number().int().nonnegative().nullable(),
 });

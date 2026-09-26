@@ -86,6 +86,12 @@ function config(ids: string[]): Config {
 }
 
 /** 抖动固定为 0,让冷却时长可断言。 */
+/** 就绪数与总数,取自管理 API 的同一个数据源。 */
+function counts(s: Scheduler, cfg: Config, at: number): { ready: number; total: number } {
+  const workers = s.runtimeWorkers(cfg, at);
+  return { ready: workers.filter((w) => w.ready).length, total: workers.length };
+}
+
 function scheduler(): Scheduler {
   return new Scheduler({ jitter: () => 0 });
 }
@@ -145,8 +151,8 @@ function rateLimitFirstKey(): void {
 describe("冷却跨请求生效", () => {
   it("429 之后下一个请求直接跳过该 Worker", async () => {
     /*
-     * 这是 Phase 5 之前**完全不存在**的行为:先前 `selectTargets` 每次都按
-     * 配置顺序排出全部 Worker,于是每条请求都要先撞一次 w1 的 429 才轮到 w2。
+     * 若 `selectTargets` 每次都按配置顺序排出全部 Worker,
+     * 每条请求都要先撞一次 w1 的 429 才轮到 w2。
      */
     const cfg = config(["w1", "w2"]);
     const s = scheduler();
@@ -176,11 +182,11 @@ describe("冷却跨请求生效", () => {
 
     // 59 秒:仍在冷却。
     now = START + 59_000;
-    expect(s.counts(cfg, now)).toEqual({ ready: 1, total: 2 });
+    expect(counts(s, cfg, now)).toEqual({ ready: 1, total: 2 });
 
     // 60 秒:恢复。
     now = START + 60_000;
-    expect(s.counts(cfg, now)).toEqual({ ready: 2, total: 2 });
+    expect(counts(s, cfg, now)).toEqual({ ready: 2, total: 2 });
 
     handler = (_req, res) => res.end("{}");
     seenKeys = [];
@@ -202,7 +208,7 @@ describe("冷却跨请求生效", () => {
 
     // 第一条把两个都打进冷却(链长 maxAttempts=3,但只有 2 个 Worker)。
     await app(cfg, s).request("/v1/chat/completions", post({ model: "big-pickle", messages: [] }));
-    expect(s.counts(cfg, now)).toEqual({ ready: 0, total: 2 });
+    expect(counts(s, cfg, now)).toEqual({ ready: 0, total: 2 });
 
     seenKeys = [];
     now += 1_000;
@@ -215,8 +221,8 @@ describe("冷却跨请求生效", () => {
 
 describe("冷却按**失败发生**的时刻起算,不是请求开始的时刻", () => {
   /*
-   * 第五轮审核查出的最严重缺陷。`relay.ts` 先前只取一次 `now` 并让整条链
-   * 共用,而一次尝试可以耗 60-300 秒(headers/body 超时)——于是冷却从
+   * 若 `relay.ts` 只取一次 `now` 并让整条链共用,而一次尝试可以耗 60-300 秒
+   * (headers/body 超时)——于是冷却从
    * **请求开始**时刻起算,算出来的到期时刻早已成为过去。
    *
    * 端到端实测(真实 HTTP 服务器):
@@ -246,14 +252,14 @@ describe("冷却按**失败发生**的时刻起算,不是请求开始的时刻",
     await app(cfg, s).request("/v1/chat/completions", post({ model: "big-pickle", messages: [] }));
 
     // 失败发生在 START+60_000,冷却 10 秒 → 此刻(仍是 START+60_000)必须未就绪。
-    expect(s.counts(cfg, now)).toEqual({ ready: 0, total: 1 });
+    expect(counts(s, cfg, now)).toEqual({ ready: 0, total: 1 });
     expect(s.snapshot(cfg, now).workers[0]?.cooldownRemainingMs).toBe(10_000);
 
     // 旧行为下冷却到期时刻是 START+10_000,而现在已是 START+60_000 → 会是 ready。
     now += 9_999;
-    expect(s.counts(cfg, now)).toEqual({ ready: 0, total: 1 });
+    expect(counts(s, cfg, now)).toEqual({ ready: 0, total: 1 });
     now += 1;
-    expect(s.counts(cfg, now)).toEqual({ ready: 1, total: 1 });
+    expect(counts(s, cfg, now)).toEqual({ ready: 1, total: 1 });
   });
 
   it("链内多次尝试各按**自己**失败的时刻记账", async () => {
@@ -351,7 +357,7 @@ describe("不变量 #4:坏请求不拖累 Worker 池", () => {
       expect(res.status).toBe(400);
     }
 
-    expect(s.counts(cfg, now)).toEqual({ ready: 3, total: 3 });
+    expect(counts(s, cfg, now)).toEqual({ ready: 3, total: 3 });
   });
 
   it("400 不重试 —— 换 Worker 也一样失败", async () => {
@@ -628,16 +634,16 @@ describe("不变量 #3:流结束后的亲和结算", () => {
   });
 });
 
-describe("体内会话指针(Phase 6 的 responses 面形态)", () => {
+describe("体内会话指针(responses 面形态)", () => {
   /**
-   * 一个从请求体读会话标识的面 —— 对应 Phase 6 的 `responses`
+   * 一个从请求体读会话标识的面 —— 对应 `responses` 面
    * (它的 `previous_response_id` 是标准的服务端会话指针)。
    *
    * 这个假面是必需的,不是图省事:`chatSurface.sessionKeyFrom` 恒返回
    * `undefined`,而它是当前**唯一**注册的面 —— 于是 relay 里
    * 「体内指针优先于头」那条接线**结构上无法失败**。变异测试实测:
    * 把 `bodyKey: surface.sessionKeyFrom(parsed)` 改成 `bodyKey: undefined`
-   * 后 53 条测试全绿。
+   * 后全量测试全绿。
    *
    * 这正是 [[verification-discipline]] 第 1 条的形态:调用点存在不等于
    * 约束成立 —— 要问「这条断言的失败路径是否可达」。

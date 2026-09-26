@@ -11,9 +11,10 @@
  * 但锁**必须在响应体开始流之前释放**:一条 SSE 可能持续几分钟,
  * 若锁跨到流结束,整个网关会被单条长连接串行化。
  *
- * 临界区的正确边界恰好就是 `fetch()` 的 resolve 时机 ——
- * 它在响应头到达时 resolve,此时连接已建立并绑定到当时选中的节点,
- * 之后再切换 selector 不会改变这条已建立连接的出口。
+ * 临界区的边界最晚是 `fetch()` 的 resolve 时机(响应头到达):此时连接已建立
+ * 并绑定到当时选中的节点,之后再切换 selector 不会改变这条连接的出口。
+ * 转发路径更进一步,在连接就绪时就释放(见 `upstream/fetch.ts`);
+ * 探测请求短,仍用响应头为界。
  *
  * ## 陷阱:Promise 同化会把锁的范围悄悄扩大
  *
@@ -29,7 +30,7 @@
  *                                        整个网关。
  *
  * 区别只在返回值是「响应对象」还是「读体的 Promise」,不看类型签名极易写错。
- * Phase 3 的转发链路照抄本模式时尤其要注意:任务里只做「切换 + 建连」。
+ * 转发链路照抄本模式时尤其要注意:任务里只做「切换 + 建连」。
  *
  * 直连代理没有这个约束(各自独立的 dispatcher),不走这把锁。
  */
@@ -38,12 +39,6 @@
 export class SelectorLock {
   /** 锁链的尾部;新任务排在它后面。 */
   #tail: Promise<unknown> = Promise.resolve();
-  #depth = 0;
-
-  /** 正在排队或执行的任务数,供诊断与测试观察。 */
-  get pending(): number {
-    return this.#depth;
-  }
 
   /**
    * 串行执行 `task`。
@@ -53,8 +48,6 @@ export class SelectorLock {
    * 后排队的请求仍会切换全局 selector,造成与任何实际请求都无关的出口抖动。
    */
   run<T>(task: () => Promise<T>, signal?: AbortSignal): Promise<T> {
-    this.#depth += 1;
-
     const execute = (): Promise<T> => {
       if (signal?.aborted) return Promise.reject(signal.reason ?? new DOMException("操作已取消", "AbortError"));
       return task();
@@ -70,9 +63,7 @@ export class SelectorLock {
       () => undefined,
     );
 
-    return result.finally(() => {
-      this.#depth -= 1;
-    });
+    return result;
   }
 }
 
@@ -87,9 +78,5 @@ export class SelectorLockRegistry {
       this.#locks.set(bridgeId, lock);
     }
     return lock;
-  }
-
-  get size(): number {
-    return this.#locks.size;
   }
 }
