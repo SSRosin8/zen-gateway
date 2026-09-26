@@ -521,6 +521,10 @@ describe("setup 不动用户自己的东西", () => {
 
   it("--dry-run 完全不写盘", async () => {
     const before = await writeConfig();
+    await chmod(configFile(), 0o644);
+    await chmod(dataDir, 0o755);
+    const beforeFileStat = await stat(configFile());
+    const beforeDirStat = await stat(dataDir);
     await startFakeClash({});
 
     await run(SETUP, ["--api", fakeApi(), "--dry-run"]);
@@ -528,6 +532,10 @@ describe("setup 不动用户自己的东西", () => {
     const after = JSON.parse(await readFile(configFile(), "utf8")) as Config;
     expect(after).toEqual(before);
     await expect(readFile(`${configFile()}.bak`, "utf8")).rejects.toThrow(/ENOENT/);
+    expect((await stat(configFile())).mode & 0o777).toBe(0o644);
+    expect((await stat(dataDir)).mode & 0o777).toBe(0o755);
+    expect((await stat(configFile())).mtimeMs).toBe(beforeFileStat.mtimeMs);
+    expect((await stat(dataDir)).mtimeMs).toBe(beforeDirStat.mtimeMs);
   });
 });
 
@@ -552,14 +560,15 @@ describe("setup 从 Controller 读端口,不硬编码", () => {
     for (const proxy of after.proxies) expect(proxy.port).toBe(24680);
   });
 
-  it("mixed-port 为 0 时退回 socks-port", async () => {
+  it("mixed-port 为 0 时拒绝把 socks-port 冒充 HTTP 混合端口", async () => {
     await writeConfig();
     await startFakeClash({ mixedPort: null, socksPort: 13579 });
 
-    await run(SETUP, ["--api", fakeApi()]);
+    const result = await run(SETUP, ["--api", fakeApi()]);
+    expect(result.code).toBe(1);
+    expect(result.stdout).toContain("无法从 /configs 读出可用的代理端口");
     const after = JSON.parse(await readFile(configFile(), "utf8")) as Config;
-
-    expect(after.clash.bridges[0]!.localProxyPort).toBe(13579);
+    expect(after.clash.bridges).toHaveLength(0);
   });
 
   it("三个端口都为 0 时**拒绝配置**,而不是猜一个默认值", async () => {
@@ -812,7 +821,7 @@ describe("setup 对 GLOBAL 分组的处置", () => {
  * ================================================================== */
 
 describe("setup 刻意不创建 Worker", () => {
-  it("只配出口,并说明为什么不建匿名 Worker", async () => {
+  it("只配出口,并说明认证与匿名 Worker 都可由用户创建", async () => {
     await writeConfig();
     await startFakeClash({});
 
@@ -826,7 +835,7 @@ describe("setup 刻意不创建 Worker", () => {
      */
     expect(after.workers).toHaveLength(0);
     expect(after.proxies.length).toBeGreaterThan(0);
-    expect(result.stdout).toContain("FreeTierError");
+    expect(result.stdout).toContain("匿名 Worker");
   });
 });
 
@@ -1055,6 +1064,15 @@ describe("两个脚本都拒绝未识别的参数", () => {
      */
     const good = await run(DOCTOR, ["--deep"]);
     expect(good.stdout).not.toContain("未识别的参数");
+  });
+
+  it("doctor --help 明确 --deep 只测回显目标，不宣称 Zen 已隔离", async () => {
+    const result = await run(DOCTOR, ["--help"]);
+
+    expect(result.code).toBe(0);
+    expect(result.stdout).toContain("IP 回显目标");
+    expect(result.stdout).toContain("不证明 Zen 实际出口");
+    expect(result.stdout).not.toContain("额外实测每个出口的公网 IP");
   });
 
   it("`--help` 提示 npm 调用要加 `--` —— 那是这个陷阱的高频入口", async () => {

@@ -1,6 +1,6 @@
 ---
 name: ui-design
-description: Use when changing anything under src/admin/ — pages, components, design tokens, colors, layout, accessibility. Encodes the measured contrast rules, the density decisions, and the traps that a naive change will fall into. Trigger on UI, 界面, 样式, CSS, token, 颜色, 对比度, 布局, 表格, 无障碍, layout, color, contrast, accessibility, dark mode.
+description: 修改管理后台页面、组件、样式、设计 token、颜色、表格、布局或无障碍行为时使用。涵盖已验证的对比度规则、实色禁用态、图标与文字共同表达状态、分页与视图状态、凭证展示边界，以及加载、离线、错误等状态的区分。适用于 src/admin 下的界面工作。
 ---
 
 # zen-gateway 管理后台的设计约束
@@ -26,7 +26,7 @@ description: Use when changing anything under src/admin/ — pages, components, 
 - **`accent-fill` 只能做填充。** 它唯一合格的前景是 `on-accent-fill`（5.90），
   其余压上去全部不及格（`text-muted` 2.22、`accent-fg` 1.92）。
   所以它只能用在"只承载主文案的紧凑元素"上，**绝不能做整行背景** ——
-  行内的时间/延迟/备注会不可读。目前只有两处用它，都是纯填充。
+  行内的时间/延迟/备注会不可读。当前用于主按钮与进度条填充。
 - **行状态用 3px 左边框实色，不用背景色块。** 实测 warn 在必要的 25% alpha
   下相对 `surface-accent` 只有 **1.41**（浅）/ 1.76（深）—— 肉眼与无状态行
   几乎无差别，等于没画。实色左边框是 5.29 / 7.96。
@@ -55,12 +55,14 @@ description: Use when changing anything under src/admin/ — pages, components, 
 **出口隔离视图刻意不分页** —— 那个任务本身就是「一眼看全、找出共用出口的
 节点」，分页会破坏它的意义。
 
-## URL 是视图状态的唯一来源
+## URL 承载导航和列表筛选状态
 
 页面、标签、搜索词、筛选、页码全部编码进 hash
 （`#proxy?tab=isolation&q=hk&page=2`）。所以筛选组件是**受控**的，
 自己不留状态 —— 留一份会与 URL 分叉，症状是「刷新后搜索词还在输入框里
 但列表没过滤」。
+
+用量页的时间范围、编辑器展开状态和未提交的表单留在页面内存中，刷新后重置。
 
 **用 hash 而不是 History API**：网关**不伺服静态产物**（实测 `GET /` 返回
 404），`pushState` 在 Vite 的 SPA fallback 下能工作而在别处不能 ——
@@ -72,9 +74,8 @@ description: Use when changing anything under src/admin/ — pages, components, 
 ## 写文案时
 
 **不要写 markdown。** JSX 不渲染它，`**强调**` 会带着字面星号显示给用户。
-第八轮实测六个页面共 27 处，而且集中在**最要紧的那些警告**上
-（GLOBAL 分组陷阱、mixed-port 陷阱、免 key 通道已关闭、只能用真实 CLI）——
-最需要被看清的句子显示得最糟。用 `<Strong>` 组件。
+这类问题通常集中在出口、上游通道和 CLI 验收等高风险警告上；最需要被看清的
+句子显示得最糟。用 `<Strong>` 组件。
 
 既有测试用 `/不要写/`、`/GLOBAL/` 这类正则，**正好落在星号之间**，
 所以对它完全不敏感。现在有一条按整页扫描的断言。
@@ -96,18 +97,21 @@ description: Use when changing anything under src/admin/ — pages, components, 
   `if (...) return` 之后逐条问「被它拦下的那些输入，后面哪些分支本来也
   该对它们说话？」
 
-## 凭证绝不进 DOM
+## 已保存凭证不回显
 
-前端**拿不到**原值：API 只给 `{present, fingerprint}`（sha256 前 8 位）。
+前端**拿不到已保存的原值**：API 只给 `{present, fingerprint}`（sha256 前 8 位）。
 订阅 URL 只给 `redactUrl` 后的展示串。用指纹而不是长度 —— 等长的两个 key
 长度相同，于是「我改了没生效」在界面上不可见。
+
+用户在密码输入框中提供新 key 是写入流程的一部分，保存后清空表单。
+客户端配置复制的是带 Relay Token 占位符的片段，不能声称已复制完整可用凭证。
 
 ## 不引入的东西
 
 - **不用 TanStack Table**（依赖装着但没用）：这里需要的是"过滤 + 排序 +
   切片"三个数组操作，每张表 4-6 列、几十行。引入它会让一个 30 行的需求
   变成一套 column helper 概念。
-- **不用 react-router**：需要的全部功能是"读写 hash + 订阅变化"，60 行。
-- **不用 react-query/swr**：两个请求。「为一个小需求引入框架」与"为了行数
-  而拆"，为一个小需求引入框架是它的近亲。
+- **不用 react-router**：当前路由由 hash 读写与变化订阅实现。
+- **不用 react-query/swr**：当前数据加载与批测轮询由 `api.ts` 实现，轮询间隔
+  从 `shared/batchProbe.ts` 推导；是否新增框架依据实际复杂度，不依据请求数量。
 - **不做 i18n**：只维护中文。

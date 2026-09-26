@@ -1,5 +1,6 @@
 import { describe, expect, it, vi, afterEach } from "vitest";
 import { render, screen } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
 import { ProxyPage, subscriptionStatus } from "../../src/admin/pages/ProxyPage.tsx";
 import { OverviewPage } from "../../src/admin/pages/OverviewPage.tsx";
 import { ModelsPage } from "../../src/admin/pages/ModelsPage.tsx";
@@ -17,6 +18,7 @@ import type {
 } from "../../src/shared/contract.ts";
 import { fakeOverview } from "./App.test.tsx";
 import { parseHash } from "../../src/admin/lib/router.ts";
+import * as adminApi from "../../src/admin/lib/api.ts";
 
 /*
  * 其余 5 页 + 向导的组件契约。
@@ -27,6 +29,7 @@ import { parseHash } from "../../src/admin/lib/router.ts";
 
 afterEach(() => {
   vi.unstubAllGlobals();
+  vi.restoreAllMocks();
 });
 
 const view = parseHash("#proxy");
@@ -122,7 +125,7 @@ describe("代理池页", () => {
     expect(container.textContent).toContain("7897");
   });
 
-  it("出口隔离标签**不分页** —— 一眼看全是它的全部意义", () => {
+  it("回显出口标签**不分页** —— 一眼看全是它的全部意义", () => {
     stubIdleBatch();
     const groups = Array.from({ length: 20 }, (_, i) => ({
       egressIp: `198.51.100.${i + 1}`,
@@ -139,6 +142,10 @@ describe("代理池页", () => {
     // 20 组全部渲染 —— 分页会破坏「找出共用出口的节点」这个任务。
     expect(container.querySelectorAll("li").length).toBeGreaterThanOrEqual(20);
     expect(screen.queryByText(/上一页/)).not.toBeInTheDocument();
+    expect(screen.getByText("回显出口独立 · 20 个出口")).toBeInTheDocument();
+    expect(screen.getByText(/仅反映 IP 回显目标的出口/)).toBeInTheDocument();
+    expect(container.textContent).toContain("Zen 实际出口需核对发往 opencode.ai 的连接");
+    expect(screen.queryByText(/已隔离/)).not.toBeInTheDocument();
   });
 
   it("共用出口的那一组用 error 边框标出来", () => {
@@ -154,7 +161,7 @@ describe("代理池页", () => {
       />,
     );
     /*
-     * 「共用出口」出现两次:状态行的「未隔离 · 1 组共用出口」与那一组自己的
+     * 「共用出口」出现两次:状态行的「回显出口共用 · 1 组共用出口」与那一组自己的
      * 「⚠ 共用出口」标记。两处都要 —— 前者回答「有没有问题」,后者指出「是哪一组」。
      */
     expect(screen.getAllByText(/共用出口/).length).toBeGreaterThanOrEqual(2);
@@ -283,6 +290,14 @@ describe("模型页", () => {
     expect(screen.getAllByText("chat").length).toBeGreaterThan(0);
   });
 
+  it("在架数量只统计 listed 条目，不把配置中的下架项算进去", () => {
+    render(
+      <ModelsPage data={modelList()} view={parseHash("#models")} navigate={noop} />,
+    );
+    const listedLabel = screen.getByText("在架模型");
+    expect(listedLabel.parentElement?.textContent).toContain("3");
+  });
+
   it("说明那条不对称（下架能自动剔除，新免费模型不能自动发现）", () => {
     render(<ModelsPage data={modelList()} view={parseHash("#models")} navigate={noop} />);
     expect(screen.getByText(/无法自动发现/)).toBeInTheDocument();
@@ -401,8 +416,28 @@ describe("用量页", () => {
  * 网关页与 Worker 页
  * ================================================================== */
 
+function expectLocalOpenCodeProvider(snippet: string, port: number, version: "1" | "2" = "2") {
+  const config = JSON.parse(snippet);
+  const settings = {
+    baseURL: `http://127.0.0.1:${port}/v1`,
+    apiKey: "<把配置文件里的 gateway.relayToken 填进来>",
+  };
+  if (version === "1") {
+    expect(config).toEqual({
+      $schema: "https://opencode.ai/config.json",
+      provider: { opencode: { options: settings } },
+    });
+    return;
+  }
+  expect(config).toEqual({
+    $schema: "https://opencode.ai/config.json",
+    providers: { opencode: { settings } },
+  });
+}
+
 describe("网关页", () => {
-  it("给出可复制的配置片段，但**不含 Relay Token 的值**", () => {
+  it("复制 OpenCode 2 配置时只覆盖 provider 连接设置，凭证仅有占位符", async () => {
+    const user = userEvent.setup();
     const data = fakeOverview({
       gateway: {
         port: 9877,
@@ -412,17 +447,31 @@ describe("网关页", () => {
       },
     });
     const { container } = render(<GatewayPage data={data} />);
-
-    expect(container.textContent).toContain("http://127.0.0.1:9877/v1");
-    // 片段里只能是占位符 —— 把 token 渲染进 DOM 等于让它进截图与扩展。
-    expect(container.textContent).toContain("gateway.relayToken");
+    await user.click(screen.getByRole("button", { name: "复制" }));
+    const copied = await navigator.clipboard.readText();
+    expectLocalOpenCodeProvider(copied, 9877);
+    expect(copied).toBe(screen.getByText(/"providers":/, { selector: "pre" }).textContent);
+    expect(copied).not.toContain("example.invalid");
+    expect(copied).not.toContain("abcd1234");
     expect(container.textContent).toContain("abcd1234"); // 指纹可以显示
-    expect(container.textContent).not.toContain("$schema\": \"x"); // 形状哨兵
   });
 
-  it("提醒不要写 models 块", () => {
+  it("提醒保留 OpenCode 自己的模型目录并说明模型可用性边界", () => {
     render(<GatewayPage data={fakeOverview()} />);
-    expect(screen.getByText(/不要写/)).toBeInTheDocument();
+    expect(screen.getByText(/OpenCode 配置格式/)).toBeInTheDocument();
+    expect(screen.getByText(/模型和 SDK 由 OpenCode 自己管理/)).toBeInTheDocument();
+    expect(screen.getByText(/模型仍受上游权限与免费规则约束/)).toBeInTheDocument();
+  });
+
+  it("切换 OpenCode 1.x 后复制单数 provider 配置", async () => {
+    const user = userEvent.setup();
+    render(<GatewayPage data={fakeOverview({ gateway: { port: 9877, baseUrl: "https://example.invalid/zen/v1", relayToken: { present: true, fingerprint: "abcd1234" }, maxAttempts: 3 } })} />);
+    await user.selectOptions(screen.getByRole("combobox", { name: "OpenCode 版本" }), "1");
+    await user.click(screen.getByRole("button", { name: "复制" }));
+    const copied = await navigator.clipboard.readText();
+    expectLocalOpenCodeProvider(copied, 9877, "1");
+    expect(copied).not.toContain('"providers"');
+    expect(copied).not.toContain('"npm"');
   });
 
   it("Clash 已启用时提醒两条实测出来的坑", () => {
@@ -469,6 +518,41 @@ function worker(overrides: Partial<WorkerView> = {}): WorkerView {
 }
 
 describe("Worker 页", () => {
+  it("切换为匿名后隐藏并清空未提交的认证 key", async () => {
+    const user = userEvent.setup();
+    const patch = vi.spyOn(adminApi, "patchConfig").mockResolvedValue(undefined);
+    render(<WorkersPage data={fakeOverview()} view={parseHash("#workers")} navigate={noop} />);
+
+    await user.click(screen.getByRole("button", { name: "新增 Worker" }));
+    await user.type(screen.getByLabelText("ID"), "anon-1");
+    await user.type(screen.getByLabelText("API key（认证必填）"), "fake-stale-key-not-real");
+    await user.selectOptions(screen.getByLabelText("类型"), "anonymous");
+
+    expect(screen.queryByLabelText("API key（认证必填）")).not.toBeInTheDocument();
+    await user.selectOptions(screen.getByLabelText("类型"), "authenticated");
+    expect(screen.getByLabelText("API key（认证必填）")).toHaveValue("");
+    await user.selectOptions(screen.getByLabelText("类型"), "anonymous");
+    await user.click(screen.getByRole("button", { name: "保存" }));
+
+    expect(patch).toHaveBeenCalledTimes(1);
+    const payload = patch.mock.calls[0]![0];
+    const created = payload.workers?.create?.[0];
+    expect(created).toMatchObject({ id: "anon-1", kind: "anonymous", apiKey: "" });
+    expect(JSON.stringify(payload)).not.toContain("fake-stale-key-not-real");
+  });
+
+  it("匿名 Worker 的凭证列显示无需 key", () => {
+    render(
+      <WorkersPage
+        data={fakeOverview({ workers: [worker({ kind: "anonymous", apiKey: { present: false, fingerprint: null } })] })}
+        view={parseHash("#workers")}
+        navigate={noop}
+      />,
+    );
+    expect(screen.getByText("无需 key")).toBeInTheDocument();
+    expect(screen.queryByText("未配置")).not.toBeInTheDocument();
+  });
+
   it("显示连续失败次数 —— 那是「客户端一直在发坏请求」的证据", () => {
     /*
      * `bad_request` 不冷却但计数照加，所以「连续失败 12 次却从未冷却」
@@ -525,11 +609,24 @@ describe("首启向导", () => {
     expect(screen.getByText(/已拉到 10 个免费模型/)).toBeInTheDocument();
   });
 
-  it("**不渲染 Relay Token 的值** —— 只说去哪儿取", () => {
-    const { container } = render(<Wizard data={fakeOverview()} />);
-    expect(container.textContent).toContain("gateway.relayToken");
-    // 向导里给的是占位符。
-    expect(container.textContent).toContain("data/config.json");
+  it("给出的配置只覆盖网关地址与凭证占位符", () => {
+    const data = fakeOverview();
+    data.gateway.port = 19876;
+    render(<Wizard data={data} />);
+    const snippet = screen.getByText(/"providers":/, { selector: "pre" }).textContent ?? "";
+    expectLocalOpenCodeProvider(snippet, 19876);
+    expect(screen.getByText(/OpenCode 配置格式/)).toBeInTheDocument();
+    expect(screen.getByText(/你选择的模型不保证都能被上游接受/)).toBeInTheDocument();
+  });
+
+  it("向导切换 OpenCode 1.x 后展示单数 provider 配置", async () => {
+    const user = userEvent.setup();
+    const data = fakeOverview();
+    data.gateway.port = 19876;
+    render(<Wizard data={data} />);
+    await user.selectOptions(screen.getByRole("combobox", { name: "OpenCode 版本" }), "1");
+    const snippet = screen.getByText(/"provider":/, { selector: "pre" }).textContent ?? "";
+    expectLocalOpenCodeProvider(snippet, 19876, "1");
   });
 
   it("每一步都给可直接跑的命令", () => {
@@ -540,9 +637,9 @@ describe("首启向导", () => {
     expect(container.textContent).toContain("NODE_EXTRA_CA_CERTS");
   });
 
-  it("说明免 key 通道已关 —— 否则用户会试着不填 key", () => {
+  it("说明匿名与认证 Worker 的 key 要求不同", () => {
     render(<Wizard data={fakeOverview()} />);
-    expect(screen.getByText(/FreeTierError/)).toBeInTheDocument();
+    expect(screen.getByText(/匿名 Worker 可以不填 key/)).toBeInTheDocument();
   });
 });
 

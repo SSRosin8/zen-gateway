@@ -9,10 +9,8 @@ import { isGroupType } from "../../../shared/clashNodeTypes.ts";
  *
  * ## 节点名必须 URL 编码
  *
- * 实测本机 mihomo 1.10.0 的节点名形如
- * `🇺🇲 示例节点2 IPLC  VIP2 网址:example.invalid` —— 含空格、冒号、emoji
- * (国旗是多码点序列)、连续空格。直接拼进 path 会产生非法 URL 或指向错误的资源,
- * 所以每一处都过 `encodeURIComponent`。这不是防御性编程,是这批真实数据的硬要求。
+ * 节点名可能含空格、冒号、emoji 和连续空格。直接拼进 path 会产生非法 URL 或
+ * 指向错误的资源，所以每一处都过 `encodeURIComponent`。
  *
  * ## secret 是凭证
  *
@@ -177,6 +175,7 @@ export class ClashController {
     }
 
     if (res.status === 401 || res.status === 403) {
+      await res.body?.cancel().catch(() => {});
       // 绝不回显 secret —— 只说明是鉴权问题。
       throw new ControllerError(
         `Controller 拒绝鉴权(${res.status});检查 apiSecret 配置`,
@@ -185,9 +184,11 @@ export class ClashController {
       );
     }
     if (res.status === 404) {
+      await res.body?.cancel().catch(() => {});
       throw new ControllerError("Controller 返回 404(分组或节点不存在)", "not_found", 404);
     }
     if (!res.ok) {
+      await res.body?.cancel().catch(() => {});
       throw new ControllerError(`Controller 返回 ${res.status}`, "bad_response", res.status);
     }
     return res;
@@ -361,4 +362,3 @@ export class ClashController {
     }
   }
 }
-

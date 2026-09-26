@@ -89,15 +89,17 @@ export function Metric({
 export function PrimaryButton({
   onClick,
   disabled,
+  type = "button",
   children,
 }: {
   onClick: () => void;
   disabled?: boolean;
+  type?: "button" | "submit";
   children: ReactNode;
 }) {
   return (
     <button
-      type="button"
+      type={type}
       onClick={onClick}
       disabled={disabled}
       /*
@@ -151,7 +153,7 @@ export function Mono({ children }: { children: ReactNode }) {
  *
  * JSX 不渲染 markdown,所以文案里的 `**同一时刻只允许一批**` 会**原样**带着
  * 星号显示给用户。第八轮审核实测:六个页面全中,共十余处,而且集中在
- * 最要紧的那些警告上（GLOBAL 分组陷阱、mixed-port 陷阱、免 key 通道已关闭、
+ * 最要紧的那些警告上（GLOBAL 分组陷阱、mixed-port 陷阱、匿名与认证 Worker、
  * 「只能用真实 CLI」）—— 也就是说最需要被看清的句子显示得最糟。
  *
  * 成因是这些文案都从文档/注释里搬过来的,那里 `**` 是对的。既有测试用

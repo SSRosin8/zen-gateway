@@ -5,6 +5,7 @@ import { fetchUpstream, type UpstreamDeps } from "../upstream/fetch.ts";
 import { buildUpstreamHeaders } from "../upstream/headers.ts";
 import { classifyStatus } from "../failures.ts";
 import { usableTargets } from "../routing/select.ts";
+import { resolveProxy } from "../proxy/pool.ts";
 import { safeErrorMessage } from "../../shared/redact.ts";
 
 /**
@@ -115,25 +116,35 @@ export function slotOf(identity: CatalogIdentity): CatalogSlot {
 }
 
 /**
- * 拉目录该用哪个身份 —— **唯一定义处**。
+ * 目录拉取的候选身份，顺序与 Worker 配置一致，是目录身份选择的唯一实现。
  *
- * 三个调用点需要它:启动预热、`/v1/models`、转发路径上的"已下架"复核。
- * 先前我在三处各写了一遍(`identityFor`、`catalogIdentity`、以及 index.ts 里
- * 又一份),那是纪律 #4 的原形态:三份并行的同一份真相,而脱节方向
- * **必然是各自算出不同的槽位** —— 于是一处填进 `keyed` 槽的目录,
- * 另一处去 `keyless` 槽里找,交集静默失效而没有任何报错。
- *
- * 取第一个可用 Worker 的 key;没有可用 Worker 时是空串(免 key)——
- * 实测 Zen 的目录端点免鉴权可读,所以首次配置前也能看到目录,
- * 对「方便简单」有实际帮助。
- *
- * 用 `usableTargets` 而不是当次请求的候选链:目录与调度**刻意不共享状态**
- * (一个只读查询不该改变转发的候选顺序),而且一个正在冷却的 Worker 的 key
- * 照样能拉目录 —— 目录端点与额度闸门无关。
+ * 先过滤掉无法解析出口的 Worker：目录请求若选中停用代理/未启用 Clash 的
+ * 首个 Worker，后面的健康 Worker 不该因为它而永远拿不到目录。候选仍收窄到
+ * 首项所属的 keyed/keyless 槽，保持目录缓存的共享身份契约。
+ * 目录与调度刻意不共享冷却状态；目录只使用可解析出口的启用 Worker。
  */
+export function catalogIdentitiesOf(config: Config): CatalogIdentity[] {
+  const identities: CatalogIdentity[] = [];
+  for (const target of usableTargets(config)) {
+    if (!resolveProxy(config, target.proxyId).ok) continue;
+    const identity = { apiKey: target.apiKey, proxyId: target.proxyId };
+    if (
+      identities.some(
+        (existing) => existing.apiKey === identity.apiKey && existing.proxyId === identity.proxyId,
+      )
+    ) {
+      continue;
+    }
+    identities.push(identity);
+  }
+
+  if (identities.length === 0) return [{ apiKey: "", proxyId: null }];
+  const slot = slotOf(identities[0]!);
+  return identities.filter((identity) => slotOf(identity) === slot);
+}
+
 export function catalogIdentityOf(config: Config): CatalogIdentity {
-  const first = usableTargets(config)[0];
-  return { apiKey: first?.apiKey ?? "", proxyId: first?.proxyId ?? null };
+  return catalogIdentitiesOf(config)[0]!;
 }
 
 export type CatalogSnapshot = {

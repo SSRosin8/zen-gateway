@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import { Response as UndiciResponse } from "undici";
 import {
   ModelCatalog,
+  catalogIdentitiesOf,
   catalogIdentityOf,
   isModelEntry,
   parseCatalog,
@@ -227,7 +228,7 @@ describe("身份与槽位", () => {
     expect(id.apiKey).toBe("fake-key-w2-not-real");
   });
 
-  it("跳过**没有 key** 的 Worker —— 否则槽位算成 keyless,交集静默失效", () => {
+  it("匿名 Worker 使用 keyless 目录槽位", () => {
     /*
      * 这条是三条里最要紧的:它钉住的不是"取哪个 key",而是**槽位**。
      *
@@ -236,8 +237,8 @@ describe("身份与槽位", () => {
      * 拿到 null → **交集静默失效**,退回 Phase 5 那个偏宽的放行。
      * 也就是说 Phase 6 的核心交付会在一种很自然的配置下无声消失。
      *
-     * 用 `kind: "anonymous"` 构造免 key 的合法 Worker —— `WorkerSchema` 的
-     * `refine` 是**单向**的（只要求 authenticated 必须有 key），所以这个形态合法。
+     * 用 `kind: "anonymous"` 构造免 key 的合法 Worker；匿名身份由
+     * `WorkerSchema` 统一归一化为空 key。
      */
     const cfg = config({
       workers: [
@@ -253,8 +254,8 @@ describe("身份与槽位", () => {
       ],
     });
     const id = catalogIdentityOf(cfg);
-    expect(id.apiKey).toBe("fake-key-w2-not-real");
-    expect(slotOf(id)).toBe("keyed");
+    expect(id.apiKey).toBe("");
+    expect(slotOf(id)).toBe("keyless");
   });
 
   it("首位不可用时**出口也不能取它的** —— proxyId 一起跳过", () => {
@@ -296,6 +297,47 @@ describe("身份与槽位", () => {
     });
     const id = catalogIdentityOf(cfg);
     expect(id.proxyId).toBeNull();
+  });
+
+  it("首位 Worker 绑定的代理停用时，目录候选跳到后面的可解析出口", () => {
+    const cfg = config({
+      proxies: [
+        {
+          id: "p1",
+          name: "停用出口",
+          type: "socks5",
+          host: "203.0.113.9",
+          port: 1080,
+          enabled: false,
+          source: "manual",
+          direct: true,
+          bridgeable: false,
+        },
+      ],
+      workers: [
+        {
+          id: "w1",
+          name: "",
+          kind: "authenticated",
+          apiKey: "fake-key-bad-egress-not-real",
+          enabled: true,
+          proxyId: "p1",
+        },
+        {
+          id: "w2",
+          name: "",
+          kind: "authenticated",
+          apiKey: "fake-key-good-egress-not-real",
+          enabled: true,
+          proxyId: null,
+        },
+      ],
+    });
+
+    expect(catalogIdentitiesOf(cfg)).toEqual([
+      { apiKey: "fake-key-good-egress-not-real", proxyId: null },
+    ]);
+    expect(catalogIdentityOf(cfg)).toEqual(catalogIdentitiesOf(cfg)[0]);
   });
 
   it("**目录请求经该 Worker 绑定的出口发出** —— 不是本机直连", async () => {
@@ -529,7 +571,7 @@ describe("ModelCatalog", () => {
     await cat.ensure(catalogIdentityOf(noKey), noKey, f.upstreamOf);
 
     expect(f.keys()[0]).toBe("Bearer fake-key-w1-not-real");
-    expect(f.keys()[1]).toBe("Bearer ");
+    expect(f.keys()[1]).toBe("(无)");
   });
 
   it("isFresh:TTL 边界", () => {

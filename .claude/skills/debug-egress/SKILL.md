@@ -1,28 +1,27 @@
 ---
 name: debug-egress
-description: Use when egress isolation looks wrong, a bridged proxy fails, Clash selector switching misbehaves, the model catalog is empty, or /v1/models returns 502. Encodes the measured traps on this machine — the corporate CA interception, the GLOBAL selector trap, the mixed-port trap — and the order to check them in. Trigger on 出口, 隔离, Clash, 桥接, selector, 探测, 502, 目录拉不到, egress, bridge, proxy fails, CA.
+description: 出口隔离异常、代理桥接失败、Clash 分组切换不生效、模型目录缺失或模型接口返回 502 时使用。按依赖顺序检查配置、服务、统计库、Worker、控制面、目录和出口，核对信任库、实际代理端口、规则分组与真实转发链路，不把某台机器的观察当作通用默认值。
 ---
 
 # 排查出口与桥接
 
 **先跑 `npm run doctor`。** 它按依赖顺序分七层，**只报第一个失败的层** ——
-后面的层在它修好之前给不出有意义的答案。加 `--deep` 会实测每个出口的公网 IP
-（会真发请求并切 Clash 节点）。
+后面的层在它修好之前给不出有意义的答案。加 `--deep` 会实测 IP 回显目标的公网出口
+（会真发请求并切 Clash 节点），不证明 Zen 的实际请求已走同一出口。
 
-下面是这台机器上**实测过**的陷阱，按发生频率排。
+下面是常见且可复核的陷阱，按排查顺序列出。
 
-## 1. 企业 CA 中间人 —— 症状是 `/v1/models` 返回 502
+## 1. 自定义 CA 或信任库 —— 症状是 `/v1/models` 返回 502
 
-本机 `opencode.ai` 被内网 DNS 解析到内网地址，证书由小米企业 CA 签发。
+某些企业网络会改写上游 DNS 和证书链，服务进程的信任库可能与交互式 shell 不同。
 
-**关键的不对称：`curl` 能过，Node 不能。** curl 读系统 CA 库
-（`/etc/ssl/certs/ca-certificates.crt`，已含该 CA），而 **Node 用编译进
-二进制的 CA 集合，不读系统库**。
+**关键的不对称：`curl` 能过，Node 不能。** curl 与 Node 可能使用不同信任库。
+显式启用额外 CA 后行为会不同。
 
 所以「我 curl 验过上游是通的」对网关**完全不成立**（纪律 #8）。修法：
 
 ```bash
-NODE_EXTRA_CA_CERTS=/etc/ssl/certs/ca-certificates.crt npm start
+NODE_EXTRA_CA_CERTS=/path/to/your/ca-bundle.pem npm start
 ```
 
 **症状是 502 `upstream_unreachable`，不是"200 加空列表"。**
@@ -34,68 +33,77 @@ NODE_EXTRA_CA_CERTS=/etc/ssl/certs/ca-certificates.crt npm start
 
 ## 2. `GLOBAL` 分组在 rule 模式下切了不生效
 
-本机 Clash Verge 是 `mode: rule`，而 **rule 模式下 `GLOBAL` 分组不参与选路**。
+在 `mode: rule` 下，`GLOBAL` 分组可能不参与选路。
 把它当 selectorGroup 会让所有 Worker 共用一个公网 IP，而**不报任何错** ——
 切换请求成功返回，`now` 却仍是 `DIRECT`。
 
-`setup.mjs` 已按 `mode` 把 GLOBAL 降级（只在没有别的候选时用它并告警）。
-**但那是启发式不是守卫**：一个名字不叫 GLOBAL 却同样不参与选路的分组仍会
-被选中。真正的判据是"规则实际把流量导向哪个分组"，那要解析 `/configs` 的
-rules —— 眼下不做。
+`setup.mjs` 已读取 `/rules`，优先选择 MATCH 兜底指向、且含可出口节点的分组。
+拿不到规则时才退回按模式、名称与节点数择优。`doctor.mjs` 通过
+`ClashController.routedGroups()` 检查所选分组是否参与规则、是否承接兜底。
 
-**兜底手段是 `npm run doctor -- --deep`**：它按实测公网 IP 分组，
-共用出口一定会被报出来。
+`npm run doctor -- --deep` 按实测 IP 分组，可以发现探测链路的共用出口。
+探测和真实转发可能命中不同规则，仍需按第 6 节核对实际连接。
 
 ## 3. `mixed-port` 与配置不一致 —— 控制面通而数据面全挂
 
-本机混合端口**不是**文档默认的 7890，且随内核而变（0dcloud 是 17891，
-Clash Verge 是 7897），`port`/`socks-port` 还可能都是 0。
+混合端口不是稳定的文档默认值，且随内核而变；`port`/`socks-port` 还可能都是 0。
 
 配置里的 `localProxyPort` 与内核实际监听的不一致时，桥接会连到一个
 **没人监听的端口**：所有桥接代理传输失败，而控制面明明是通的。
 那是个极难自查的故障 —— 所以端口**只能问内核**（`GET /configs`）。
 
-doctor 第 5 层会核对。**注意一个已登记的盲区**：它只读 `mixed-port`，
-而 `setup.mjs` 在 `mixed-port` 为 0 时会退回 `socks-port`/`port` ——
-那种内核上这项检查看不见不一致。且 `localProxyPort` 指向一个 **socks** 端口
-时桥接根本不能用：bridge 模式总是建 `http://host:port` 的 ProxyAgent
-（实测发的是 `CONNECT`，从不发 SOCKS 握手）。
+doctor 第 5 层会核对内核报告的 `mixed-port` 与配置是否一致；内核没有报告有效值时，
+该项比较不能证明端口正确。`setup.mjs` 只接受有效的 `mixed-port`，不会退回
+`socks-port` 或 `port`，未开启混合端口时会拒绝导入。
 
-## 4. 隔离视图显示「还不知道」
+`localProxyPort` 不能指向 SOCKS 专用端口：bridge 模式总是建
+`http://host:port` 的 ProxyAgent，发的是 HTTP `CONNECT`，不是 SOCKS 握手。
+
+## 4. 回显出口视图显示「未探测」
 
 **只有两个地方会写 `config.proxies[].egressIp`**：`POST /api/probe`
 （概览页那个按钮）与批量探测（代理池页）。两者都经 `applyProbeResult`。
 
-出口隔离报告在它们跑过之前**没有数据来源** —— 概览页会显示"还不知道"
+回显出口报告在它们跑过之前**没有数据来源** —— 概览页会显示"未探测"
 而不是报错。看到空的隔离视图先想到这一条，别去怀疑分组逻辑。
 
-> 这个缺口是 Phase 9 接后台时才暴露的：`applyProbeResult()` 零生产调用点，
-> 而七轮审核都没查到 —— 每一层单独看都是对的（纯函数有单测、探测真在跑、
-> 分组逻辑有测试），缺的是把它们接起来的那根线。
+> 如果报告为空，先确认是否已经执行过探测，以及服务是否成功写回配置。
 
-## 5. 隔离判定按**实测 IP** 分组，不按代理 id
+## 5. 回显出口按**实测 IP** 分组，不按代理 id
 
-两个不同代理可能 NAT 到同一个公网 IP，那种情况下"已隔离"是假的。
-**未探测出 IP 的不算已隔离** ——「不知道」不等于「不同」。
+两个不同代理可能 NAT 到同一个公网 IP，代理 id 不同不等于出口不同。
+**未探测出 IP 的不能判为独立回显出口**。回显出口独立也不表示 Zen 实际出口已隔离。
 
 直连出口（`proxyId: null`）也要参与：它与某个代理 NAT 到同一个 IP 恰好是
-"看起来隔离其实没隔离"的形态。**但它的探测结果结构上存不下来**
-（映射到合成 id `__direct__`，而 `config.proxies` 里没有这一行）——
-已登记为缺口 #28。
+"代理不同但回显出口共用"的形态。`applyProbeResults` 将合成 id
+`DIRECT_EGRESS_ID` 对应的测量写入 `gateway.directEgressIp`，代理测量写入
+`proxies[].egressIp`；失败保留最后一次成功值，不代表该出口目前仍然可用。
 
 ## 6. 探测目标与转发目标不同域
 
-探测打 `api.ipify.org` 而转发打 `opencode.ai` —— 两者可能命中**不同的
-路由规则**，于是测出的"出口不同"与实际转发无关。本项目真实踩到过：
-探测走代理而转发因内网劫持走 DIRECT。
+探测优先打 `api.ipify.org`（失败时回退其他 IP 回显服务），转发打 `opencode.ai`。
+两者可能命中**不同的路由规则**：回显可以走选择的代理节点，而 Zen 命中 IP 规则后
+走 `DIRECT`，即使多个回显 IP 不同也不能说明 Zen 请求已隔离。不同回显服务间也可能
+命中不同规则，诊断时保留实际成功服务 `via`。
 
-证明"流量走了哪个出口"的可靠办法是读 Clash 的 `/connections`
-（直接给 `chains` 与命中的 `rule`）。
+Clash 桥接的验收必须在真实 CLI 请求期间读 `/connections`，核对目标为
+`opencode.ai` 的连接、`chains` 与命中的 `rule`。仅看到 selector 已选中某节点、
+切换返回成功、回显 IP 或节点延迟成功，都不能作为 Zen 选路证据。
+
+同域名可能同时有其他应用请求。用网关进程到混合端口的 socket 源端口与连接记录中
+metadata 的源端口字段匹配，必要时结合创建时间、目标端口和一次只跑一个 CLI 请求，
+避免把别的连接当作本次网关请求。短请求未被采到时记为"没有捕获到选路证据"，
+不能推断其走代理或直连。
+
+若需改规则或启用独立内核验证，先整理可核对的配置变更范围；不在排查过程中静默
+改动用户正在使用的 Clash 模式、规则或全部连接。测试结果只记录匿名化的出口标签、
+命中情况、HTTP 状态和模型结果，不保存节点原名、真实 IP 或凭证。
 
 ## 7. 多内核：现在到底走哪个
 
-`npm run doctor` 第 5 层会报**择优结果**（`当前走 <bridgeId>` + 每个内核的
-可用节点数 + 理由），判据与转发路径同一份逻辑（`clash/select.ts`）。
+`npm run doctor` 第 5 层会报本次探活的择优结果、可用节点数和理由
+（`clash/select.ts`）。doctor 是只读工具，不会写回选择；实际转发按配置的
+`activeBridgeId` 与 `resolveProxy` 解析，批测择优时才会把切换结果写回。
 
 几条容易误解的行为：
 
@@ -110,11 +118,11 @@ doctor 第 5 层会核对。**注意一个已登记的盲区**：它只读 `mixe
 - **批测期间锁定单内核**（不变量 #5 的延伸）：一批探测跑到一半换了内核，
   后半批量到的是另一个内核的出口，而隔离报告把两批混在一起按 IP 分组。
 
-## 本机当前状态（会变，用 doctor 复核）
+## 本机状态只从运行环境读取
 
-Clash Verge：`127.0.0.1:9097`，secret `123.`，mixed-port 7897，
-`mode: rule`，selectorGroup `Proxy`。0dcloud 那个内核因**控制面 401 进不去**
-而 `enabled: false` —— 保留而非删除，等拿到密码可直接启用。
+内核地址、端口、secret、启用状态与分组会随本机配置改变，不在 skill 中保存副本。
+凭证只保存在本机配置；排查结果不输出原值。`setup --api` 仅接受本机 HTTP
+回环地址，实际使用以 `npm run setup -- --help` 与 doctor 输出为准。
 
 ## 排查顺序小结
 

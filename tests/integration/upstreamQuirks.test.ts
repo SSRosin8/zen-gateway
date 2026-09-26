@@ -168,11 +168,33 @@ async function runDiscover(behavior: FakeBehavior = {}): Promise<{ code: number;
   }
 }
 
+async function runDiscoverWithBase(base: string): Promise<{ code: number; out: string }> {
+  try {
+    const { stdout } = await execFileAsync(
+      process.execPath,
+      [join(PROJECT, "scripts", "discover-upstream.mjs")],
+      { env: { ...process.env, ZG_DISCOVER_BASE: base, ZG_DISCOVER_KEY: "" } },
+    );
+    return { code: 0, out: stdout };
+  } catch (e) {
+    const e2 = e as { code?: number; stdout?: string };
+    return { code: e2.code ?? -1, out: e2.stdout ?? "" };
+  }
+}
+
 describe("discover-upstream.mjs 自身是一道关卡,必须真的会失败", () => {
   it("行为符合记录时退出 0", async () => {
     const { code, out } = await runDiscover();
     expect(out).toContain("全部期望成立");
     expect(code).toBe(0);
+  });
+
+  it("脱敏 ZG_DISCOVER_BASE 中的 userinfo", async () => {
+    const { code, out } = await runDiscoverWithBase("http://user:private-token-not-real@127.0.0.1:1");
+    expect(code).toBe(1);
+    expect(out).toContain("baseUrl: http://127.0.0.1:1");
+    expect(out).not.toContain("private-token-not-real");
+    expect(out).not.toContain("user:");
   });
 
   it("免费闸门放开(403 → 200)时退出 1 —— 这是最该被监测到的变化", async () => {

@@ -1,8 +1,10 @@
+import { useState } from "react";
 import type { ModelList, ModelView } from "../../shared/contract.ts";
-import { Metric, Mono, Panel, Strong } from "../components/Panel.tsx";
+import { Metric, Mono, Panel, PrimaryButton, Strong } from "../components/Panel.tsx";
 import { StatusIndicator, type StatusTone } from "../components/StatusIndicator.tsx";
 import { DataTable, TableFilters, type Column } from "../components/DataTable.tsx";
 import type { ViewState } from "../lib/router.ts";
+import { patchConfig } from "../lib/api.ts";
 
 /**
  * 模型页。
@@ -36,11 +38,18 @@ export function ModelsPage({
   data,
   view,
   navigate,
+  refresh,
 }: {
   data: ModelList;
   view: ViewState;
   navigate: (patch: Partial<ViewState>) => void;
+  refresh?: () => void;
 }) {
+  const [freeSuffix, setFreeSuffix] = useState(data.rules.freeSuffix);
+  const [extraFreeIds, setExtraFreeIds] = useState(data.rules.extraFreeIds.join("\n"));
+  const [enforceCatalog, setEnforceCatalog] = useState(data.rules.enforceCatalog);
+  const [saving, setSaving] = useState(false);
+  const [message, setMessage] = useState<string | null>(null);
   const q = view.q.trim().toLowerCase();
   const filtered = data.models.filter((m) => {
     if (q !== "" && !m.id.toLowerCase().includes(q)) return false;
@@ -50,6 +59,7 @@ export function ModelsPage({
     return true;
   });
 
+  const listedCount = data.models.filter((m) => m.listed).length;
   const freeCount = data.models.filter((m) => m.free).length;
 
   const columns: ReadonlyArray<Column<ModelView>> = [
@@ -117,7 +127,7 @@ export function ModelsPage({
     <div className="space-y-4">
       <Panel title="免费判定">
         <div className="grid grid-cols-2 gap-6 sm:grid-cols-4">
-          <Metric label="在架模型" value={String(data.models.length)} hint="上游目录总数" />
+          <Metric label="在架模型" value={String(listedCount)} hint="上游目录总数" />
           <Metric label="可用" value={String(freeCount)} hint="通过免费判定" />
           <Metric
             label="已下架"
@@ -148,6 +158,46 @@ export function ModelsPage({
             当前名单：{data.rules.extraFreeIds.map((id) => <Mono key={id}>{id} </Mono>)}
           </p>
         )}
+      </Panel>
+
+      <Panel title="判定设置">
+        <form
+          className="grid gap-3 sm:grid-cols-2"
+          onSubmit={(event) => {
+            event.preventDefault();
+            setSaving(true);
+            setMessage(null);
+            void patchConfig({
+              models: {
+                freeSuffix,
+                extraFreeIds: extraFreeIds.split(/\r?\n/).map((id) => id.trim()).filter(Boolean),
+                enforceCatalog,
+              },
+            })
+              .then(() => {
+                setMessage("已保存");
+                refresh?.();
+              })
+              .catch((err) => setMessage(err instanceof Error ? err.message : String(err)))
+              .finally(() => setSaving(false));
+          }}
+        >
+          <label className="flex flex-col gap-1">
+            <span className="text-text-muted">免费模型后缀</span>
+            <input value={freeSuffix} onChange={(e) => setFreeSuffix(e.target.value)} required className="min-h-[44px] rounded-sm border border-border-strong bg-bg px-3" />
+          </label>
+          <label className="flex items-center gap-2 min-h-[44px] self-end">
+            <input type="checkbox" checked={enforceCatalog} onChange={(e) => setEnforceCatalog(e.target.checked)} /> 与在架目录求交集
+          </label>
+          <label className="flex flex-col gap-1 sm:col-span-2">
+            <span className="text-text-muted">无后缀免费模型（每行一个）</span>
+            <textarea value={extraFreeIds} onChange={(e) => setExtraFreeIds(e.target.value)} rows={3} className="rounded-sm border border-border-strong bg-bg px-3 py-2 font-mono" />
+          </label>
+          <div className="flex items-center gap-3 sm:col-span-2">
+            <PrimaryButton type="submit" onClick={() => undefined} disabled={saving}>{saving ? "保存中…" : "保存"}</PrimaryButton>
+            {message !== null && <span className="text-text-muted">{message}</span>}
+          </div>
+        </form>
       </Panel>
 
       <Panel title={`模型（${filtered.length}/${data.models.length}）`}>

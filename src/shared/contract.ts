@@ -107,10 +107,8 @@ export const WorkerViewSchema = z.object({
   /**
    * 是否在**调度器的候选池**里。
    *
-   * 与 `enabled` 不同：`isUsable()` 还要求 apiKey 非空（免 key 通道已被上游
-   * 关闭，没有 key 的 Worker 发出去必定 403）。所以「启用了但没 key」
-   * 在界面上必须能与「启用且可用」区分开 —— 否则用户看到 enabled 为真
-   * 却发现它从不被选中。
+   * 与 `enabled` 不同：认证 Worker 还要求 apiKey 非空；匿名 Worker 可以免 key。
+   * 两种类型都要在界面上显示，不能把匿名 Worker 误报成“缺少 API key”。
    */
   inPool: z.boolean(),
   /**
@@ -130,7 +128,7 @@ export const WorkerViewSchema = z.object({
 });
 export type WorkerView = z.infer<typeof WorkerViewSchema>;
 
-/** 出口隔离分组。**按实测 IP 分组，不按代理 id** —— 见 `probe.ts`。 */
+/** 回显目标的出口分组，按实测 IP 而非代理 id；不代表 Zen 实际出口。 */
 export const IsolationGroupViewSchema = z.object({
   egressIp: z.string(),
   workerIds: z.array(z.string()),
@@ -139,7 +137,7 @@ export const IsolationGroupViewSchema = z.object({
 
 export const IsolationViewSchema = z.object({
   groups: z.array(IsolationGroupViewSchema),
-  /** 尚未探测出 IP 的 Worker。**不算作已隔离** —— 「还不知道」≠「确认不同」。 */
+  /** 尚未探测出回显 IP 的 Worker，不能判断该目标是否使用独立出口。 */
   unknownWorkerIds: z.array(z.string()),
   /** 存在共用出口的组。非空即隔离失败。 */
   sharedGroups: z.array(IsolationGroupViewSchema),
@@ -320,6 +318,7 @@ export type SecretPatch = z.infer<typeof SecretPatchSchema>;
  * 于是「改个名字」会顺带抹掉上游明确要求的 15 分钟等待。要换 id 就显式删建。
  */
 export const WorkerPatchSchema = z.strictObject({
+  kind: z.enum(["anonymous", "authenticated"]).optional(),
   name: z.string().max(200).optional(),
   enabled: z.boolean().optional(),
   /** null = 改为本机直连。缺席 = 不动。两者不同，所以用 nullable + optional。 */
@@ -331,11 +330,8 @@ export type WorkerPatch = z.infer<typeof WorkerPatchSchema>;
 /**
  * 新建 Worker。
  *
- * `kind` 固定为 `authenticated` 且 `apiKey` 必填非空 —— 免 key 的匿名通道
- * 已被上游关闭（403 `FreeTierError`，官方反滥用），建一个没有 key 的 Worker
- * 只会得到一个必定失败的条目。schema 里保留 `anonymous` 分支是为了兼容
- * 已有配置文件，但**管理面不提供创建它的入口**：界面不该引导用户去做一件
- * 已知不能用的事。
+ * 两种 Worker 都可以从管理面创建。认证 Worker 必须提供 API key；匿名 Worker
+ * 可以留空，由上游按免鉴权请求处理。两者共享名称、启用状态和出口绑定能力。
  */
 export const WorkerCreateSchema = z.strictObject({
   id: z
@@ -344,7 +340,8 @@ export const WorkerCreateSchema = z.strictObject({
     .max(128)
     .regex(/^[A-Za-z0-9._:\-]+$/, { message: "id 只允许字母、数字与 . _ : - " }),
   name: z.string().max(200).default(""),
-  apiKey: z.string().min(1).max(512),
+  kind: z.enum(["anonymous", "authenticated"]).optional(),
+  apiKey: z.string().max(512).default(""),
   proxyId: z.string().nullable().default(null),
   enabled: z.boolean().default(true),
 });
@@ -578,7 +575,7 @@ export type ProbeReport = z.infer<typeof ProbeReportSchema>;
 export const ProxyListSchema = z.object({
   proxies: z.array(ProxyViewSchema),
   clash: OverviewSchema.shape.clash,
-  /** 出口隔离报告 —— 与 Overview 同一份逻辑，按实测 IP 分组。 */
+  /** 回显出口报告，与 Overview 同一份逻辑；不证明 Zen 实际出口隔离。 */
   isolation: IsolationViewSchema,
   /** 订阅列表（Phase 10）—— 代理池页要能看到"这些节点从哪来"。 */
   subscriptions: z.array(SubscriptionViewSchema),
@@ -656,6 +653,3 @@ export const INITIAL_BATCH_VIEW: BatchProgressView = {
   failureKind: null,
   elapsedMs: null,
 };
-
-
-

@@ -135,13 +135,12 @@ describe("全员冷却", () => {
 describe("策略排序", () => {
   it("authenticated_first 把登录态排前,但不丢掉其他", () => {
     /*
-     * 构造一个 kind 为 anonymous 但**有 key** 的 Worker:schema 允许
-     * (`refine` 只要求 authenticated 必须有 key),而 `isUsable` 按有无 key
-     * 判断,所以它能进候选 —— 这是唯一能验策略排序的形态。
+     * 匿名 Worker 即使没有 key 也能进入候选池；策略按 kind 排序，
+     * 与认证凭证是否存在是两件事。
      */
     const cfg = config(
       [
-        { id: "anon", kind: "anonymous", apiKey: "fake-anon-key-not-real" },
+        { id: "anon", kind: "anonymous", apiKey: "" },
         { id: "auth1" },
         { id: "auth2" },
       ],
@@ -154,7 +153,7 @@ describe("策略排序", () => {
     const cfg = config(
       [
         { id: "auth1" },
-        { id: "anon", kind: "anonymous", apiKey: "fake-anon-key-not-real" },
+        { id: "anon", kind: "anonymous", apiKey: "" },
       ],
       { strategy: "anonymous_first" },
     );
@@ -165,7 +164,7 @@ describe("策略排序", () => {
     const cfg = config(
       [
         { id: "auth1" },
-        { id: "anon", kind: "anonymous", apiKey: "fake-anon-key-not-real" },
+        { id: "anon", kind: "anonymous", apiKey: "" },
         { id: "auth2" },
       ],
       { strategy: "mixed" },
@@ -188,17 +187,12 @@ describe("策略排序", () => {
 
   it("默认策略是 anonymous_first,且它**真的生效**", () => {
     /*
-     * 先前这条的断言与注释都基于一个错误推理:「匿名 Worker 的定义就是没有
-     * key,所以默认策略等价于按配置顺序」。第五轮审核证伪了它 ——
-     * `WorkerSchema` 的 refine 是**单向**的,只要求 authenticated 必须有 key,
-     * 对 anonymous 不作任何约束。所以带 key 的 anonymous Worker 合法且可用,
-     * 默认配置下排序就生效。
-     *
-     * 这条现在断言真实行为:同样的 Worker 列表,只改策略就换顺序。
+     * 匿名身份即使没有 key 也与认证身份分属不同排序类别；
+     * 同一份 Worker 列表只改策略就会改变顺序。
      */
     const workers = [
       { id: "auth1" },
-      { id: "anon", kind: "anonymous" as const, apiKey: "fake-anon-key-not-real" },
+      { id: "anon", kind: "anonymous" as const, apiKey: "" },
     ];
     const byDefault = config(workers);
     expect(byDefault.routing.strategy).toBe("anonymous_first");
@@ -247,7 +241,7 @@ describe("会话粘滞", () => {
      * 所以先用 mixed 绑到一个 anon,再把策略改成 authenticated_first:
      * 绑定必须赢。
      */
-    const anon = { id: "anon", kind: "anonymous" as const, apiKey: "fake-anon-key-not-real" };
+    const anon = { id: "anon", kind: "anonymous" as const, apiKey: "" };
     const mixed = config([anon, { id: "auth1" }], { strategy: "mixed" });
     const pool = new WorkerPool(mixed);
     const map = new AffinityMap();

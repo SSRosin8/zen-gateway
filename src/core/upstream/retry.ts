@@ -109,6 +109,7 @@ export type RetryInput = {
   readonly url: string;
   readonly method: string;
   readonly body: Uint8Array | null;
+  readonly signal?: AbortSignal;
   readonly deps: UpstreamDeps;
   /** 每次尝试结束后回调,供记账。 */
   readonly onAttempt?: (record: AttemptRecord) => void;
@@ -170,6 +171,9 @@ export async function runRetryChain(input: RetryInput): Promise<RetryResult> {
   let lastRealFailure: typeof lastFailure | null = null;
 
   for (let i = 0; i < limit; i += 1) {
+    if (input.signal?.aborted) {
+      throw input.signal.reason ?? new DOMException("操作已取消", "AbortError");
+    }
     const target = input.targets[i]!;
     const isLast = i === limit - 1;
 
@@ -179,6 +183,7 @@ export async function runRetryChain(input: RetryInput): Promise<RetryResult> {
       headers: input.buildHeaders(target),
       body: input.body,
       proxyId: target.proxyId,
+      ...(input.signal !== undefined ? { signal: input.signal } : {}),
     };
 
     const startedAt = clock();
@@ -187,6 +192,7 @@ export async function runRetryChain(input: RetryInput): Promise<RetryResult> {
     try {
       response = await fetchUpstream(req, input.deps);
     } catch (err) {
+      if (input.signal?.aborted) throw err;
       /*
        * 出口**配置**错误与网络失败要分开。
        *
@@ -218,6 +224,13 @@ export async function runRetryChain(input: RetryInput): Promise<RetryResult> {
       if (!isSetup) lastRealFailure = lastFailure;
       // 配置错误换 Worker 无意义,但换代理可能有意义 —— 仍继续走候选链。
       continue;
+    }
+
+    // 客户端可能在响应头到达的同一时刻断开；不要把已取消的响应交给透传层,
+    // 也不要再为它进入下一轮重试。
+    if (input.signal?.aborted) {
+      await response.body?.cancel().catch(() => {});
+      throw input.signal.reason ?? new DOMException("操作已取消", "AbortError");
     }
 
     const failure = classifyStatus({ status: response.status, headers: response.headers });

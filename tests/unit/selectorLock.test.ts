@@ -71,6 +71,33 @@ describe("SelectorLock", () => {
     expect(done).toEqual(["after"]);
   });
 
+  it("排队期间取消不会执行任务", async () => {
+    const lock = new SelectorLock();
+    let release!: () => void;
+    const first = lock.run(
+      () =>
+        new Promise<void>((resolve) => {
+          release = resolve;
+        }),
+    );
+    const controller = new AbortController();
+    let ran = false;
+    const queued = lock.run(
+      async () => {
+        ran = true;
+      },
+      controller.signal,
+    );
+
+    await Promise.resolve();
+    controller.abort();
+    release();
+    await first;
+    await expect(queued).rejects.toMatchObject({ name: "AbortError" });
+    expect(ran).toBe(false);
+    expect(lock.pending).toBe(0);
+  });
+
   it("失败任务的异常传给调用方,而不是变成未处理拒绝", async () => {
     const lock = new SelectorLock();
     const results = await Promise.allSettled([

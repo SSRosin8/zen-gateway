@@ -20,6 +20,7 @@ import { runRetryChain, type AttemptTarget } from "../../core/upstream/retry.ts"
 import { pipeUpstreamResponse } from "../../core/upstream/pipe.ts";
 import { createOverlapScanner } from "../../core/upstream/tap.ts";
 import { describeNoWorker, sessionHashFrom } from "../../core/routing/select.ts";
+import { digestOf } from "../../core/routing/affinity.ts";
 import type { Scheduler } from "../../core/routing/scheduler.ts";
 import {
   containsStaleReasoning,
@@ -130,6 +131,56 @@ export type { RejectionReason };
 
 /** 客户端请求体上限。转发面对多模态保持宽松,但不能无界。 */
 const MAX_RELAY_BODY_BYTES = 64 * 1024 * 1024;
+const MAX_RESPONSE_ID_BYTES = 128 * 1024;
+
+function createResponseIdCollector(parse: (payload: unknown) => string | null) {
+  let pending = "";
+  let buffered = "";
+  let id: string | null = null;
+  let sawEvent = false;
+
+  const consume = (line: string): void => {
+    const trimmed = line.trim();
+    if (!trimmed.startsWith("data:")) return;
+    sawEvent = true;
+    const data = trimmed.slice("data:".length).trim();
+    if (data === "" || data === "[DONE]") return;
+    try {
+      id = parse(JSON.parse(data)) ?? id;
+    } catch {
+      /* 畸形事件不影响透传，后续 completed 事件仍可提供 id。 */
+    }
+  };
+
+  return {
+    feed(text: string): void {
+      if (!sawEvent) {
+        if (buffered.length + text.length <= MAX_RESPONSE_ID_BYTES) buffered += text;
+        else buffered = "";
+      }
+      if (pending.length + text.length > MAX_RESPONSE_ID_BYTES) {
+        pending = "";
+        return;
+      }
+      pending += text;
+      for (;;) {
+        const at = pending.indexOf("\n");
+        if (at === -1) break;
+        consume(pending.slice(0, at));
+        pending = pending.slice(at + 1);
+      }
+    },
+    value(): string | null {
+      if (pending !== "") consume(pending);
+      if (id !== null || sawEvent || buffered === "") return id;
+      try {
+        return parse(JSON.parse(buffered));
+      } catch {
+        return null;
+      }
+    },
+  };
+}
 
 export function createRelayRoutes(deps: RelayDeps): Hono {
   const app = new Hono();
@@ -314,10 +365,11 @@ async function handleRelay(
        */
       deps.catalog.refreshIfStale(catalogIdentity, config, deps.upstreamOf);
     }
+    const displayModel = redactText(model, 128);
     const message =
       verdict.reason === "retired"
-        ? `模型 ${model} 已不在上游在架目录中(它符合免费约定,但上游已下架)。可刷新 /v1/models 确认,并从配置的 models.extraFreeIds 中移除`
-        : `模型 ${model} 不在免费集内。本网关只放行免费模型;可在配置的 models.extraFreeIds 中调整`;
+        ? `模型 ${displayModel} 已不在上游在架目录中(它符合免费约定,但上游已下架)。可刷新 /v1/models 确认,并从配置的 models.extraFreeIds 中移除`
+        : `模型 ${displayModel} 不在免费集内。本网关只放行免费模型;可在配置的 models.extraFreeIds 中调整`;
     /*
      * `not_free` 与 `retired` **分开计数**：处置完全不同 ——
      * 前者是用户配错了模型名，后者要去 `extraFreeIds` 里删一个已下架的 id。
@@ -464,6 +516,7 @@ async function handleRelay(
       url: upstreamUrl(config.gateway.baseUrl, surface.upstreamPath),
       method: "POST",
       body: raw,
+      signal: c.req.raw.signal,
       deps: deps.upstreamOf(config),
       /*
        * 冷却记账。逐次回调,而不是等链结束一次性记 ——
@@ -566,6 +619,7 @@ async function handleRelay(
      * 更新亲和映射,那时响应早已完整发给客户端。
      */
     const scanner = createOverlapScanner(STALE_PATTERN_WINDOW, containsStaleReasoning);
+    const responseIds = createResponseIdCollector(surface.responseIdFrom ?? (() => null));
     /*
      * 用量收集 —— `ProtocolSurface.parseUsage` 的**生产调用点**。
      *
@@ -587,6 +641,7 @@ async function handleRelay(
         onText: (text) => {
           scanner.feed(text);
           usage.feed(text);
+          responseIds.feed(text);
         },
         onDone: (error) => {
           /*
@@ -615,6 +670,18 @@ async function handleRelay(
             // 流结束的时刻 —— 指纹的 TTL 从签发完成起算。见 nowOf 的说明。
             now: nowOf(),
           });
+
+          const outputId = responseIds.value();
+          if (
+            outputId !== null &&
+            error === null &&
+            !scanner.hit() &&
+            workerId !== null &&
+            upstream.status >= 200 &&
+            upstream.status < 300
+          ) {
+            deps.scheduler.rebind(digestOf(outputId), workerId, nowOf());
+          }
 
           /*
            * 用量日志 —— 诊断动作,所以排在结算**之后**(见上面的顺序说明)。

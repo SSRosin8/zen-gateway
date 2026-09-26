@@ -330,7 +330,7 @@ describe("safeErrorMessage", () => {
   });
 
   /*
-   * cause 链。动机是一次真实的不可诊断故障:本机 `opencode.ai` 被企业 CA
+   * cause 链。动机是一次证书链错误被顶层 fetch 包装后难以诊断：
    * 中间人,undici 把它包成 `TypeError: fetch failed`,而真正的原因
    * (`UNABLE_TO_GET_ISSUER_CERT_LOCALLY`)只在 `cause` 里。
    * 先前只取 `err.message`,日志里就只有 `fetch failed` 三个词。

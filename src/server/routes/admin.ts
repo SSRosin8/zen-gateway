@@ -89,7 +89,9 @@ export type AdminDeps = {
    * **必须换一个新对象**而不是原地改：`Scheduler.#syncedFrom` 用引用比较
    * 判断「配置换了没有」，原地改会让 Worker 池不重新 sync。
    */
-  readonly applyConfig: (next: Config) => Promise<void>;
+  readonly applyConfig: (next: Config, expected?: Config) => Promise<void>;
+  /** 实际监听端口（含 ZG_PORT 覆盖），而不是配置文件里的默认值。 */
+  readonly effectivePort: () => number;
   /** 调度器的运行期状态。只要这一小片 —— 见 `RuntimeWorkerState`。 */
   readonly runtimeWorkers: () => readonly RuntimeWorkerState[];
   readonly catalog: ModelCatalog;
@@ -185,7 +187,7 @@ export function createAdminRoutes(deps: AdminDeps): Hono {
     const body: Overview = {
       health: deps.health(),
       gateway: {
-        port: config.gateway.port,
+        port: deps.effectivePort(),
         baseUrl: config.gateway.baseUrl,
         relayToken: displayFingerprint(config.gateway.relayToken),
         maxAttempts: config.gateway.maxAttempts,
@@ -318,7 +320,7 @@ export function createAdminRoutes(deps: AdminDeps): Hono {
     }
 
     try {
-      await deps.applyConfig(result.config);
+      await deps.applyConfig(result.config, deps.configOf());
     } catch (err) {
       /*
        * 写盘失败 —— 进程内的配置**也不能换**。
@@ -410,12 +412,13 @@ export function createAdminRoutes(deps: AdminDeps): Hono {
      * **本机直连**那条（合成 id `__direct__` → `gateway.directEgressIp`）。
      * 先前这里只并 proxies，于是直连的测量被静默丢弃（缺口 #28）。
      */
-    const merged = applyProbeResults(deps.configOf(), byProxy);
+    const fresh = deps.configOf();
+    const merged = applyProbeResults(fresh, byProxy);
     const changed = merged.changed;
 
     if (changed) {
       try {
-        await deps.applyConfig(merged.config);
+        await deps.applyConfig(merged.config, fresh);
       } catch (err) {
         deps.log?.(`探测结果写入失败: ${safeErrorMessage(err)}`);
         return adminError(c, "write_failed", `探测成功但写入失败:${safeErrorMessage(err)}`);
@@ -500,7 +503,7 @@ export function createAdminRoutes(deps: AdminDeps): Hono {
 
       if (!outcome.ok) {
         try {
-          await deps.applyConfig(touch({ lastErrorKind: outcome.kind }));
+          await deps.applyConfig(touch({ lastErrorKind: outcome.kind }), fresh);
         } catch (err) {
           deps.log?.(`订阅状态写入失败: ${safeErrorMessage(err)}`);
         }
@@ -538,7 +541,7 @@ export function createAdminRoutes(deps: AdminDeps): Hono {
       };
 
       try {
-        await deps.applyConfig(withMeta);
+        await deps.applyConfig(withMeta, fresh);
       } catch (err) {
         deps.log?.(`订阅导入写入失败: ${safeErrorMessage(err)}`);
         return adminError(c, "write_failed", `拉取成功但写入失败：${safeErrorMessage(err)}`);
