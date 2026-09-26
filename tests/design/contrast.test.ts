@@ -13,9 +13,9 @@ const CSS = readFileSync(new URL("../../src/admin/styles/tokens.css", import.met
 const LIGHT = parseTokenBlock(CSS, ":root");
 const DARK = parseTokenBlock(CSS, '[data-theme="dark"]');
 
-// 防回归：parseTokenBlock 第一版按选择器首次出现取块，而
-// `[data-theme="dark"]` 也出现在 @custom-variant 声明里，于是深色主题
-// 被静默解析成 :root 的内容，四十多条断言全在重复检查浅色主题。
+// 防回归：若 parseTokenBlock 按选择器首次出现取块，而
+// `[data-theme="dark"]` 也出现在 @custom-variant 声明里，深色主题就会
+// 被静默解析成 :root 的内容，所有深色断言都在重复检查浅色主题。
 if (LIGHT["bg"] === DARK["bg"]) {
   throw new Error("两个主题解析出同样的 bg —— token 解析有误，断言无效");
 }
@@ -44,7 +44,7 @@ describe("token 解析本身", () => {
     /*
      * 实测过的失败形态：真实声明是不及格的 #8a6a12，后面跟一句
      * 「压深前的值：--zg-warn: #75580d」的注释，解析器按最后匹配生效
-     * 读出 #75580d —— 53 条断言全绿而线上 CSS 不合规。
+     * 读出 #75580d —— 断言全绿而线上 CSS 不合规。
      * tokens.css 里本就有一条引用旧色值的注释，离触发只差一次文档编辑。
      */
     const masked = `:root {\n  --zg-warn: #8a6a12;\n  /* 旧值 --zg-warn: #75580d 备查 */\n}`;
@@ -117,7 +117,7 @@ describe("设计 token 对比度", () => {
  * 全部不及格：text-muted 2.22、accent-fg 1.92、error 2.09，深色下
  * text-muted 更低到 1.28。
  *
- * 直接后果，Phase 9 必须遵守：**选中行不能用 accent-fill 做整行背景**。
+ * 直接后果：**选中行不能用 accent-fill 做整行背景**。
  * 一旦那样做，行内的次要文字（时间、延迟、备注）就不可读。选中态与
  * 警告态同理，用 3px 左边框实色表达；accent-fill 只用在按钮、选中指示条
  * 这类只承载主文案的紧凑元素上。
@@ -145,7 +145,7 @@ describe("accent-fill 作为填充的约束", () => {
  *
  * token 定义得再对，只要 @theme 里少一条 --color-X 映射，Tailwind 就不会
  * 生成对应工具类：`text-warn` 直接消失，StatusIndicator 渲染出一个没有
- * 颜色类的状态。实测删掉 --color-warn 后 53 条断言照样全绿 ——
+ * 颜色类的状态。实测删掉 --color-warn 后断言照样全绿 ——
  * 这是连接「token 值」与「渲染像素」的唯一一环，不能不设关卡。
  */
 describe("@theme 映射", () => {
@@ -220,7 +220,7 @@ describe("状态色色相分布", () => {
  * 本来 5.90 的组合在屏幕上只剩 2.51 —— 而没有任何一条 token 断言能看见它,
  * 因为参与运算的两个 token 都没变。
  *
- * 第八轮审核实测出这个洞:`PrimaryButton` 的注释写着「禁用态**保留文字
+ * 这个洞出现过:`PrimaryButton` 的注释写着「禁用态**保留文字
  * 对比度** —— 一个读不清的禁用按钮无法告诉用户它为什么禁用」,而实现
  * 用的正是 `opacity-60`,把那句话破坏得干干净净。三处按钮（主操作、
  * 代理池的次操作、表格翻页）全中,而禁用态恰好是这些按钮**最要紧**的时刻:
@@ -256,9 +256,9 @@ describe("禁用态仍然可读", () => {
      * 直接扫源码。这条断言的对象不是颜色而是**手法**:只要有人再写
      * `disabled:opacity-*`，合成后的对比度就脱离了上面所有 token 断言的视野。
      *
-     * ## 遍历目录，不枚举文件（第十轮审核）
+     * ## 遍历目录，不枚举文件
      *
-     * 先前这里手写了三个文件名，而 `src/admin/` 下有十余个 tsx ——
+     * 若手写几个文件名，而 `src/admin/` 下有十余个 tsx ——
      * 实测给名单外的 `UsagePage.tsx` 加一个 `disabled:opacity-60` 后全绿。
      * 那是纪律 #4 的标准形态：手写名单与「admin 下所有组件」这个真相并行，
      * 而脱节方向是漏。这条断言守的是**手法**，所以范围必须是"所有会写
@@ -281,7 +281,7 @@ describe("禁用态仍然可读", () => {
     /*
      * 关卡自己不能是空的：目录改名、`readdirSync` 抛了被吞掉，都会让下面那个
      * 循环在**零个文件**上通过（纪律 #1 的「输入集为空」）。
-     * 本机实测 11 个 tsx + 若干 ts，取一个有余量的下界。
+     * 当前有十余个 tsx + 若干 ts，取一个有余量的下界。
      */
     expect(files.length).toBeGreaterThan(8);
 

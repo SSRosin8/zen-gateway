@@ -184,9 +184,8 @@ describe("权限修正", () => {
 
 describe("ZG_DATA_DIR", () => {
   /*
-   * service.mjs 认这个环境变量,config.ts 先前不认 —— 于是 service.mjs 在一个
+   * service.mjs 认这个环境变量,config.ts 若不认 —— service.mjs 就在一个
    * 目录里管状态文件,而服务端从 `cwd/data` 读配置,凭证与运行时数据被劈成两份。
-   * Phase 0-2 的服务端还不读配置,所以那只是个陷阱;Phase 3 起就是真 bug。
    */
   it("不传 root 时遵循 ZG_DATA_DIR", async () => {
     const override = await mkdtemp(join(tmpdir(), "zg-override-"));
@@ -269,9 +268,9 @@ describe("保存", () => {
 
 describe("原子写", () => {
   /*
-   * README 的安全约束写着「`config.json` 0600 + **原子写**」，而第八轮审核实测:
-   * 把 temp→fsync→rename 换成直接 `open(file,"w")` 写，全套测试**依然全绿** ——
-   * 0600 那半条有测试（新写法也保留了 mode），原子那半条一条都没有。
+   * README 的安全约束写着「`config.json` 0600 + **原子写**」。0600 那半条有别的
+   * 测试守着；没有下面这组，把 temp→fsync→rename 换成直接 `open(file,"w")` 写
+   * （保留 mode），全套测试**依然全绿**。
    *
    * 「崩溃在写的中途」没法在单测里制造，但原子写有两个**可观测的后果**:
    * 1. 任何时刻读到的都是一份完整的 JSON（绝不会是截断的半个文件）；
@@ -345,7 +344,7 @@ describe("原子写", () => {
     /*
      * 怎么让写**真的**失败:
      *
-     * 第一版把 data/ 改成 0500 —— 没用。进程是目录的 owner，而 `saveConfig`
+     * 把 data/ 改成 0500 没用。进程是目录的 owner，而 `saveConfig`
      * 开头就 `chmod(dir, DIR_MODE)` 把权限改回 0700 了（那是 `ensurePermissions`
      * 那条「权限不对就修正」的另一面）。所以那条测试测的是「它会自我修复」。
      *

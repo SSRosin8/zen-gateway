@@ -186,16 +186,16 @@ describe("身份与槽位", () => {
   });
 
   /*
-   * ## 下面三条替换了一条恒真的空壳（第六轮审核查出）
+   * ## 下面三条不能写成恒真的空壳
    *
-   * 原先这里写的是 `expect(catalogIdentityOf(cfg)).toEqual(catalogIdentityOf(cfg))`,
+   * 例如 `expect(catalogIdentityOf(cfg)).toEqual(catalogIdentityOf(cfg))`,
    * 名义上验"只有一处定义",实际**恒真** —— 同一个函数调两次当然相等。
    *
    * 而上面那条「取第一个**可用** Worker」只有一个 Worker,所以"可用"这个
    * 限定词无从失败。变异验证:把 `usableTargets(config)[0]` 换成
-   * `config.workers[0]`（即去掉 `isUsable` 过滤）后**1274 条测试全绿**。
+   * `config.workers[0]`（即去掉 `isUsable` 过滤）后，没有这三条时**全套测试全绿**。
    *
-   * 归类是第五轮的第三类「调用点存在但输入集为空」:全部 fixture 的
+   * 归类是第三类「调用点存在但输入集为空」:全部 fixture 的
    * `workers[0]` 恒为 `enabled: true` 且有 key。而"先配一个免 key 的试试,
    * 再加带 key 的"恰好是很自然的配置顺序。
    */
@@ -234,8 +234,8 @@ describe("身份与槽位", () => {
      *
      * 若免 key 的 w1 排在前面而这里不过滤,`slotOf` 会返回 `keyless` →
      * 目录被填进 keyless 槽,而 `relay.ts` 读的是 `cached("keyed")` →
-     * 拿到 null → **交集静默失效**,退回 Phase 5 那个偏宽的放行。
-     * 也就是说 Phase 6 的核心交付会在一种很自然的配置下无声消失。
+     * 拿到 null → **交集静默失效**,退回只看后缀与名单的偏宽放行。
+     * 也就是说目录交集这项核心功能会在一种很自然的配置下无声消失。
      *
      * 用 `kind: "anonymous"` 构造免 key 的合法 Worker；匿名身份由
      * `WorkerSchema` 统一归一化为空 key。
@@ -342,8 +342,8 @@ describe("身份与槽位", () => {
 
   it("**目录请求经该 Worker 绑定的出口发出** —— 不是本机直连", async () => {
     /*
-     * 第六轮审核查出这条完全没有守卫:把 `catalogIdentityOf` 或 `#doFetch` 里的
-     * `proxyId` 改成硬编码 `null` 之后 **1279 条测试全绿**。归类是第三类
+     * 没有这条时:把 `catalogIdentityOf` 或 `#doFetch` 里的
+     * `proxyId` 改成硬编码 `null` 之后**全套测试全绿**。归类是第三类
      * 「输入集为空」—— 全部 fixture 的 Worker 都是 `proxyId: null`。
      *
      * ## 为什么这条比它看起来重要
@@ -427,8 +427,8 @@ describe("ModelCatalog", () => {
 
   it("**拉取失败时继续用旧的** —— 上游抖动时目录不跟着消失", async () => {
     /*
-     * 这是「校验过的最后成功缓存」的核心性质。先前 `/v1/models` 每次请求都
-     * 打一次上游,于是上游抖动时目录跟着消失 —— 而目录为空等于
+     * 这是「校验过的最后成功缓存」的核心性质。若 `/v1/models` 每次请求都
+     * 打一次上游,上游抖动时目录就跟着消失 —— 而目录为空等于
      * OpenCode 的模型列表整个空掉。
      */
     const f = fakeDeps([catalogResponse(["a", "b"]), new Error("网络断了")]);
@@ -511,6 +511,52 @@ describe("ModelCatalog", () => {
     const cfg = workerConfig(["w1"]);
     expect(await cat.ensure(catalogIdentityOf(cfg), cfg, f.upstreamOf)).toBeNull();
     expect(cat.cached("keyed")).toBeNull();
+  });
+
+  it("ensure 失败后在退避窗口内不再打上游,窗口过后才重试", async () => {
+    // `/v1/models` 每次请求都会逐身份调用 ensure;上游持续失败时不能每次都发一发。
+    const f = fakeDeps([new Error("失败 1"), new Error("失败 2")]);
+    let now = 1000;
+    const cat = new ModelCatalog({ clock: () => now });
+    const cfg = workerConfig(["w1"]);
+    const id = catalogIdentityOf(cfg);
+
+    for (let n = 0; n < 5; n += 1) {
+      expect(await cat.ensure(id, cfg, f.upstreamOf)).toBeNull();
+      now += 1000;
+    }
+    expect(f.calls()).toBe(1);
+
+    now = 1000 + 30_000;
+    expect(await cat.ensure(id, cfg, f.upstreamOf)).toBeNull();
+    expect(f.calls()).toBe(2);
+  });
+
+  it("退避按身份计:一个身份失败不压住同槽位的另一个身份", async () => {
+    const f = fakeDeps([new Error("第一个出口不通"), catalogResponse(["a"])]);
+    const cat = new ModelCatalog({ clock: () => 1000 });
+    const cfg = workerConfig(["w1"]);
+    const first = { apiKey: "fake-key-first-not-real", proxyId: null };
+    const second = { apiKey: "fake-key-second-not-real", proxyId: null };
+
+    expect(await cat.ensure(first, cfg, f.upstreamOf)).toBeNull();
+    expect((await cat.ensure(second, cfg, f.upstreamOf))?.ids).toEqual(new Set(["a"]));
+    expect(f.calls()).toBe(2);
+  });
+
+  it("退避窗口内 ensure 返回旧缓存而不是 null", async () => {
+    const f = fakeDeps([catalogResponse(["a"]), new Error("断了")]);
+    let now = 1000;
+    const cat = new ModelCatalog({ clock: () => now });
+    const cfg = workerConfig(["w1"]);
+    const id = catalogIdentityOf(cfg);
+
+    await cat.ensure(id, cfg, f.upstreamOf);
+    now += TTL + 1;
+    await cat.ensure(id, cfg, f.upstreamOf);
+    now += 1000;
+    expect((await cat.ensure(id, cfg, f.upstreamOf))?.ids).toEqual(new Set(["a"]));
+    expect(f.calls()).toBe(2);
   });
 
   it("cached() **绝不发请求**", async () => {
@@ -707,18 +753,18 @@ describe("refreshIfStale —— 后台刷新与失败退避", () => {
 
   it("高频调用下退避真的收敛 —— **每次之间都排空**,不靠 in-flight 去重", async () => {
     /*
-     * ## 这条测试第一版是空壳,变异验证查出来的
+     * ## 为什么每次之间要排空
      *
-     * 我原先写的是"连调 10000 次 refreshIfStale,断言只发 1 次请求"。
+     * "连调 10000 次 refreshIfStale,断言只发 1 次请求"是空壳:
      * 那条断言**在退避被移除后依然全绿** —— 因为一万次调用全在同一个同步
      * 块里,`#inFlight` 从头到尾没被清理过,于是**合流机制**独自把它们
-     * 收敛成一次。我以为自己在验退避,实际在验去重。
+     * 收敛成一次。看起来在验退避,实际在验去重。
      *
      * 这是纪律 #1 的第二类形态:**条件被另一层顺带满足**。修法是在每次调用
      * 之间排空事件循环,让 in-flight 真的清掉 —— 此时唯一还能阻止重复请求的
      * 就只有退避。
      *
-     * 迭代数从 10000 降到 30:每次排空要过一个宏任务,而 30 次已经足够
+     * 迭代数取 30:每次排空要过一个宏任务,而 30 次已经足够
      * 区分"收敛"与"每次都发"(后者会在第 2 次就因脚本用尽而炸)。
      * 规模不是这条测试的重点,**每次之间排空**才是。
      */
@@ -779,7 +825,7 @@ describe("refreshIfStale —— 后台刷新与失败退避", () => {
 
   it("**时钟回拨后退避不生效** —— 一次 NTP 校正不该把目录冻住", async () => {
     /*
-     * 第六轮审核查出这条守卫没有断言:退避那组测试只**推进**时钟,从来没回拨过。
+     * 退避那组测试只**推进**时钟,从来不回拨,所以需要这条单独守着。
      * 实测把 `age >= 0 &&` 删掉后全绿。
      *
      * 后果很具体:NTP 校正或休眠唤醒让 `now < failedAt` → `age` 为负 →
@@ -834,7 +880,7 @@ describe("refreshIfStale —— 后台刷新与失败退避", () => {
 });
 
 /* ================================================================== *
- * 体积上限（缺口 #7）
+ * 体积上限
  * ================================================================== */
 
 describe("目录响应的体积上限", () => {

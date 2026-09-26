@@ -1,12 +1,11 @@
 /**
  * 上游报告的 token 用量 —— `ProtocolSurface.parseUsage` 的共享底座。
  *
- * ## 为什么 Phase 6 就得有它
+ * ## 为什么它是协议面接口的必备成员
  *
- * 规划的 `ProtocolSurface` 列了 `parseUsage`，而它先前**全仓不存在**。
- * Phase 7 的门槛直接依赖它（per-model token、缓存命中率、usage 覆盖率），
- * 而每新增一个协议面都要实现一次 —— 面越多，补这个成员的改动越大。
- * 所以它必须跟新增两个面同一轮落地，而不是等到需要它的那一轮。
+ * 统计直接依赖它（per-model token、缓存命中率、usage 覆盖率），
+ * 而每新增一个协议面都要实现一次 —— 面越多，事后补这个成员的改动越大。
+ * 所以新增协议面时必须同时实现它。
  *
  * ## 分工：**信封**由面决定，**字段名**在这里统一
  *
@@ -24,7 +23,7 @@
  * chat 不认 `{response:{usage}}` 也不认 `{message:{usage}}`，responses 不认
  * `{message:{usage}}`，messages 不认 `{response:{usage}}`。
  *
- * ## 但要说清它**不**能查出什么（这里的范围先前写窄了）
+ * ## 但要说清它**不**能查出什么
  *
  * 三个面都认**顶层** `usage`。实测七个真实形态里**只有两个可区分**：
  *
@@ -37,11 +36,10 @@
  * | messages `message_start` `{message:{usage}}` | null | null | 出数 |
  * | messages `message_delta` `{usage}` | 出数 | 出数 | 出数 |
  *
- * 先前这里写的是"（那是各自**非流式**响应的形状）" —— **那句不准确**：
- * 顶层 `usage` 也是 chat **流式末帧**与 messages **`message_delta`** 的形状。
+ * 不要把顶层 `usage` 理解成"各自**非流式**响应的形状" —— 它也是 chat **流式末帧**与 messages **`message_delta`** 的形状。
  * 这个差别改变局限的范围：不是"只有非流式载荷不可区分"，而是 **5/7 不可区分**。
  *
- * 后果更具体：「messages 面被误接成 chat 面」这个错误会让
+ * 后果很具体：「messages 面被误接成 chat 面」这个错误会让
  * `message_start`（输入 token）丢掉而 `message_delta`（输出 token）照常出数，
  * 产出 `in=0 out=37` —— 那是**算错**而不是漏掉，比"非流式不可区分"暗示的更坏。
  *
@@ -88,10 +86,10 @@ export type TokenUsage = {
  *   于是 `true` 被算成 1 个 token。
  * - 认十进制字符串 —— JSON 里 token 数本该是数字,但上游若哪天改成字符串,
  *   强行丢弃会让统计静默归零。
- * - **不认 `0x`/`0b`/`0o`/`1e5`** —— 先前用的是裸 `Number()`,于是 `"0x10"` 被
+ * - **不认 `0x`/`0b`/`0o`/`1e5`** —— 裸 `Number()` 会把 `"0x10"`
  *   静默读成 **16**、`"0b111"` 读成 **7**、`"1e5"` 读成 **100000**。那些都不是
- *   "JSON 里 token 数改成字符串"会出现的形态,而注释却声称 `Number("123")`
- *   无歧义 —— 那句只对十进制成立(第六轮审核实测)。
+ *   "JSON 里 token 数改成字符串"会出现的形态;`Number("123")` 的"无歧义"
+ *   只对十进制成立。
  * - **有上界** —— 见 `clampTokens`。
  */
 function tokenCount(value: unknown): number {
@@ -111,13 +109,13 @@ function tokenCount(value: unknown): number {
 /**
  * token 数的上界判定 —— **入口与出口共用这一处**。
  *
- * 先前只有入口守有限性,出口(两处求和)不守,于是实测
+ * 只在入口守有限性、出口(两处求和)不守时,实测
  * `readUsage({prompt_tokens: 1e308, completion_tokens: 1e308})` 的
  * `totalTokens` 是 **Infinity** —— 而 `describeUsage` 会打出 `total=Infinity`,
- * `JSON.stringify` 把它变成 `null`(类型声明却是 `number`),Phase 7 还要把
+ * `JSON.stringify` 把它变成 `null`(类型声明却是 `number`),统计还要把
  * 这些数写进 SQLite 的 INTEGER 列。
  *
- * 分散成"入口守、出口不守"是纪律 #4 的分叉形态。Phase 7 的聚合是第三处求和,
+ * 分散成"入口守、出口不守"是纪律 #4 的分叉形态。统计的聚合是第三处求和,
  * 收成一个函数让那种漏写写不出来。
  */
 function clampTokens(n: number): number {
@@ -133,12 +131,12 @@ function asRecord(value: unknown): Record<string, unknown> | null {
 /**
  * 从一个 **usage 对象**读出用量。入参是信封里的那一层，不是整个响应。
  *
- * 取 `Math.max` 而不是 `??`：两套命名同时出现时结果不该取决于我写的顺序，
+ * 取 `Math.max` 而不是 `??`：两套命名同时出现时结果不该取决于代码里写的顺序，
  * 而 `??` 遇到显式的 `0` 会停在 0 上（`{prompt_tokens:0, input_tokens:812}`
  * 会被读成 0）。
  *
  * 全为 0 时返回 null —— 「上游没报用量」与「这次真的用了 0 个 token」必须
- * 区分开。返回一个全零对象会让 Phase 7 记下一行看起来有数据的空记录，
+ * 区分开。返回一个全零对象会让统计记下一行看起来有数据的空记录，
  * 于是 usage 覆盖率这个指标永远是 100%，而它存在的意义正是发现没覆盖到的面。
  */
 export function readUsage(usage: unknown): TokenUsage | null {
@@ -209,8 +207,7 @@ export function readUsage(usage: unknown): TokenUsage | null {
  * **增量**上报，取大就等于只取最后一块 —— 实测三块各报 10 个增量时结果是
  * `out=10`，而真实是 30。
  *
- * 这条前提先前没写下来，只解释了"为什么取大而不是写第二个解析器"。
- * 写在这里是为了让下一轮加面时有地方去核对，而不是重新推一遍：
+ * 这条前提写在这里，是为了让新增协议面时有地方去核对，而不是重新推一遍：
  * **新面接进来时要先确认它的用量是累计还是增量。**
  * 增量上报的面不能用本函数，得改成逐字段求和（而那又要求"同一个事件不被
  * feed 两次"，所以不是换个 `Math.max` 那么简单）。
@@ -249,12 +246,12 @@ const MAX_BUFFERED_BYTES = 1024 * 1024;
  *
  * ## 这个常量约束的**不是**"一行",而是"一个内嵌整个响应的事件"
  *
- * 先前写的是 512 KB,理由是"防上游发一个没有换行的巨大流"。那个理由成立,
- * 但取值定错了量级 —— 因为 Responses 面的 `response.completed` 事件
+ * 理由"防上游发一个没有换行的巨大流"成立,但不能按"一行"定成 512 KB
+ * 这种量级 —— 因为 Responses 面的 `response.completed` 事件
  * **内嵌整个 response 对象**(全部输出文本 + `usage`),所以那一行的大小
  * ∝ 生成长度,而它是该面**唯一**带用量的事件。
  *
- * 实测(第六轮审核):一条 600 KB 的合法 `response.completed` 被整条丢弃,
+ * 按 512 KB 时的实测:一条 600 KB 的合法 `response.completed` 被整条丢弃,
  * 而更糟的是结果**取决于上游的分块位置** ——
  *
  * ```
@@ -309,7 +306,7 @@ export function createUsageCollector(parse: (payload: unknown) => TokenUsage | n
    * 任何常量都可能被越过,所以**越过时可观测**比"把常量调大"更耐久:
    * 调大只是把边界推远,而可观测让边界被越过这件事不再是静默的。
    * 这与 `readUsage` 全零时返回 `null`(而不是全零对象)是同一条理由的延伸:
-   * 否则 Phase 7 的 usage 覆盖率会把"我们自己丢的"计成"上游没报的"。
+   * 否则 usage 覆盖率会把"我们自己丢的"计成"上游没报的"。
    */
   dropped: () => boolean;
 } {
@@ -366,8 +363,8 @@ export function createUsageCollector(parse: (payload: unknown) => TokenUsage | n
        * 不能无条件留着等换行:那让 `pending` 随流无界增长,
        * 而这正是"不缓冲整条流"要避免的事。
        *
-       * 丢弃要**留痕**:见 `dropped()`。先前这里是静默 `pending = ""`,
-       * 于是"上游没报用量"与"我们把那一行扔了"在外部完全无法区分。
+       * 丢弃要**留痕**:见 `dropped()`。只静默 `pending = ""` 的话,
+       * "上游没报用量"与"我们把那一行扔了"在外部完全无法区分。
        */
       if (pending.length > MAX_LINE_LENGTH) {
         pending = "";

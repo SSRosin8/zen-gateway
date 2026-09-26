@@ -11,6 +11,18 @@ import { SelectorLock, SelectorLockRegistry } from "../../src/core/proxy/selecto
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
+/** 锁此刻是否空闲:空闲时新任务在同一轮微任务内就开始,被占用时要等前一个任务。 */
+async function lockIsFree(lock: SelectorLock): Promise<boolean> {
+  let started = false;
+  const probe = lock.run(async () => {
+    started = true;
+  });
+  for (let i = 0; i < 5; i += 1) await Promise.resolve();
+  const free = started;
+  await probe;
+  return free;
+}
+
 describe("SelectorLock", () => {
   it("串行执行:临界区不重叠", async () => {
     const lock = new SelectorLock();
@@ -95,7 +107,7 @@ describe("SelectorLock", () => {
     await first;
     await expect(queued).rejects.toMatchObject({ name: "AbortError" });
     expect(ran).toBe(false);
-    expect(lock.pending).toBe(0);
+    expect(await lockIsFree(lock)).toBe(true);
   });
 
   it("失败任务的异常传给调用方,而不是变成未处理拒绝", async () => {
@@ -116,24 +128,25 @@ describe("SelectorLock", () => {
     await expect(lock.run(async () => 42)).resolves.toBe(42);
   });
 
-  it("全部完成后 pending 归零", async () => {
+  it("排队期间锁被占用,全部完成后空闲", async () => {
     const lock = new SelectorLock();
     const running = Promise.all([
       lock.run(() => sleep(5)),
       lock.run(() => sleep(5)),
       lock.run(() => sleep(5)),
     ]);
-    expect(lock.pending).toBe(3);
+    const busy = lockIsFree(lock);
     await running;
-    expect(lock.pending).toBe(0);
+    expect(await busy).toBe(false);
+    expect(await lockIsFree(lock)).toBe(true);
   });
 
-  it("失败后 pending 也归零", async () => {
+  it("失败后锁也空闲", async () => {
     const lock = new SelectorLock();
     await lock.run(async () => {
       throw new Error("x");
     }).catch(() => {});
-    expect(lock.pending).toBe(0);
+    expect(await lockIsFree(lock)).toBe(true);
   });
 
   it("任务返回响应对象时,锁在响应头到达即释放", async () => {
@@ -200,7 +213,7 @@ describe("SelectorLockRegistry", () => {
   it("同一内核复用同一把锁", () => {
     const reg = new SelectorLockRegistry();
     expect(reg.forBridge("b1")).toBe(reg.forBridge("b1"));
-    expect(reg.size).toBe(1);
+    expect(reg.forBridge("b2")).not.toBe(reg.forBridge("b1"));
   });
 
   it("不同内核互不阻塞", async () => {
@@ -223,6 +236,5 @@ describe("SelectorLockRegistry", () => {
 
     // b2 应当在 b1 还占着自己那把锁时就跑完。
     expect(events.indexOf("b2-exit")).toBeLessThan(events.indexOf("b1-exit"));
-    expect(reg.size).toBe(2);
   });
 });

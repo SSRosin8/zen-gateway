@@ -1,7 +1,9 @@
 import { poolHealth, type Overview, type PoolHealth, type WorkerView } from "../../shared/contract.ts";
 import { StatusIndicator, type StatusTone } from "../components/StatusIndicator.tsx";
-import { Metric, Mono, Panel, PrimaryButton, RowMark, Strong } from "../components/Panel.tsx";
+import { Metric, Mono, Panel, PrimaryButton, Strong } from "../components/Panel.tsx";
+import { SimpleTable, type Column } from "../components/DataTable.tsx";
 import { useProbe, type ProbeResult } from "../lib/api.ts";
+import { humanMs } from "../lib/format.ts";
 
 /**
  * Overview 页。
@@ -12,10 +14,9 @@ import { useProbe, type ProbeResult } from "../lib/api.ts";
  * 2. 回显出口是否共用 —— 这是配置核对的重要信号，未知状态必须显眼
  * 3. 某个 Worker 为什么没在被用（停用？没 key？在冷却？）
  *
- * 第 3 条先前**无法回答**：配置知道「配了什么」，调度器知道「现在能不能用」，
- * 而进程外没有任何地方同时持有这两半（Phase 8 的 `doctor` 只能报配置形态，
- * 并在输出里明写了这个限制）。`/api/overview` 把两者合在一处，所以这一页
- * 的 Worker 表能同时显示 `enabled` / `inPool` / `ready` 三个不同的事实。
+ * 配置知道「配了什么」，调度器知道「现在能不能用」；`/api/overview` 把两者
+ * 合在一处，所以这一页的 Worker 表能同时显示 `enabled` / `inPool` / `ready`
+ * 三个不同的事实。网关连接细节在网关页，这里只给一行摘要。
  */
 
 const POOL_TONE: Record<PoolHealth, StatusTone> = {
@@ -33,26 +34,13 @@ const POOL_LABEL: Record<PoolHealth, string> = {
 const POOL_ICON: Record<PoolHealth, string> = { empty: "○", healthy: "✓", degraded: "!" };
 
 /**
- * 毫秒的人可读形态。诊断输出里 `900000` 要读者自己换算是不友好的。
- *
- * 导出给代理池页的批测耗时用 —— 那里需要同一套措辞（纪律 #4：
- * 两处各写一份会让"90 秒"在一页显示成「1分钟」另一页显示成「90秒」）。
- */
-export function humanMs(ms: number): string {
-  if (ms < 1000) return `${ms}ms`;
-  if (ms < 60_000) return `${Math.round(ms / 1000)}秒`;
-  return `${Math.round(ms / 60_000)}分钟`;
-}
-
-/**
  * 一个 Worker 现在的状态 —— **三个事实合成一句话**。
  *
  * 顺序即优先级，每一层的下一步都不同：
  *   停用 → 去启用它；没 key → 去填 key；冷却中 → 等，或看 lastFailure；就绪 → 无事
  *
  * 这个函数是「为什么没在用我这个账号」那个问题的答案所在，所以它不能
- * 把几种情况合成「不可用」—— 那正是先前 `doctor` 只能说「可用(配置形态)」
- * 而用户仍然不知道原因的状态。
+ * 把几种情况合成「不可用」—— 那样用户仍然不知道原因。
  *
  * 返回类型刻意**窄于 `StatusTone`**（不含 `info`）：`RowMark` 的左边框只为
  * 这四档定了颜色，而 Worker 状态里没有「信息」这一档。写宽了会让 tsc 放过
@@ -85,70 +73,73 @@ export function workerStatus(w: WorkerView): {
   return { tone: "success", icon: "✓", label: "就绪" };
 }
 
+const WORKER_COLUMNS: ReadonlyArray<Column<WorkerView>> = [
+  {
+    key: "id",
+    header: "Worker",
+    render: (w) => (
+      <>
+        <Mono>{w.id}</Mono>
+        {w.name !== "" && <span className="ml-2 text-text-muted">{w.name}</span>}
+      </>
+    ),
+  },
+  {
+    key: "status",
+    header: "状态",
+    render: (w) => {
+      const status = workerStatus(w);
+      return <StatusIndicator tone={status.tone} icon={status.icon} label={status.label} />;
+    },
+  },
+  {
+    key: "egress",
+    header: "出口 IP",
+    render: (w) =>
+      w.egressIp === null ? (
+        <span className="text-text-muted">{w.proxyId === null ? "本机直连" : "未探测"}</span>
+      ) : (
+        <Mono>{w.egressIp}</Mono>
+      ),
+  },
+  {
+    key: "key",
+    header: "API key",
+    render: (w) =>
+      w.kind === "anonymous" ? (
+        <span className="text-text-muted">无需 key</span>
+      ) : w.apiKey.present ? (
+        /* 只给指纹 —— 凭证绝不出进程。指纹供人眼比对「是不是我刚填的那个」。 */
+        <Mono>{w.apiKey.fingerprint}</Mono>
+      ) : (
+        <span className="text-error">未配置</span>
+      ),
+  },
+];
+
 function WorkerTable({ workers }: { workers: readonly WorkerView[] }) {
   if (workers.length === 0) {
     return (
       <div className="rounded-md bg-surface-accent px-4 py-6 text-center">
         <p className="font-serif text-lg">还没有配置 Worker</p>
         <p className="mt-1 text-text-muted">
-          转发需要至少一个带 Zen API key 的 Worker。运行{" "}
-          <Mono>npm run setup</Mono> 自动配置出口，然后把 key 填进{" "}
-          <Mono>data/config.json</Mono>。
+          在 <a href="#workers" className="text-accent-fg underline">Worker 页</a>{" "}
+          新增一个：匿名 Worker 不需要 key，认证 Worker 填你自己的 Zen API key。
         </p>
       </div>
     );
   }
 
   return (
-    <table className="w-full border-collapse text-left">
-      <thead>
-        <tr className="border-b border-border-strong text-text-muted">
-          <th className="py-2 font-medium">Worker</th>
-          <th className="py-2 font-medium">状态</th>
-          <th className="py-2 font-medium">出口 IP</th>
-          <th className="py-2 font-medium">API key</th>
-        </tr>
-      </thead>
-      <tbody>
-        {workers.map((w) => {
-          const status = workerStatus(w);
-          return (
-            /* 行高 44px = 宽松密度，同时满足触摸目标 ≥44px。 */
-            <tr
-              key={w.id}
-              className="relative border-b border-border last:border-0"
-              style={{ height: "44px" }}
-              data-worker={w.id}
-            >
-              <td className="pl-3">
-                {/* 行状态用 3px 左边框实色 —— 背景色块在 25% alpha 下只有 1.41 对比度（见 RowMark）。 */}
-                <RowMark tone={status.tone} />
-                <Mono>{w.id}</Mono>
-                {w.name !== "" && <span className="ml-2 text-text-muted">{w.name}</span>}
-              </td>
-              <td>
-                <StatusIndicator tone={status.tone} icon={status.icon} label={status.label} />
-              </td>
-              <td>
-                {w.egressIp === null ? (
-                  <span className="text-text-muted">未探测</span>
-                ) : (
-                  <Mono>{w.egressIp}</Mono>
-                )}
-              </td>
-              <td>
-                {w.apiKey.present ? (
-                  /* 只给指纹 —— 凭证绝不出进程。指纹供人眼比对「是不是我刚填的那个」。 */
-                  <Mono>{w.apiKey.fingerprint}</Mono>
-                ) : (
-                  <span className="text-error">未配置</span>
-                )}
-              </td>
-            </tr>
-          );
-        })}
-      </tbody>
-    </table>
+    <SimpleTable
+      label="Worker 状态"
+      rows={workers}
+      columns={WORKER_COLUMNS}
+      rowKey={(w) => w.id}
+      /* 行状态用 3px 左边框实色 —— 背景色块在 25% alpha 下只有 1.41 对比度（见 RowMark）。 */
+      rowTone={(w) => workerStatus(w).tone}
+      rowAttr="data-worker"
+    />
   );
 }
 
@@ -188,25 +179,33 @@ function IsolationPanel({
       }
     >
       <StatusIndicator tone={status.tone} icon={status.icon} label={status.label} />
+      {sharedGroups.length > 0 && (
+        <p className="mt-2 text-error">
+          标记「共用」的 Worker 访问 IP 回显目标时使用<Strong>同一个</Strong>公网 IP。
+        </p>
+      )}
       <p className="mt-3 text-text-muted">
         仅反映 IP 回显目标的出口；Zen 实际出口需核对发往 opencode.ai 的连接。
         已保存的 IP 是最后一次成功探测结果，不代表当前仍然可用。
       </p>
 
-      {sharedGroups.length > 0 && (
-        <div className="mt-3">
-          <p className="text-error">
-            以下 Worker 访问 IP 回显目标时使用<Strong>同一个</Strong>公网 IP：
-          </p>
-          <ul className="mt-2 space-y-1">
-            {sharedGroups.map((g) => (
+      {groups.length > 0 && (
+        <ul className="mt-3 space-y-1" aria-label="回显出口分组">
+          {groups.map((g) => {
+            const shared = g.workerIds.length > 1;
+            return (
               <li key={g.egressIp}>
                 <Mono>{g.egressIp}</Mono>
-                <span className="text-text-muted">：{g.workerIds.join("、")}</span>
+                <span className="text-text-muted"> ← {g.workerIds.join("、")}</span>
+                {shared && (
+                  <span className="ml-2">
+                    <StatusIndicator tone="error" icon="✕" label="共用" />
+                  </span>
+                )}
               </li>
-            ))}
-          </ul>
-        </div>
+            );
+          })}
+        </ul>
       )}
 
       {unknownWorkerIds.length > 0 && (
@@ -216,22 +215,13 @@ function IsolationPanel({
         </p>
       )}
 
-      {groups.length > 0 && (
-        <ul className="mt-3 space-y-1">
-          {groups.map((g) => (
-            <li key={g.egressIp}>
-              <Mono>{g.egressIp}</Mono>
-              <span className="text-text-muted">
-                {" "}
-                ← {g.workerIds.join("、")}
-                {g.workerIds.length > 1 && " ⚠ 共用"}
-              </span>
-            </li>
-          ))}
-        </ul>
-      )}
-
-      {probe.error !== null && <p className="mt-3 text-error">探测失败：{probe.error}</p>}
+      <div aria-live="polite">
+        {probe.error !== null && (
+          <p role="alert" className="mt-3">
+            <StatusIndicator tone="error" icon="✕" label={`探测失败：${probe.error}`} />
+          </p>
+        )}
+      </div>
       {probe.results !== null && probe.error === null && (
         <ul className="mt-3 space-y-1 text-text-muted">
           {probe.results.map((r: ProbeResult) => (
@@ -261,7 +251,6 @@ export function OverviewPage({ data }: { data: Overview }) {
   /*
    * 目录状态。`freeCount` 为 **null 表示还没拿到目录**（不是 0 个免费模型）——
    * 两者的下一步完全不同：前者查网络/CA，后者查 freeSuffix。
-   * Phase 8 的 doctor 为此专门分了两层，这里沿用同一个判据。
    */
   const catalogTone: "success" | "warn" | "error" =
     data.catalog.freeCount === null ? "error" : data.catalog.freeCount === 0 ? "warn" : "success";
@@ -323,50 +312,16 @@ export function OverviewPage({ data }: { data: Overview }) {
         <WorkerTable workers={data.workers} />
       </Panel>
 
-      <Panel title="网关">
-        <dl className="grid grid-cols-[auto_1fr] gap-x-6 gap-y-2">
-          <dt className="text-text-muted">监听</dt>
-          <dd>
-            <Mono>127.0.0.1:{data.gateway.port}</Mono>
-          </dd>
-          <dt className="text-text-muted">上游</dt>
-          <dd>
-            <Mono>{data.gateway.baseUrl}</Mono>
-          </dd>
-          <dt className="text-text-muted">Relay Token</dt>
-          <dd>
-            {data.gateway.relayToken.present ? (
-              <>
-                <Mono>{data.gateway.relayToken.fingerprint}</Mono>
-                <span className="ml-2 text-text-muted">
-                  （只显示指纹；完整值在 <Mono>data/config.json</Mono>）
-                </span>
-              </>
-            ) : (
-              <span className="text-error">未配置</span>
-            )}
-          </dd>
-          <dt className="text-text-muted">最多尝试</dt>
-          <dd>{data.gateway.maxAttempts} 个 Worker</dd>
-          <dt className="text-text-muted">Clash 桥接</dt>
-          <dd>
-            {data.clash.enabled ? (
-              <>
-                已启用 ·{" "}
-                {data.clash.bridges.filter((b) => b.enabled).length}/{data.clash.bridges.length} 个内核
-                {data.clash.activeBridgeId !== null && (
-                  <span className="text-text-muted">
-                    {" "}
-                    · 当前 <Mono>{data.clash.activeBridgeId}</Mono>
-                  </span>
-                )}
-              </>
-            ) : (
-              <span className="text-text-muted">未启用</span>
-            )}
-          </dd>
-        </dl>
-      </Panel>
+      <p className="flex flex-wrap items-center gap-x-4 gap-y-1 px-1 text-text-muted" data-gateway-summary="">
+        <span>
+          监听 <Mono>127.0.0.1:{data.gateway.port}</Mono>
+        </span>
+        <span>最多尝试 {data.gateway.maxAttempts} 个 Worker</span>
+        <span>Clash 桥接{data.clash.enabled ? "已启用" : "未启用"}</span>
+        <a href="#gateway" className="text-accent-fg underline">
+          网关页查看连接与客户端配置
+        </a>
+      </p>
     </div>
   );
 }

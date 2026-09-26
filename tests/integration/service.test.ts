@@ -11,7 +11,7 @@ const SCRIPT = join(PROJECT, "scripts", "service.mjs");
 const ENTRY = join(PROJECT, "dist", "server", "server", "index.js");
 
 /*
- * service.mjs 先前完全没有测试，审核在其中查出四个真实缺陷：
+ * 这组测试守 service.mjs 的四类缺陷：
  * 误杀 PID 复用后的无关进程、restart 在 stop 失败后谎报成功、
  * 启动失败时误删活实例的状态文件、并发 start 双启动留下孤儿。
  * 这些都只有把脚本真的跑起来才测得到，故为集成测试。
@@ -186,6 +186,73 @@ describe("生命周期", () => {
   });
 });
 
+describe("优雅停机", () => {
+  it("长 SSE 未结束时 stop 仍在脚本的等待时限内完成,且流被断开", async () => {
+    const TOKEN = "service-shutdown-token-not-real";
+    const upstreamStreams: import("node:http").ServerResponse[] = [];
+    const { createServer } = await import("node:http");
+    const upstream = createServer((req, res) => {
+      if (req.method === "GET") {
+        res.writeHead(200, { "content-type": "application/json" });
+        res.end(JSON.stringify({ data: [{ id: "big-pickle" }] }));
+        return;
+      }
+      // 只发一块就挂住,模拟一条持续很久的 SSE。
+      res.writeHead(200, { "content-type": "text/event-stream" });
+      res.write('data: {"choices":[{"delta":{"content":"x"}}]}\n\n');
+      upstreamStreams.push(res);
+    });
+    await new Promise<void>((r) => upstream.listen(0, "127.0.0.1", r));
+    const upstreamPort = (upstream.address() as import("node:net").AddressInfo).port;
+    try {
+      await mkdir(dataDir, { recursive: true, mode: 0o700 });
+      await writeFile(
+        join(dataDir, "config.json"),
+        JSON.stringify({
+          version: 1,
+          gateway: { relayToken: TOKEN, baseUrl: `http://127.0.0.1:${upstreamPort}/v1` },
+          workers: [
+            { id: "w1", name: "", kind: "authenticated", apiKey: "fake-key-not-real", enabled: true, proxyId: null },
+          ],
+        }),
+        { mode: 0o600 },
+      );
+      const started = await run(["start"]);
+      expect(started.code, started.stderr).toBe(0);
+
+      const res = await fetch(`http://127.0.0.1:${port}/v1/chat/completions`, {
+        method: "POST",
+        headers: { authorization: `Bearer ${TOKEN}`, "content-type": "application/json" },
+        body: JSON.stringify({ model: "big-pickle", stream: true, messages: [] }),
+      });
+      expect(res.status).toBe(200);
+      const reader = res.body!.getReader();
+      // 确认流真的开始了,停机时它是一条在途请求。
+      expect((await reader.read()).done).toBe(false);
+      const rest = (async () => {
+        try {
+          for (;;) if ((await reader.read()).done) return "ended";
+        } catch {
+          return "cut";
+        }
+      })();
+
+      const t0 = Date.now();
+      const stopped = await run(["stop"]);
+      const elapsed = Date.now() - t0;
+      expect(stopped.code, stopped.stderr).toBe(0);
+      expect(stopped.stdout).toContain("已停止");
+      // 脚本等 10 秒;停机须在它之前自行完成。
+      expect(elapsed).toBeLessThan(10_000);
+      expect(["ended", "cut"]).toContain(await rest);
+    } finally {
+      for (const s of upstreamStreams) s.destroy();
+      upstream.closeAllConnections();
+      await new Promise<void>((r) => upstream.close(() => r()));
+    }
+  }, 30_000);
+});
+
 describe("进程身份验证", () => {
   it("状态文件指向无关进程时，stop 拒绝发信号", async () => {
     /*
@@ -327,14 +394,11 @@ describe("文件权限", () => {
 
 describe("端口解析与服务端一致", () => {
   /*
-   * 这一组是针对**我在 Phase 3 真实引入的一次回归**加的守卫。
+   * 服务端读 `config.gateway.port`，service.mjs 若不同步读取同一来源，
+   * 脚本就会去探一个没人监听的端口，健康等待超时后报「启动失败」，
+   * 而服务其实已经起来了。设了 ZG_PORT 的用例能抓到这一方向。
    *
-   * 当时我把服务端的监听端口从 `ZG_PORT` 改成读 `config.gateway.port`，
-   * 却没同步 service.mjs —— 于是脚本去探一个没人监听的端口，健康等待超时后
-   * 报「启动失败」，而服务其实已经起来了。本文件既有的 6 条用例当场全红，
-   * 那是因为它们都设了 ZG_PORT。
-   *
-   * 但**反方向没有覆盖**：用户在 config.json 里改 `gateway.port`、不设 ZG_PORT
+   * 但**反方向需要单独覆盖**：用户在 config.json 里改 `gateway.port`、不设 ZG_PORT
    * 时两处是否仍一致？那恰恰是真实用户的用法（ZG_PORT 只是测试与调试用的）。
    * 下面两条把这个方向也钉住。
    */

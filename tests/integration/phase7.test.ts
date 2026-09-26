@@ -15,7 +15,7 @@ import { StatsStore, dayKey } from "../../src/store/db/stats.ts";
 import { AffinityStore } from "../../src/store/db/affinityStore.ts";
 
 /**
- * Phase 7 的集成测试 —— 统计写入与亲和持久化，对着**真实假上游 + 真实 SQLite** 跑。
+ * 统计集成测试 —— 统计写入与亲和持久化，对着**真实假上游 + 真实 SQLite** 跑。
  *
  * ## 为什么这些必须是集成测试
  *
@@ -23,8 +23,8 @@ import { AffinityStore } from "../../src/store/db/affinityStore.ts";
  * 那些入参凑对了**：中间隔着重试链的 `onAttempt`、流末尾的 `onDone`、
  * 以及「用量归属实际承接者而非候选链首位」这条只在重试发生时才分叉的规则。
  *
- * Phase 5/6 已有两次先例：「一条客户端请求发了几次上游」与「会话绑定停在
- * 候选链首位」都只有集成测试查得出来 —— 纯单测看不见跨层的次序。
+ * 「一条客户端请求发了几次上游」与「会话绑定停在候选链首位」同理，
+ * 都只有集成测试查得出来 —— 纯单测看不见跨层的次序。
  */
 
 const TOKEN = "phase7-test-token-x";
@@ -148,9 +148,8 @@ describe("统计真的经转发路径落库", () => {
     });
     /*
      * 耗时**不断言具体值**（真实 IO，无法稳定），但要断言它不是写死的 ——
-     * 先前这里写 `toBeGreaterThanOrEqual(0)`，而耗时永远 ≥0，于是把
-     * `latencyMs: record.latencyMs` 改成 `latencyMs: 0` 后全套测试仍然全绿
-     * （第七轮审核实测）。唯一能让那条断言红的值是 null。
+     * 写 `toBeGreaterThanOrEqual(0)` 不够，耗时永远 ≥0，于是把
+     * `latencyMs: record.latencyMs` 改成 `latencyMs: 0` 后全套测试仍然全绿。唯一能让那条断言红的值是 null。
      *
      * 真正钉住"从转发路径流到 DB"这件事的是下面那条注入时钟的用例。
      */
@@ -204,11 +203,10 @@ describe("统计真的经转发路径落库", () => {
 
 describe("诊断头三个都在两条路径上", () => {
   /*
-   * 「诊断手段只在一半路径可用」这个形态在本项目发生过三次：`route`、`free`，
-   * 以及第七轮审核查出的 `attempts` —— 文档写着"前三个头在成功与失败时都有"
-   * 而它只在失败路径设置。
+   * 「诊断手段只在一半路径可用」这个形态容易出现：`route`、`free`、`attempts`
+   * 都曾只在一条路径上设置，而文档写着"前三个头在成功与失败时都有"。
    *
-   * 这条测试同时钉住三个头在**两条路径**上都存在，免得第四次。
+   * 这条测试同时钉住三个头在**两条路径**上都存在。
    */
   it("成功路径带 worker/route/attempts", async () => {
     const app = await makeApp(config());
@@ -258,8 +256,8 @@ describe("诊断头三个都在两条路径上", () => {
 
 describe("时刻真的从转发路径流到库里", () => {
   /*
-   * 第七轮审核查出的最有后果的空壳：把 `recordAttempt` 与 `recordUsage` 的
-   * `at` 字段**双双写死 0**，45 条相关测试全绿。
+   * 没有这组时，把 `recordAttempt` 与 `recordUsage` 的
+   * `at` 字段**双双写死 0**，相关测试全绿。
    *
    * 后果不是"少一个字段"：`at` 经 `dayKey()` 成为 `model_usage` 的**主键之一**，
    * 写死 0 意味着所有用量永久堆在 `1970-01-01` 一行里、`sinceDay` 过滤全部失效、
@@ -341,8 +339,8 @@ describe("重试链的统计语义", () => {
     /*
      * attempt_index 要能回答"哪次尝试是第几次"。
      *
-     * 先前这里写 `.map(...).sort()` —— 而 `.sort()` 恰好销毁了"顺序"这个
-     * 被断言的性质，它只验证了集合 `{0,1}`。第七轮审核实测：把
+     * 不能写 `.map(...).sort()` —— `.sort()` 恰好销毁了"顺序"这个
+     * 被断言的性质，只验证了集合 `{0,1}`。实测：那样写时把
      * `attemptIndex: attemptIndex++` 改成 `1 - attemptIndex++`（索引倒序）
      * 后全绿。
      *
@@ -361,8 +359,8 @@ describe("重试链的统计语义", () => {
 
   it("用量归属**实际承接者**,不是候选链首位", async () => {
     /*
-     * 这条只有集成测试查得出来，而且它有先例：Phase 5 的「会话绑定停在候选链
-     * 首位而非实际承接者」是同一个形态的缺陷。若用量记到 w1 名下，
+     * 这条只有集成测试查得出来：「会话绑定停在候选链首位而非实际承接者」
+     * 是同一个形态的缺陷。若用量记到 w1 名下，
      * 「哪个账号烧了多少 token」这个问题的答案就是错的 —— 而那正是
      * 多账号出口隔离场景下最要紧的一个数字。
      */
@@ -394,7 +392,7 @@ describe("重试链的统计语义", () => {
      * 先发一次**成功**请求确立基线。
      *
      * 少了这一步，"403 之后计数为 0" 对「正确地没记」与「统计根本没接线」
-     * 是同一个观测值 —— 第七轮审核实测：把 `recordAttempt` 整个不接，
+     * 是同一个观测值 —— 实测：把 `recordAttempt` 整个不接，
      * 这条测试仍然通过。有了基线，没接线会让第一个断言先红。
      */
     await (await app.request("/v1/chat/completions", relay(chatBody()))).text();
@@ -412,11 +410,11 @@ describe("重试链的统计语义", () => {
 
 describe("writeFailures 有了生产读者（/health）", () => {
   /*
-   * 第七轮审核：两个 store 的 `writeFailures()` **没有任何生产读者** ——
-   * 与 `Scheduler.snapshot()` 同一形态。一个一直写失败的库会安静地给出
+   * 两个 store 的 `writeFailures()` 若**没有任何生产读者**（与
+   * `Scheduler.snapshot()` 同一形态），一个一直写失败的库会安静地给出
    * 全 0 报表，而那看起来像「没人用」。
    *
-   * 放在 `/health` 而不是等 Phase 8 的 doctor：`service.mjs` 本来就在轮询
+   * 放在 `/health` 而不是只放 doctor：`service.mjs` 本来就在轮询
    * 这个端点。断言必须验**非 0 会被报出来** —— 只验字段存在的话，
    * 把它写死成 0 仍然通过（实测过）。
    */
@@ -447,8 +445,7 @@ describe("writeFailures 有了生产读者（/health）", () => {
 
 describe("探测结果落盘（recordProbe 有了生产调用点）", () => {
   /*
-   * 第七轮审核：`recordProbe` 零调用点**且零测试** —— 那条 SQL 从未执行过，
-   * 而 `probeAll` 的结果只存在于返回值里。于是「这个代理上周是不是换过
+   * `recordProbe` 若零调用点，`probeAll` 的结果就只存在于返回值里。于是「这个代理上周是不是换过
    * 出口 IP」无法回答，而 `egressIp` 正是出口隔离判定的唯一依据。
    */
   it("probeProxy 把结果写进 probe_results", async () => {
@@ -515,7 +512,7 @@ describe("「我们自己丢了用量」经转发路径落库", () => {
     /*
      * **分块**写出而不是一次 `res.end()`。
      *
-     * 实测差别（我第一版写错了，记下来）：一次性 feed 一个巨大 JSON 时
+     * 实测差别：一次性 feed 一个巨大 JSON 时
      * `usage()` 仍能拿到（那一次 feed 里 `buffered` 还没超限就把整段收下了，
      * 尾部的 usage 恰好在里面），于是结果是「有用量 **且** dropped」。
      * 而真实的流式响应是**分块**到达的 —— 那时 `buffered` 在中途就超限，
@@ -539,7 +536,7 @@ describe("「我们自己丢了用量」经转发路径落库", () => {
     await (await app.request("/v1/chat/completions", relay(chatBody()))).text();
 
     /*
-     * 实测结果（比我预期的更有信息量，记下来）：`requestsWithUsage: 1`
+     * 实测结果：`requestsWithUsage: 1`
      * **且** `requestsDroppedUsage: 1`。
      *
      * 两个标记是**独立**的，这是对的 —— `dropped` 的语义是「我们**没能完整**
@@ -569,7 +566,7 @@ describe("「我们自己丢了用量」经转发路径落库", () => {
 
 describe("网关拒绝真的经转发路径落库", () => {
   /*
-   * 规划要求的第六项统计。六条在打上游**之前**返回的路径此前全部零记录 ——
+   * 网关拒绝统计。六条在打上游**之前**返回的路径都要有记录 ——
    * 而这里要验的正是「转发路径真的调了 `recordRejection`」，
    * 单测只能验 store 按给定入参写对了行。
    */

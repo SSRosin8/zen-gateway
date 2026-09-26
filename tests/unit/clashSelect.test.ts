@@ -8,7 +8,7 @@ import {
 import { ClashConfigSchema, type ClashBridge, type ClashConfig } from "../../src/shared/schema.ts";
 
 /*
- * 多 Clash 内核的候选与择优（Phase 10 下半）。
+ * 多 Clash 内核的候选与择优。
  *
  * `pickBridge`（`pool.ts`）已经会选，但它是**纯配置推导** —— 它从不知道
  * 内核是否活着。auto 模式注释里那个"健康"此前没有任何东西去测量，

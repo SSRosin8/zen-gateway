@@ -18,12 +18,12 @@ const PROJECT = resolve(import.meta.dirname, "..", "..");
  * Node 跑一遍才会炸成 ERR_UNSUPPORTED_TYPESCRIPT_SYNTAX。
  *
  * 这条守卫曾经存在于迁移脚本的测试里(当时 ConfigError 用参数属性写成,
- * 正是这样被抓出来的),迁移功能删除后一并消失。Phase 8 的 setup.mjs 与
+ * 正是这样被抓出来的),迁移功能删除后一并消失。setup.mjs 与
  * doctor.mjs 会 import 这些共享模块来复用 schema 与配置读写 —— 不复用就会
  * 退化成两份定义,脚本写出的配置迟早与 schema 不一致。所以守卫必须常驻。
  */
 
-/** 以 .mjs 形式 import 指定模块并调用一小段代码,模拟 Phase 8 的脚本。 */
+/** 以 .mjs 形式 import 指定模块并调用一小段代码,模拟 scripts/ 下的脚本。 */
 async function runAsScript(body: string): Promise<{ stdout: string; stderr: string }> {
   const dir = await mkdtemp(join(tmpdir(), "zg-strip-"));
   // 放在项目内,否则相对 import 解析不到 src/ 与 node_modules。
@@ -103,7 +103,7 @@ describe("共享模块可被 .mjs 脚本直接 import(strip-only 模式)", () =>
     /*
      * 从唯一真相取值,不写档位字面量。
      *
-     * 先前这里写的是 `/version: 1 target: 1/` —— 第七轮加档位 2 时它红了,
+     * 若写成 `/version: 1 target: 1/`,新增档位时它就会红,
      * 而红的原因与这条测试要验的事(共享模块能被 .mjs 直接 import)毫无关系。
      * 这正是纪律 #7 的「会漂的数字不该写进断言」:档位号每加一条迁移就变一次。
      *
@@ -114,7 +114,7 @@ describe("共享模块可被 .mjs 脚本直接 import(strip-only 模式)", () =>
     expect(stdout.trim()).toBe(`version: ${target} target: ${target}`);
   });
 
-  it("出口链路模块可用(Phase 8 的 doctor 要用它做分层诊断)", async () => {
+  it("出口链路模块可用(doctor 要用它做分层诊断)", async () => {
     const { stdout } = await runAsScript(`
       import { buildIsolationReport } from "./src/core/proxy/probe.ts";
       import { classifyStatus } from "./src/core/failures.ts";

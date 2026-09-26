@@ -30,7 +30,7 @@ import { EgressSetupError, fetchUpstream, type UpstreamDeps, type UpstreamReques
  *
  * 400/422 这类是**请求本身**的问题,不是 Worker 的问题。此时必须把该 Worker
  * 记为成功,否则一个客户端的坏请求会把所有健康 Worker 逐个打进冷却 ——
- * 一次拼错的请求体就能让整个网关瘫痪。冷却动作在 Phase 5 接入,
+ * 一次拼错的请求体就能让整个网关瘫痪。冷却动作由调度层执行,
  * 这里通过 `onAttempt` 把「这次失败该不该归咎于 Worker」如实报出去。
  */
 
@@ -40,7 +40,7 @@ export type AttemptTarget = {
   readonly proxyId: string | null;
 };
 
-/** 单次尝试的结局,供调用方记账(Phase 5 接冷却与亲和,Phase 7 接统计)。 */
+/** 单次尝试的结局,供调用方记账(冷却、亲和与统计)。 */
 export type AttemptRecord = {
   readonly workerId: string;
   /** null 表示这次尝试成功。 */
@@ -55,14 +55,14 @@ export type AttemptRecord = {
   /**
    * 上游状态码。**建连之前就失败时为 null**（传输错误、出口配置错误）——
    * 那种情况下根本没有状态码，而写 0 或 -1 会让「网关自己失败」和
-   * 「上游返回了某个码」在统计里混成一类（Phase 7 的 `upstream_attempts.status`
+   * 「上游返回了某个码」在统计里混成一类（`upstream_attempts.status`
    * 允许 NULL 正是为此）。
    */
   readonly status: number | null;
   /**
    * 这次尝试耗时。从发起到拿到响应头（或抛错）为止，不含读体。
    *
-   * **非负整数** —— 由 `elapsedMs()` 保证，见那里的说明（缺口 #19）。
+   * **非负整数** —— 由 `elapsedMs()` 保证，见那里的说明。
    */
   readonly latencyMs: number;
 };
@@ -111,6 +111,14 @@ export type RetryInput = {
   readonly body: Uint8Array | null;
   readonly signal?: AbortSignal;
   readonly deps: UpstreamDeps;
+  /**
+   * 请求的模型是否经过在架目录核验(免费判定做了目录交集且命中)。
+   *
+   * 为 false 时上游 401 不归咎 Worker:免 key 请求未知模型时上游返回 401
+   * `ModelError`,那是模型名的问题;没有目录核验就无法把它与坏 key 区分开。
+   * 省略视为已核验,保持 401 归咎的默认处置。
+   */
+  readonly modelVerified?: boolean;
   /** 每次尝试结束后回调,供记账。 */
   readonly onAttempt?: (record: AttemptRecord) => void;
   /**
@@ -126,7 +134,7 @@ export type RetryInput = {
 /**
  * 依次尝试候选 Worker,返回**响应体未被消费**的结果。
  *
- * 不做退避等待:那属于调度状态机(Phase 5)。这里只负责「换下一个」的顺序
+ * 不做退避等待:那属于调度状态机。这里只负责「换下一个」的顺序
  * 与「body 该不该取消」的非对称,这两件事是不变量,必须在本层就正确。
  */
 export async function runRetryChain(input: RetryInput): Promise<RetryResult> {
@@ -254,7 +262,8 @@ export async function runRetryChain(input: RetryInput): Promise<RetryResult> {
      * 不变量 #4:请求本身的问题不归咎于 Worker。
      * `bad_request` 换 Worker 也一样失败,所以既不重试也不冷却。
      */
-    const blameWorker = failure !== "bad_request";
+    const unverifiedModel401 = response.status === 401 && input.modelVerified === false;
+    const blameWorker = failure !== "bad_request" && !unverifiedModel401;
     const record: AttemptRecord = {
       workerId: target.workerId,
       failure,

@@ -88,6 +88,7 @@ export function typeForFailureKind(kind: FailureKind): GatewayErrorType {
     case "timeout":
       return "upstream_unreachable";
     case "auth":
+    case "forbidden":
     case "rate_limit":
       /*
        * 走到这里意味着「分类为 auth/rate_limit 但没有上游响应」——

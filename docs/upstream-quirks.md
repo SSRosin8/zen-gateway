@@ -103,48 +103,28 @@ key 的目录槽位。不能由少量样本推断完整目录按某个单一维�
 
 ## 真实 OpenCode CLI 与多出口
 
-**观察日期**：2026-09-26。
 **客户端**：OpenCode CLI v2.0.12，使用原生 `opencode run --standalone --format json`。
+
 隔离 mock 确认 `providers.opencode.settings` 足以覆盖 Base URL 和 API key；当前推荐配置
 只覆盖这两个连接设置，保留 OpenCode 自己的 SDK package 和模型目录。客户端模型目录中
 没有的模型会在 CLI 侧报 `Model unavailable`，不应归因于网关。
-**历史范围**：当时的验收夹具显式补了逐模型 package/settings，覆盖 3 个未绑定到当前
-Worker 的临时 Clash 出口、3 把已配置认证 key 和一个临时构造的不发送 key 的匿名 Worker、
-4 个免费模型，共 48 次经网关请求。它证明了网关转发能力，但不能推出客户端必须覆盖
-模型目录；当前接入仍只使用 provider 连接设置。测试没有输出 key、出口名称或公网 IP；
-每次请求都在 Clash `/connections` 中核对到 `opencode.ai`、所选临时出口链路且不是
-`DIRECT`。
 
-结果按上游响应分类：
+以下测量都在 2026-09-26 进行，测试没有输出 key、出口名称或公网 IP。
 
-- `mimo-v2.6-flash-free`、`big-pickle`、`space-bunny-free` 的 Chat Completions，以及
-  `muse-spark-1.3-contributor-free` 的 Responses：该历史夹具中的请求均返回 `OK`。这只
-  说明当时的临时出口和上游策略允许该样本；其他出口仍可能受地域限制。
-- 当前没有可用于 Messages 真实验收的免费模型。
+| 请求范围 | 结果 | 不能推出的结论 |
+|---|---|---|
+| 多出口矩阵：验收夹具显式补了逐模型 package/settings；3 个未绑定到当前 Worker 的临时 Clash 出口 × 3 把已配置认证 key 和 1 个临时构造的不发送 key 的匿名 Worker × 4 个免费模型，共 48 次经网关请求；每次都在 Clash `/connections` 中核对到 `opencode.ai`、所选临时出口链路且不是 `DIRECT` | `mimo-v2.6-flash-free`、`big-pickle`、`space-bunny-free` 的 Chat Completions 与 `muse-spark-1.3-contributor-free` 的 Responses 均返回 `OK`；网关在多个真实命中的出口上转发，并保持认证与匿名 Worker 的凭证选择 | 客户端必须覆盖模型目录（当前接入只用 provider 连接设置）；其他出口同样可用（仍可能受地域限制） |
+| 用户默认 OpenCode 会话与网关日志 | 分别观察到 MiMo、Big Pickle 的成功用量；默认会话中 Muse Spark 受地域限制，而经网关的该轮出口样本成功 | 一次地域拒绝可推广到所有出口；两者矛盾（地域限制是出口与上游策略的组合结果） |
+| 旧矩阵：同时启用 OpenCode 权限拒绝规则，并做逐变量控制实验 | 旧矩阵得到 403；控制实验显示关键变量是该权限规则，空的 XDG 目录本身不构成失败原因 | 旧矩阵的 403 代表上游可用性 |
+| 匿名专项复核：三个真实出口，每次只启动一个匿名 Worker；每个 CLI 进程设置 `PWD`、绝对 `OPENCODE_CONFIG`、隔离 XDG 目录和全新会话 | Big Pickle、Space Bunny Chat 在三个出口上均返回 `200`；MiMo 在该隔离客户端目录中未注册，CLI 直接报 `Model unavailable`，没有发出网关请求；Muse Spark Responses 均因当前地域策略返回 `403`；三个临时运行库都只出现对应的匿名 Worker，未出现认证 Worker | MiMo 不能经网关匿名使用（请求未发出）；Muse 的 403 与 Worker 类型有关 |
+| 本分支复核（OpenCode CLI v2.0.12，隔离配置与状态目录，3 个认证 Worker）| Big Pickle、Nemotron 3 Ultra 的 Chat Completions 与 Muse Spark 1.3 的 Responses 经网关返回 `OK`；`space-bunny-free`、`mimo-v2.5-free` 在该客户端目录中未注册，CLI 报 `Model unavailable`。同期 Clash `/connections` 显示 `opencode.ai` 被本机 DNS 解析到内网地址，命中 `IPCIDR,10.0.0.0/8 → DIRECT` | 网关的出口绑定已对 Zen 生效；该环境下各 Worker 的 Zen 请求实际共用直连出口，需先调整 Clash 规则 |
+| 匿名 `/v1/models` 的 CA 对照 | 服务进程未设置 `NODE_EXTRA_CA_CERTS` 时返回 `502 upstream_unreachable`；带上服务使用的 CA 后返回 `200`，目录槽位为 `keyless` | 502 与出口/上游策略有关，或上述地域 403 与信任库有关；两类条件不能互相归因 |
 
-用户在默认 OpenCode 会话中观察到 Muse Spark 受地域限制，而经网关的本轮出口样本
-可以成功；两者并不矛盾，地域限制属于出口和上游策略的组合结果，不能把一次拒绝推广
-到所有出口。
-
-这组结果说明网关能够在多个真实命中的出口上转发，并保持认证与匿名 Worker 的
-凭证选择。用户默认 OpenCode 会话以及网关日志也分别观察到 MiMo、Big Pickle 的
-成功用量；Muse 是否成功与出口地域有关。一次同时启用 OpenCode 权限拒绝规则的旧
-矩阵曾得到 403；逐变量控制实验显示关键变量是该权限规则，空的 XDG 目录本身不构成
-失败原因，因此旧矩阵不作为上游可用性的结论。Messages 仍只有本地协议级验证，
-等待上游提供可验模型。
-
-同日后续的匿名专项复核改用三个真实出口，每次只启动一个匿名 Worker，并为每个 CLI
-进程设置 `PWD`、绝对 `OPENCODE_CONFIG`、隔离 XDG 目录和全新会话。三个出口上的
-Big Pickle、Space Bunny Chat 请求均返回 `200`；MiMo 在该隔离客户端目录中未注册，
-CLI 直接报 `Model unavailable`，没有发出网关请求；Muse Spark Responses 均因当前地域策略
-返回 `403`。三个临时运行库都只出现对应的匿名 Worker，未出现认证 Worker。另行对匿名 `/v1/models` 做 CA
-对照：服务进程未设置 `NODE_EXTRA_CA_CERTS` 时返回 `502 upstream_unreachable`，带上
-服务使用的 CA 后返回 `200`，响应中的目录槽位为 `keyless`。这两类结果分别属于出口/上游
-策略与服务信任库条件，不能互相归因。
+当前没有可用于 Messages 真实验收的免费模型；Messages 仍只有本地协议级验证，等待
+上游提供可验模型。
 
 ## 重新测量的边界
 
 `discover:upstream` 使用 Node 的网络栈和它自己的环境变量，不能证明服务进程的
 CA、代理、DNS、超时或请求头与脚本完全相同。验证网关时应运行服务进程并使用真实
-客户端；出口归属应核对实际 Clash `/connections`，不能只探测一个可能命中不同
-规则的第三方回显服务。
+客户端；出口归属见 [回显 IP 的测量范围](usage.md#回显-ip-的测量范围)。

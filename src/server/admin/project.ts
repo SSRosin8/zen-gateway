@@ -68,8 +68,8 @@ export type RuntimeWorkerState = {
  *
  * `config.json` 知道「配了什么」，`Scheduler` 知道「现在能不能用」，
  * 而用户问的那个问题（「它为什么没在用我这个账号」）**必须两者一起**
- * 才能回答。先前 `npm run status` 只报进程信息、Phase 8 的 `doctor` 只能报
- * 配置形态 —— 就是因为进程外没有任何地方同时持有这两半。
+ * 才能回答。进程外没有任何地方同时持有这两半，所以 `npm run status` 与
+ * `doctor` 都只能拿到其中一边，这个问题只能由服务自己答。
  *
  * ## `inPool` 与 `enabled` 必须分开显示
  *
@@ -112,14 +112,11 @@ export function workerViews(
       lastFailure: state?.lastFailure ?? null,
       /*
        * 出口 IP 来自绑定的代理；`proxyId` 为 null（本机直连）时来自
-       * `gateway.directEgressIp`（缺口 #28）。
-       *
-       * 先前直连一律给 null，理由是"没有实测过本机出口，而编一个值会让隔离
-       * 报告把所有直连 Worker 归成一组『已知相同』" —— **那个理由在没有
-       * 实测值时是对的**，而现在探测会真的把它测出来并落盘。
+       * `gateway.directEgressIp`，由探测实测并落盘。不能编一个值：那会让隔离
+       * 报告把所有直连 Worker 归成一组『已知相同』。
        *
        * 这条很要紧：直连出口与某个代理 NAT 到同一个公网 IP 恰好是
-       * 「看起来隔离其实没隔离」的形态，而它此前结构上不可能被发现。
+       * 「看起来隔离其实没隔离」的形态，直连一律给 null 就永远发现不了它。
        * 仍未探测过时是 null（→ 隔离报告里算「未知」，不算已隔离）。
        */
       egressIp:
@@ -161,8 +158,8 @@ export function proxySummary(proxies: readonly Proxy[]): {
 /**
  * Clash 配置的投影。`apiSecret` 换成指纹。
  *
- * `localProxyPort` 原样给出 —— 它不是凭证，而且它是 Phase 8 实测出的那个
- * 高风险字段（与内核实际 `mixed-port` 不一致时桥接静默连到没人监听的端口），
+ * `localProxyPort` 原样给出 —— 它不是凭证，而且它是个高风险字段
+ * （与内核实际 `mixed-port` 不一致时桥接静默连到没人监听的端口），
  * 所以界面上必须能看到它。
  */
 export function clashView(config: Config): {
@@ -196,15 +193,10 @@ export function clashView(config: Config): {
 /**
  * Worker 池计数 —— 从投影推导，**不另外问一次调度器**。
  *
- * `Scheduler.counts()` 也能给这个数，但那会让同一个响应里的
- * `pool.ready` 与 `workers[].ready` 来自两次独立的查询，中间状态可能变过；
- * 而用户会把它们当成一句话读（「3 个 Worker，2 个就绪」后面跟着一张
- * 三行的表）。从同一份 `views` 推导，两者结构上不可能矛盾。
- *
- * 这也顺带回答了 Phase 8 登记的那个问题（为什么不用 `counts()`）：
- * 这里需要的是**与列表同源**的计数。至于它当前有没有别的读者 ——
- * 那件事的唯一真相是调用点本身，由 `exportsReferenced.test.ts` 的关卡看着，
- * 不在注释里存一份会漂的副本（缺口 #12 的结论）。
+ * 另问一次调度器会让同一个响应里的 `pool.ready` 与 `workers[].ready` 来自
+ * 两次独立的查询，中间状态可能变过；而用户会把它们当成一句话读（「3 个
+ * Worker，2 个就绪」后面跟着一张三行的表）。从同一份 `views` 推导，
+ * 两者结构上不可能矛盾。
  */
 export function poolCounts(views: readonly WorkerView[]): { ready: number; total: number } {
   const inPool = views.filter((v) => v.inPool);
@@ -220,9 +212,9 @@ export function poolCounts(views: readonly WorkerView[]): { ready: number; total
  *
  * ## 订阅 URL 只取**token 部分**，不取整条
  *
- * 第八轮审核查出：先前 push 的是整条 `https://host/path?token=SECRET`，
- * 而测试断言的是 `not.toContain(secret.slice(0, 8))` —— 对每个订阅来说
- * 那 8 个字符都是 `"https://"`。于是
+ * 不能 push 整条 `https://host/path?token=SECRET`：测试断言的是
+ * `not.toContain(secret.slice(0, 8))` —— 对每个订阅来说那 8 个字符
+ * 都是 `"https://"`。于是
  *
  * - 真正是凭证的那段 token **完全没被检查**；
  * - 而任何含订阅的配置都会让断言**误报**，因为 `gateway.baseUrl`
@@ -264,7 +256,7 @@ export { isUsable, isWorkerReady };
 export type { Worker };
 
 /* ------------------------------------------------------------------ *
- * 其余页面的投影（Phase 9 批次 2）
+ * 其余页面的投影
  * ------------------------------------------------------------------ */
 
 /**
@@ -352,9 +344,9 @@ export function modelViews(config: Config, snapshot: CatalogSnapshot | null): Mo
       /*
        * `surfacesFor` 终于有了生产调用点 —— 但**只作展示**，不参与放行判定。
        *
-       * 缺口 #10 说清了为什么不能顺手把它接成闸门:默认值是
+       * 不能顺手把它接成闸门:默认值是
        * `["chat","responses"]`，按它放行会让默认配置下**所有**模型的
-       * `/v1/messages` 请求被拒 —— 而那个面 Phase 6 刚验证可用。
+       * `/v1/messages` 请求被拒 —— 而那个面已验证可用。
        * 上游并不按模型区分面，所以当闸门缺乏依据。这里是它该有的用法。
        */
       surfaces: [...surfacesFor(entry.id, config.models)],
@@ -364,7 +356,7 @@ export function modelViews(config: Config, snapshot: CatalogSnapshot | null): Mo
 }
 
 /**
- * 订阅列表的投影（Phase 10）。
+ * 订阅列表的投影。
  *
  * **URL 过 `redactUrl` 后才出去** —— 订阅 URL 的 token 通常带在 query 或
  * path 里，它本身就是付费凭证。这与 apiKey 只给指纹是同一条规则：

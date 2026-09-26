@@ -6,8 +6,8 @@ import type { TokenUsage } from "../models/usage.ts";
  *
  * ## 为什么没有 transformRequest
  *
- * 规划里曾设计 `transformRequest(ctx): unknown`,把客户端请求体改写成上游形状。
- * 实际不需要,而且有害:
+ * 接口里刻意没有 `transformRequest(ctx): unknown`(把客户端请求体改写成上游形状)。
+ * 它不需要,而且有害:
  *
  * 1. Zen 为每个协议面提供**各自的原生端点**(`/chat/completions`、`/responses`、
  *    `/messages`),所以三个面都是「同形状换路径」,没有跨协议翻译的需求。
@@ -37,13 +37,20 @@ export type ProtocolSurface = {
    * 上游文档说明它返回取值与概率而非生成文本,现有流式泵不适用。
    */
   readonly streaming: "sse" | "none" | "optional";
+  /**
+   * 客户端能否用 `x-api-key` 头提供 Relay Token。
+   *
+   * Anthropic 协议的客户端 SDK 只发 `x-api-key`,不发 Bearer;其余面的客户端
+   * 都走 Bearer,多开一个头只会扩大鉴权入口。省略即不接受。
+   */
+  readonly acceptsApiKeyHeader?: boolean;
 
   /** 从请求体取模型 id;取不到返回 null(交由调用方报 400)。 */
   extractModel(body: unknown): string | null;
   /** 客户端是否要求流式。 */
   wantsStream(body: unknown): boolean;
   /**
-   * 会话亲和键(Phase 5 用)。
+   * 会话亲和键。
    *
    * 只有 Responses 面有 `previous_response_id` 这类体内会话标识;
    * 其余面返回 undefined,由 header 里的 `x-opencode-session` 承担。
@@ -66,7 +73,7 @@ export type ProtocolSurface = {
    * 只差一层嵌套,分成两个方法会让每个面多一处可以接错的地方。
    *
    * 取不到返回 null。**「没报用量」与「用了 0 个 token」必须区分开** ——
-   * 返回全零对象会让 Phase 7 的 usage 覆盖率指标永远是 100%,
+   * 返回全零对象会让 usage 覆盖率指标永远是 100%,
    * 而那个指标存在的意义正是发现没覆盖到的面。
    *
    * 字段名的归一化在 `core/models/usage.ts`,这里只负责走到 usage 对象。

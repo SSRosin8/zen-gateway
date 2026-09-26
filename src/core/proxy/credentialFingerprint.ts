@@ -11,8 +11,8 @@ import { createHash } from "node:crypto";
  * ## 为什么单独一个文件
  *
  * 这条规则有**两个**消费者:`dispatcher.ts` 的代理口令与 `egress.ts` 的
- * Controller secret。先前两处各写一遍,而 `egress.ts` 那份写的是
- * `apiSecret.length` —— 同一个问题两种做法,其中一处还带着另一处的反例注释。
+ * Controller secret。两处各写一遍就会出现同一个问题两种做法(例如一处写成
+ * `apiSecret.length`,而另一处的注释正把它当反例)。
  * 抽出来是为了让\"缓存键怎么含凭证\"只有一个真相(纪律 #4):
  * 下一个需要它的地方 import 它,而不是照着邻居再写一遍。
  *

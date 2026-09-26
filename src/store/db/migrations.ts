@@ -110,7 +110,7 @@ export const MIGRATIONS: Migration[] = [
       -- (192 字节)都能照常写进来,于是注释里「不可能有人存进原始推理内容」
       -- 这句是假的。加上字符集限制后,只有小写十六进制能通过。
       --
-      -- ⚠️ 这一版仍然可被 NUL 字节绕过(第七轮审核实测):length() 与 GLOB
+      -- ⚠️ 这一版仍然可被 NUL 字节绕过(实测):length() 与 GLOB
       -- 对 TEXT 都在首个 NUL 处停止,所以「64 个 hex + 一个 NUL + 任意明文」通过。
       -- 档位 2 补了 length(CAST(... AS BLOB)) = 64 才真正收口 ——
       -- 看这张表的当前形状要读档位 2,不是这里。
@@ -132,7 +132,7 @@ export const MIGRATIONS: Migration[] = [
       --
       -- state 的取值范围就是状态机的字母表(idle | screening | running |
       -- paused | cancelling | done),写错状态名会被 CHECK 拦住。
-      -- idle 必须在列:规划把它定义为状态机的一员,而 reducer 的单元测试
+      -- idle 必须在列:它是状态机的一员,而 reducer 的单元测试
       -- 会把每个状态都往库里存一遍 —— 少一个就会在那里炸,而不是在这里。
       CREATE TABLE batch_probe_jobs (
         id                TEXT PRIMARY KEY,
@@ -155,7 +155,7 @@ export const MIGRATIONS: Migration[] = [
     version: 2,
     name: "hash-check-counts-bytes",
     /*
-     * 修掉一个**被第七轮审核实测绕过**的约束。
+     * 修掉一个**实测可被绕过**的约束。
      *
      * 档位 1 的两个 CHECK 写的是 `length(hash) = 64`,而 SQLite 的 `length()`
      * 对 TEXT **在首个 NUL 字节处停止计数**,`GLOB` 同样只看 NUL 之前那段。
@@ -178,7 +178,7 @@ export const MIGRATIONS: Migration[] = [
      * 今天确实触发不到:生产路径每个键都经 `digestOf()`,输出恒为纯 hex。
      * 但档位 1 的注释声称「把『只存 sha256 摘要』从约定**变成结构约束**」、
      * 「任何自然语言都进不来」—— 而那句是假的。**假的强保证比没有保证更危险**:
-     * 下一条写入路径(Phase 9 的管理 API 手工绑定、导入/恢复工具、诊断回灌)
+     * 下一条写入路径(管理 API 手工绑定、导入/恢复工具、诊断回灌)
      * 的作者会读这句注释,然后不再自己检查。
      *
      * 迁移方式是**重建表 + 搬数据**:SQLite 不支持 ALTER 修改 CHECK。
@@ -229,16 +229,15 @@ export const MIGRATIONS: Migration[] = [
     version: 3,
     name: "gateway-rejections-and-dropped-usage",
     /*
-     * 补齐规划要求的第六项统计（「网关拒绝」），并把「我们自己丢了用量」
-     * 与「上游没报用量」分开 —— 两条都是第七轮审核查出的缺口。
+     * 记录「网关拒绝」这项统计，并把「我们自己丢了用量」
+     * 与「上游没报用量」分开。
      *
      * ## 一、`gateway_rejections`
      *
-     * Phase 7 的验收列了六项统计，前五项都实现了，而第六项没有表、没有列、
-     * 没有写入点。`relay.ts` 有六条在打上游**之前**就返回的路径
+     * `relay.ts` 有六条在打上游**之前**就返回的路径
      * （400 读体失败 / 413 超限 / 400 空体 / 400 非法 JSON / 403 免费闸门 /
-     * 503 无可用 Worker）全部零记录 —— 403 那条连日志都不打。
-     * 于是「我有多少请求被网关自己挡了」完全无法回答，而
+     * 503 无可用 Worker）。不记录它们，「我有多少请求被网关自己挡了」就完全
+     * 无法回答，而
      * `not_free` 与 `retired` 的处置完全不同（前者改模型名、后者删
      * `extraFreeIds` 条目），哪种发生得多也不可观测。
      *
@@ -256,10 +255,10 @@ export const MIGRATIONS: Migration[] = [
      *
      * `createUsageCollector.dropped()` 的文档明写它与 `usage() === null`
      * **必须分开**，否则「覆盖率会把我们自己丢的计成上游没报的」——
-     * 而 `recordUsage` 先前只看 `totals`，`.dropped()` 的唯一读者是一行日志。
+     * 所以 `recordUsage` 不能只看 `totals`、让 `.dropped()` 只剩一行日志这一个读者。
      *
      * 两个入口都可达：一条 >1 MiB 的 `data:` 行被整条弃掉，以及**上游中途
-     * 断流**（更常见）。与 Phase 7 刚修的「上游从不报用量显示成 100% 覆盖」
+     * 断流**（更常见）。与「上游从不报用量显示成 100% 覆盖」
      * **严格对称**，而处置方向相反 —— 一个要改代码（我们的界定常量错了），
      * 一个不用（上游就是不报）。库里两者同形则分不出来。
      *

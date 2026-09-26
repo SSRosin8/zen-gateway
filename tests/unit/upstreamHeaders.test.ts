@@ -47,7 +47,7 @@ describe("apiKey 的校验与自查消息", () => {
 
   it("**镜像了 key 的面上也报同一条消息** —— 校验先于 extra 循环", () => {
     /*
-     * 第六轮审核实测出的归因错位:Messages 面把 key 镜像进 `extra`
+     * 要防的归因错位:Messages 面把 key 镜像进 `extra`
      * (那是它能工作的前提,见 `protocols/messages.ts`),于是通用的
      * "协议面头值非法"**先命中**,上面那条刻意写的自查消息在那个面上
      * 永远走不到:
@@ -120,6 +120,19 @@ describe("剥离不可转发的头", () => {
     const h = build({ authorization: "Bearer RELAY-TOKEN-MUST-NOT-LEAK" });
     expect(h["authorization"]).toBe(`Bearer ${FAKE_KEY}`);
     expect(JSON.stringify(h)).not.toContain("RELAY-TOKEN-MUST-NOT-LEAK");
+  });
+
+  it("x-opencode- 前缀不豁免凭证规则:x-opencode-api-key 被剥掉,身份头与普通头照常透传", () => {
+    const h = build({
+      "x-opencode-api-key": "CLIENT-SUPPLIED-KEY-000",
+      "x-opencode-token": "CLIENT-SUPPLIED-KEY-001",
+      "x-opencode-session": "ses_abc123",
+      "x-opencode-feature": "on",
+    });
+    expect(h["x-opencode-api-key"]).toBeUndefined();
+    expect(h["x-opencode-token"]).toBeUndefined();
+    expect(h["x-opencode-session"]).toBe("ses_abc123");
+    expect(h["x-opencode-feature"]).toBe("on");
   });
 
   it("客户端的 x-api-key 也被剥掉", () => {

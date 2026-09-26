@@ -4,7 +4,7 @@
 
 ## 系统边界
 
-zen-gateway 是本机单用户 HTTP 网关。请求经过 Relay Token 鉴权、原始体读取、免费模型判定、协议能力判定、Worker 选择、上游尝试和流式透传，再经配置的直连出口或本机 Clash 出口访问 OpenCode Zen；IP 回显报告用于发现探测目标的共用出口，Zen 实际连接需单独核对。
+zen-gateway 是本机单用户 HTTP 网关。请求经过 Relay Token 鉴权、原始体读取、免费模型判定、协议能力判定、Worker 选择、上游尝试和流式透传，再经配置的直连出口或本机 Clash 出口访问 OpenCode Zen。
 
 网关不提供多用户账户系统、管理面远程认证、provider 抽象、静态网站托管或部署编排。上游地址、免费规则、Worker、出口和运行参数由配置文件决定。
 
@@ -26,11 +26,13 @@ shared 不能导入 node:*，因为它会被浏览器构建。Node 专属能力�
 
 server/index.ts 先加载严格校验的 config.json，再尝试打开 SQLite，随后创建唯一的 EgressService、Scheduler 和 ModelCatalog，恢复亲和与批量探测状态，组装路由并监听 loopback。已创建的 store 会把写入失败累计到健康信息；数据库在启动时打不开则停用统计、亲和持久化和批量探测，并记录日志，转发仍可用。目前这类初始化失败没有进入健康计数，不能把 storeWriteFailures 为零当作数据库可用的证明。
 
-启动监听后异步预热目录。预热失败不阻止服务；模型路由会报告“从未成功取得目录”的上游不可达。目前关闭信号仅等待出口连接池关闭后退出进程，尚未显式停止 HTTP server 接收请求、排空在途请求或关闭数据库；完整的优雅关闭仍需实现。
+启动监听后异步预热目录。预热失败不阻止服务；模型路由会报告“从未成功取得目录”的上游不可达。
+
+SIGTERM/SIGINT 触发优雅关闭：先停止 HTTP server 接收新连接，在有界时间内排空在途请求，再关闭出口连接池和数据库后退出；排空上限 5 秒（`SHUTDOWN_DRAIN_MS`），超时强制断开。
 
 PATCH /api/config 先原子写盘再替换进程内配置。并发写入串行化，并可用 expected 引用检测过期快照。配置变化会重置 Controller、dispatcher 和超时相关缓存，避免继续使用旧地址、旧凭证或旧连接。
 
-npm start 和 npm restart 先构建，再由 scripts/service.mjs 管理服务。服务端提供 /health、/v1/*、协议无前缀别名和 /api/*；管理后台由独立 Vite 开发服务器提供，Vite 只代理 /health 和 /api。
+npm start 和 npm restart 先构建，再由 scripts/service.mjs 管理服务。服务端提供 /health、/v1/*、协议无前缀别名和 /api/*，不伺服页面；管理后台由独立 Vite 开发服务器提供，Vite 只代理 /health 和 /api。运行方式见 [usage.md](usage.md#安装和运行)。
 
 ## 协议面与转发链
 
@@ -40,7 +42,7 @@ npm start 和 npm restart 先构建，再由 scripts/service.mjs 管理服务。
 |---|---|---|---|
 | chat | /v1/chat/completions、/chat/completions | /chat/completions | 会话亲和使用 x-opencode-session |
 | responses | /v1/responses、/responses | /responses | previous_response_id 可作为体内会话键 |
-| messages | /v1/messages、/messages | /messages | Worker key 镜像到 x-api-key，并设置协议版本头 |
+| messages | /v1/messages、/messages | /messages | Worker key 镜像到 x-api-key，并设置协议版本头；客户端可用 x-api-key 携带 Relay Token |
 
 新增协议面只需实现 ProtocolSurface 并在 buildRegistry() 注册。路径、鉴权守卫和启动期覆盖检查均由同一注册表推导，避免出现新增路由未鉴权。
 
@@ -62,11 +64,11 @@ relay.ts 固定按以下顺序运行：
 
 tap 使用手写 ReadableStream 保持原字节和时序，使用流式 UTF-8 解码和按最长模式推导的重叠窗口。完整成功流才学习推理指纹；失效推理解绑并遗忘；断流或客户端取消不学习也不盲目遗忘。谁锁住 body，谁负责失败路径上的释放。
 
-失败分类由状态码、响应头和本地异常决定，不读取错误 body。rate_limit 尊重 Retry-After 并长冷却；auth 固定短退避；transport、timeout、upstream_error 指数退避并抖动；bad_request、unknown 不冷却。冷却只延长不缩短；并发成功只有在尝试开始时间晚于冷却时才清除现有冷却。
+失败分类由状态码、响应头和本地异常决定，不读取错误 body。rate_limit 尊重 Retry-After 并长冷却；auth（401）固定短退避；forbidden（403）更短的固定冷却，因为免费闸门按请求形态返回 403；transport、timeout、upstream_error 指数退避并抖动；bad_request、unknown 不冷却。冷却只延长不缩短；并发成功只有在尝试开始时间晚于冷却时才清除现有冷却。目录尚未核验的模型收到 401 时不归咎 Worker，因为不存在的模型也返回 401。
 
 ## 目录与调度
 
-ModelCatalog 为 keyed 和 keyless 保存最后成功目录。响应必须非空、结构正确并通过条目数和 8 MiB 体积上限；失败刷新不会抹掉旧缓存，刷新失败有退避。转发路径通常只读缓存，判定为 `retired` 且缓存过期时会发起后台刷新，但不会等待它完成或把目录请求加入重试链。目录缺失时免费判定按配置规则放行并标记未核验；/v1/models 在从未成功取得目录时返回上游不可达，目录取得但免费集合为空时才返回成功空列表。
+ModelCatalog 为 keyed 和 keyless 保存最后成功目录。响应必须非空、结构正确并通过条目数和 8 MiB 体积上限；失败刷新不会抹掉旧缓存；刷新失败后的退避同时作用于 /v1/models 的 ensure 路径和转发路径的 refreshIfStale。转发路径通常只读缓存，判定为 `retired` 且缓存过期时会发起后台刷新，但不会等待它完成或把目录请求加入重试链。目录缺失时免费判定按配置规则放行并标记未核验；/v1/models 在从未成功取得目录时返回 502 upstream_unreachable，目录取得但免费集合为空时才返回成功空列表。
 
 defaultSurfaces 和 surfaceOverrides 只用于管理展示，不是放行闸门。放行能力由 ProtocolSurface.streaming 决定。
 
@@ -82,29 +84,19 @@ EgressService 统一管理 dispatcher、Clash Controller 和 selector 锁；转�
 - 桥接模式切换 selector 后经本地代理端口连接。
 - dispatcher 按 Clash 节点名缓存，不能按 Worker 或 proxy id 缓存。
 - Controller 缓存指纹含地址和凭证摘要，等长 secret 改变也会重建。
-- selector 切换和建连在同一把锁内，body 开始流后释放锁。
+- selector 切换和建连在同一把锁内，连接建立后即释放锁。
 
-回显报告按 IP 回显目标的实测公网 IP 分组；未知 IP 不计为独立。直连出口保存到 gateway.directEgressIp，使用专用合成 id。探测目标与上游目标可能命中不同规则分支，doctor 读取 /rules 检查选中分组是否参与规则及是否是 MATCH 目标，doctor --deep 以回显 IP 做分组核对；它不能单独证明真实 Zen 请求命中了同一条规则。真实 CLI 请求需在发起期间核对目标为 opencode.ai 的 Clash `/connections`。
+回显报告按 IP 回显目标的实测公网 IP 分组；未知 IP 不计为独立。直连出口保存到 gateway.directEgressIp，使用专用合成 id。doctor 读取 /rules 检查选中分组是否参与规则及是否是 MATCH 目标，doctor --deep 以回显 IP 做分组核对。回显结果与 Zen 实际出口的关系见 [回显 IP 的测量范围](usage.md#回显-ip-的测量范围)。
 
 Clash 支持 manual 和 auto。manual 不自动切换；auto 按探活、可用节点、priority 和 id 选择并保持健康内核。批量探测期间锁定一个内核。
 
 ## 管理 API 与后台
 
-管理 API 只接受 loopback TCP 对端地址，不信任 X-Forwarded-For。管理体上限 1 MiB，转发体上限 64 MiB，均边读边限。端点包括：
-
-- GET /api/ping
-- GET /api/overview
-- GET /api/stats?days=N 或 all
-- PATCH /api/config
-- GET /api/proxies
-- GET /api/models
-- POST /api/probe
-- GET/POST /api/batch-probe
-- POST /api/subscriptions/:id/refresh
+管理 API 只接受 loopback TCP 对端地址，不信任 X-Forwarded-For。管理体上限 1 MiB，转发体上限 64 MiB，均边读边限。端点清单见 [usage.md 的管理 API](usage.md#管理-api)。
 
 凭证投影只返回存在性和短指纹。secret 补丁是缺席不动、set 替换、clear 清空三态。响应返回前再次过契约 schema。
 
-批量探测由 reducer、SQLite 状态和 BatchProbeRunner 组成，状态为 idle、screening、running、paused、cancelling、done；两段进度分开显示，同一时刻只允许一批运行，进程重启会收尾遗留任务。前端轮询以服务端状态为准，并用 generation 防止旧响应覆盖取消后的状态。
+批量探测由 reducer、SQLite 状态和 BatchProbeRunner 组成，状态为 idle、screening、running、paused、cancelling、done；两段进度分开显示，同一时刻只允许一批运行，进程重启会收尾遗留任务。前端轮询以服务端状态为准，并用 generation 防止旧响应覆盖取消后的状态；轮询失败时保留上次数据并提示可能过期。
 
 订阅支持 Clash YAML/JSON、SIP008、分享链和多层 Base64。多 User-Agent 协商、纯函数解析和幂等合并共同构成刷新流程；节点 id 由订阅 id 和节点名派生，并保留启用状态与已测出口 IP。
 
@@ -118,9 +110,4 @@ runtime.db 使用 SQLite WAL，保存 worker_stats、model_usage、upstream_atte
 
 错误消息和日志中的客户端可控文本经过脱敏、长度和字符限制；凭证只在必要的内部请求处使用。服务进程使用 Node 的 TLS 信任库；企业中间人环境可能需要 NODE_EXTRA_CA_CERTS。curl 的系统 CA、代理环境、DNS 和请求形态可能与 Node 或真实 OpenCode CLI 不同，因此 curl 只能验证局部链路，不能替代真实客户端端到端验收。
 
-shared 不导入 node:*。本地完整关卡是 typecheck、双构建和全部测试串成的 npm run validate；需要网络的 npm run discover:upstream 不纳入该关卡。
-<a id="实现进度"></a>
-
-## 当前完成范围
-
-当前代码已包含回环网关、三个协议面、免费模型目录判定、Worker 调度和亲和、直连与 Clash 出口绑定及回显分组报告、配置热更新、统计持久化、管理 API、六页后台、订阅刷新和服务端批量探测。仍需外部工具或手工配置的边界见需求文档的“当前未实现或需要外部配合的范围”。
+shared 不导入 node:*。本地完整关卡是 typecheck、双构建和全部测试串成的 npm run validate；需要网络的 npm run discover:upstream 不纳入该关卡。完成范围与未实现项见 [需求文档](requirements.md#12-当前已完成范围)。

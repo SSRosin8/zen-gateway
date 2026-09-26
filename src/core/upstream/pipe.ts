@@ -143,7 +143,7 @@ export function pipeUpstreamResponse(
    *
    * ## 两次构造都失败时,必须由本函数释放它锁住的流
    *
-   * 第五轮审核查出的最要紧一条。`tapReadable` 内部 `getReader()` 会**锁住**
+   * `tapReadable` 内部 `getReader()` 会**锁住**
    * 上游 body,而 `new Response()` 仍可能抛 —— 状态码超出 200..599 时
    * 两次构造都抛 `RangeError`(实测 undici 8.10.2 会原样透传 600/999 这类
    * 状态行并给出 body 流)。

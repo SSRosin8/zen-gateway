@@ -49,7 +49,8 @@ export function secureCompare(actual: string, expected: string): boolean {
 /**
  * 从请求里取出客户端提供的 token。
  *
- * 只认 `Authorization: Bearer <token>`。不支持 query 参数形式 ——
+ * 这里只解析 `Authorization: Bearer <token>`;`x-api-key` 由 `providedToken` 按面决定。
+ * 不支持 query 参数形式 ——
  * URL 会进浏览器历史、代理日志、`Referer` 头,凭证放在那里必然泄露。
  */
 export function extractBearer(header: string | undefined): string | null {
@@ -64,7 +65,27 @@ export function extractBearer(header: string | undefined): string | null {
 export type RelayAuthOptions = {
   /** 读取当前有效 token。做成函数以便配置热更新后立即生效。 */
   readonly tokenOf: () => string;
+  /**
+   * 是否也接受 `x-api-key: <token>`。由挂载方按协议面的
+   * `acceptsApiKeyHeader` 推导,不在这里按路径判断。
+   */
+  readonly acceptApiKeyHeader?: boolean;
 };
+
+/**
+ * 取客户端提供的 token:Bearer 优先,允许时再看 `x-api-key`。
+ *
+ * 两个头都带时只认 Bearer,不做"任一匹配即放行":那会让一次请求试两个候选值。
+ */
+function providedToken(
+  c: Parameters<MiddlewareHandler>[0],
+  acceptApiKeyHeader: boolean,
+): string | null {
+  const bearer = extractBearer(c.req.header("authorization"));
+  if (bearer !== null || !acceptApiKeyHeader) return bearer;
+  const apiKey = c.req.header("x-api-key");
+  return apiKey === undefined || apiKey === "" ? null : apiKey;
+}
 
 /**
  * 中间件:校验 Relay Token。
@@ -75,7 +96,7 @@ export type RelayAuthOptions = {
  */
 export function relayAuth(options: RelayAuthOptions): MiddlewareHandler {
   return async (c, next) => {
-    const provided = extractBearer(c.req.header("authorization"));
+    const provided = providedToken(c, options.acceptApiKeyHeader === true);
     const expected = options.tokenOf();
 
     /*
@@ -85,13 +106,13 @@ export function relayAuth(options: RelayAuthOptions): MiddlewareHandler {
      * `timingSafeEqual` 返回 true —— 于是一个**不带** Authorization 的请求
      * 被放行,而带了任意 token 的反而 401。实测过这个行为。
      *
-     * 本文件开头声称"没有『空 token 等于不校验』这种形态",但先前那条保证
-     * 完全依赖 schema 的 `.min(16)`,中间件自身既无防御也无测试。
+     * 本文件开头声称"没有『空 token 等于不校验』这种形态",那条保证不能
+     * 只依赖 schema 的 `.min(16)`,中间件自身也要有防御与测试。
      * `models/free.ts` 为同样的理由刻意留了第二道(`freeSuffix` 空串检查),
      * 理由是"一个『配置写错就全开』的闸门不该只有一层防护" —— 这里本该一致。
      *
-     * 而且这不只是理论:`tokenOf()` 是为配置热更新做成的函数(Phase 9),
-     * 届时任何绕过 schema 的写入路径都会直接把这道门打开。
+     * 而且这不只是理论:`tokenOf()` 是为配置热更新做成的函数,
+     * 任何绕过 schema 的写入路径都会直接把这道门打开。
      *
      * 放在比较之前返回不引入时间信道:它只依赖**配置**(本机的、非机密的
      * 部署状态),不依赖请求里的任何内容,所以对攻击者没有可利用的差异。
@@ -122,7 +143,7 @@ function unauthorized(c: Parameters<MiddlewareHandler>[0]): Response {
     {
       error: {
         type: "unauthorized",
-        message: "缺少或无效的 Relay Token,请在 Authorization 头以 Bearer 方式提供",
+        message: "缺少或无效的 Relay Token,请在 Authorization 头以 Bearer 方式提供(Messages 面也可用 x-api-key)",
       },
     },
     401,

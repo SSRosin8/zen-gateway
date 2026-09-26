@@ -11,7 +11,7 @@ import { parseRetryAfter, shouldCooldown, type FailureKind } from "../failures.t
  * ## 为什么本文件不做「等待」
  *
  * 冷却只影响**跨请求**的候选排序(`select.ts` 读它),不产生任何 sleep。
- * 链内不等待是 Phase 2 的刻意决定:换 Worker 发生在请求**之间**。
+ * 链内不等待是刻意的:换 Worker 发生在请求**之间**。
  * 一旦这里 await,一条客户端请求的时延就会包含我们自己的退避 ——
  * 而客户端(OpenCode)有自己的超时,它只会看到网关变慢。
  */
@@ -114,6 +114,10 @@ export function cooldownMs(input: CooldownInput): number | null {
        */
       return Math.ceil(config.authFailMs * (1 + JITTER_RATIO * jitter));
 
+    case "forbidden":
+      // 固定短冷却,理由同 auth;时长更短,见 `CooldownConfigSchema.forbiddenMs`。
+      return Math.ceil(config.forbiddenMs * (1 + JITTER_RATIO * jitter));
+
     case "upstream_error":
     case "transport":
     case "timeout": {
@@ -146,8 +150,8 @@ export function cooldownMs(input: CooldownInput): number | null {
  * **`now` 非有限值时返回 null**(不冷却),而不是算出一个 NaN 时刻。
  * `NaN` 写进 `cooldownUntil` 会让 `NaN <= now` 恒为 false,于是那个 Worker
  * **永久**不再就绪 —— 一次脏输入把 Worker 悄悄弄没了,没有任何报错。
- * 这正是 `normalizeFails` 注释描述的后果,而它当时只防住了失败计数一个入口;
- * 第五轮审核指出 `now` 是这套防护里唯一的缺口。
+ * 这正是 `normalizeFails` 注释描述的后果;那里只防失败计数一个入口,
+ * `now` 这个入口在这里防。
  *
  * 选"不冷却"而不是"用默认时长":`now` 坏了说明调用方的时钟有问题,
  * 此时任何时长都算不出正确的到期时刻,而不冷却是**保守**方向

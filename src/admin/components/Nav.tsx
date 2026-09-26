@@ -1,4 +1,4 @@
-import { PAGES, PAGE_LABEL, type PageId } from "../lib/router.ts";
+import { PAGES, PAGE_LABEL, toHash, parseHash, type PageId } from "../lib/router.ts";
 
 /**
  * 顶部导航。
@@ -6,17 +6,15 @@ import { PAGES, PAGE_LABEL, type PageId } from "../lib/router.ts";
  * 条目从 `PAGES` 推导 —— 那份清单是路由分派的同一个真相。手写一份会分叉
  * （纪律 #4），而分叉方向是「导航上有的页面路由不认识」或反之。
  *
- * 选中态用 **3px 下边框实色 + 文字加粗**，不用 `accent-fill` 做背景:
- * 那个 token 只有 `on-accent-fill` 一个合格前景（5.90），其余压上去全部
- * 不及格。而导航项在移动端会换行、文字可能超出，用它做底会让文字不可读。
+ * 条目是真实的 `<a href="#page">`：中键、新标签页打开、复制链接都能用。
+ * 点击只改 hash，由 `useViewState` 的 hashchange 订阅切换页面，
+ * 所以不需要 onClick。
+ *
+ * 选中态用 **3px 下边框实色 + 文字加粗**，不用 `accent-fill` 做背景：
+ * 那个 token 只有 `on-accent-fill` 一个合格前景（5.90），而导航项在移动端会
+ * 换行，用它做底会让文字不可读。
  */
-export function Nav({
-  current,
-  onNavigate,
-}: {
-  current: PageId;
-  onNavigate: (page: PageId) => void;
-}) {
+export function Nav({ current }: { current: PageId }) {
   return (
     <nav className="mb-6 border-b border-border-strong" aria-label="主导航">
       <ul className="flex flex-wrap gap-1">
@@ -24,11 +22,10 @@ export function Nav({
           const active = page === current;
           return (
             <li key={page}>
-              <button
-                type="button"
-                onClick={() => onNavigate(page)}
-                /* 触摸目标 ≥44px（移动端无障碍要求）。 */
-                className={`min-h-[44px] border-b-[3px] px-4 font-medium ${
+              <a
+                href={toHash({ ...parseHash(""), page })}
+                /* 触摸目标 ≥44px。 */
+                className={`inline-flex min-h-[44px] items-center border-b-[3px] px-3 font-medium no-underline sm:px-4 ${
                   active
                     ? "border-b-accent-fg text-accent-fg"
                     : "border-b-transparent text-text-muted"
@@ -37,7 +34,7 @@ export function Nav({
                 aria-current={active ? "page" : undefined}
               >
                 {PAGE_LABEL[page]}
-              </button>
+              </a>
             </li>
           );
         })}

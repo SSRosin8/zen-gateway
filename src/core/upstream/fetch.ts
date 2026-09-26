@@ -1,6 +1,6 @@
 // 必须用 undici 的 fetch,不是全局 fetch:`dispatcher` 是 undici 特有的选项,
 // 全局 fetch 会静默忽略它 —— 于是所有请求都走本机默认出口,出口隔离整体失效
-// 且毫无报错。Phase 2 的 probe.ts 同样从 undici 导入,两处保持一致。
+// 且毫无报错。probe.ts 同样从 undici 导入,两处保持一致。
 // 类型也一并取自 undici:它的 RequestInit 才有 `dispatcher`,
 // 用全局的 RequestInit 需要交叉类型硬凑,那会掩盖签名不匹配。
 import {
@@ -19,21 +19,19 @@ import type { ClashController } from "../proxy/clash/controller.ts";
  * 单次上游请求。
  *
  * 这一层只做「把一个请求经指定出口发出去,拿到响应头」,**不做重试、不读响应体**。
- * 这个边界是规划的不变量 #1:重试判定只能看 status + headers,响应体必须
+ * 这个边界是不变量 #1:重试判定只能看 status + headers,响应体必须
  * 保持未消费,由上层决定是转发给客户端还是丢弃。
  *
  * ## 不变量 #5:selector 锁的范围
  *
- * 桥接出口下「切 selector + 建立连接」必须原子,但锁**必须在响应体开始流之前
- * 释放** —— 否则一条长 SSE 会把整个网关串行化。
+ * 桥接出口下「切 selector + 建立连接」必须原子,但锁**不能跨到响应头或响应体**
+ * —— 否则一个慢上游或一条长 SSE 会把同一内核上的请求串行化。
  *
- * 临界区的正确边界恰好是 `fetch()` 的 resolve 时机:响应头到达时连接已建立
- * 并绑定到当时选中的节点,之后再切 selector 不影响这条连接。
+ * 临界区的边界是**连接就绪**:经 CONNECT 隧道的连接建立后已绑定到当时选中的
+ * 节点,之后再切 selector 不影响这条连接。实现见 `fetchUpstream` 末尾。
  *
- * **因此下面 `lock.run()` 的回调必须返回 Response 本身,绝不能返回读体的
- * Promise。** `.then()` 会自动同化返回的 Promise,写成
- * `run(async () => (await fetch(...)).text())` 会把锁一直持到整个响应体读完。
- * 这个区别不体现在类型签名上,只能靠注释与测试守住。
+ * `.then()` 会自动同化返回的 Promise,所以 `lock.run()` 的回调绝不能返回
+ * fetch 或读体的 Promise 本身。这个区别不体现在类型签名上,只能靠注释与测试守住。
  *
  * ## 不变量 #7:桥接 dispatcher 必须按节点缓存
  *
@@ -106,7 +104,7 @@ export async function fetchUpstream(
 
   // 在真正发出请求的同步片段里取池，尤其不能把 dispatcher 留在 selector
   // 排队或 select() 的 await 之前：期间热更新会优雅关闭那个旧实例。
-  const dispatch = (): Promise<UndiciResponse> => {
+  const dispatch = (onConnected?: () => void): Promise<UndiciResponse> => {
     req.signal?.throwIfAborted();
     let dispatcher: Dispatcher;
     try {
@@ -114,6 +112,7 @@ export async function fetchUpstream(
     } catch (err) {
       throw new EgressSetupError(err instanceof Error ? err.message : "无法建立出口");
     }
+    if (onConnected !== undefined) dispatcher = dispatcher.compose(notifyOnConnected(onConnected));
     return doFetch(req.url, { ...init, dispatcher });
   };
 
@@ -133,14 +132,29 @@ export async function fetchUpstream(
 
   const lock = deps.locks.forBridge(target.bridge.bridgeId);
   /*
-   * 回调返回 `doFetch(...)` 本身(一个 Promise<Response>),
-   * 锁因此持到响应头到达即释放。**不要**在这里 await 后读 body ——
-   * 见文件头对 Promise 同化的说明。
+   * ## 锁在连接建立时释放,不等响应头
+   *
+   * Clash 在 CONNECT 建隧道时按当时的 selector 绑定出站节点,之后这条连接终身
+   * 走那个节点。undici 在连接(含经隧道的 TLS)就绪、请求开始写出时回调
+   * `onRequestStart`,此刻 selector 的选择已经落在连接上,再切换也不影响它。
+   * 所以临界区到这里为止;若等到响应头,一个慢上游会把同一内核上的所有
+   * 请求串行化。
+   *
+   * 复用 keep-alive 连接时同样安全:dispatcher 按节点缓存(不变量 #7),
+   * 池里的连接都诞生于持锁选中同一节点之时。
+   *
+   * 这依赖桥接 dispatcher 对 http 目标也走 CONNECT 隧道(`proxyTunnel`,见
+   * `dispatcher.ts`):不走隧道时请求以绝对 URI 转发,Clash 读到请求头才拨号,
+   * `onRequestStart` 时节点还没选定。
+   *
+   * 释放取两者中先发生的一次:`onRequestStart`,或 fetch 本身落定(建连前失败
+   * 会让 fetch 立即拒绝;注入的 `fetchImpl` 不经 dispatcher 时退化为旧的
+   * "响应头到达即释放")。`release` 幂等,锁层只认第一次。
+   *
+   * 任务返回的是装着 Promise 的**盒子**而不是 Promise 本身:`run()` 的 `.then()`
+   * 会同化 thenable,直接返回 fetch 的 Promise 会把锁重新拉长到响应头。
    *
    * ## `select()` 的失败必须包成 `EgressSetupError`,而 `doFetch()` 的不能
-   *
-   * 这一条是生产验证查出来的(第六轮),而五个审核 agent 都没查到 —— 因为它
-   * 只在**本机 Clash 要求鉴权而配置里没有 secret** 时才出现。
    *
    * 切 selector 是**本机控制面**操作,它失败意味着本机配置不对
    * (Clash 开了鉴权、secret 变了、分组改名),与上面那四处
@@ -154,7 +168,7 @@ export async function fetchUpstream(
    * 而 `doFetch()` 的失败必须**保持原样**:那是真实的网络失败,换 Worker
    * 可能就成功,该重试也该归咎。所以只包 `select()` 那一句,不包整个回调。
    */
-  return lock.run(async () => {
+  const boxed = await lock.run(async () => {
     try {
       await controller.select(group, target.nodeName);
     } catch (err) {
@@ -165,6 +179,40 @@ export async function fetchUpstream(
     if (req.signal?.aborted) {
       throw req.signal.reason ?? new DOMException("操作已取消", "AbortError");
     }
-    return dispatch();
+    let release!: () => void;
+    const connected = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const response = dispatch(release);
+    // 同时充当 rejection 的处理者:盒子交出之前 fetch 就失败也不会成为未处理拒绝。
+    response.then(release, release);
+    await connected;
+    return { response };
   }, req.signal);
+  return boxed.response;
+}
+
+/**
+ * 请求级拦截器:连接就绪、请求开始写出(`onRequestStart`)时通知。
+ *
+ * 用 Proxy 只替换这一个回调,其余属性读写原样落到 fetch 自己的 handler 上 ——
+ * 它在回调里给 `this` 挂 `body`、`abort`,换成手写的转发对象会丢掉这些状态。
+ */
+function notifyOnConnected(onConnected: () => void): Dispatcher.DispatcherComposeInterceptor {
+  return (dispatch) => (opts, handler) =>
+    dispatch(
+      opts,
+      new Proxy(handler, {
+        get(target, key, receiver) {
+          const value: unknown = Reflect.get(target, key, receiver);
+          if (key !== "onRequestStart" || typeof value !== "function") {
+            return value;
+          }
+          return function (this: unknown, ...args: unknown[]) {
+            onConnected();
+            return (value as (...a: unknown[]) => unknown).apply(this, args);
+          };
+        },
+      }),
+    );
 }

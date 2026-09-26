@@ -9,7 +9,7 @@ import { importSubscriptionNodes, subscriptionProxyId } from "../../src/core/pro
 import { ConfigSchema, CONFIG_VERSION, type Config } from "../../src/shared/schema.ts";
 
 /*
- * 订阅解析（Phase 10）。
+ * 订阅解析。
  *
  * 订阅体是本项目**最不可控**的输入：格式由第三方服务商决定，随时会变，
  * 而且同一个 URL 换个 UA 就换格式。所以解析必须是纯函数 —— 能拿一段文本
@@ -50,8 +50,8 @@ proxy-groups:
 
   it("**带 server 字段的分组也必须跳过** —— 否则它会被当成节点导入", () => {
     /*
-     * 变异测试逼出来的。第一版 fixture 里的分组条目都没有 `server` 字段，
-     * 于是"跳过分组"这条判断被"缺 host 的条目丢掉"顺带满足了 ——
+     * fixture 里的分组条目必须带 `server` 字段。否则
+     * "跳过分组"这条判断被"缺 host 的条目丢掉"顺带满足了 ——
      * 把 `isGroupType` 整条去掉，测试**依然全绿**（四分类里的
      * 「条件被另一层顺带满足」）。
      *
@@ -85,7 +85,7 @@ proxy-groups:
     /*
      * 只有 `select` 能被 Controller 的 `PUT /proxies/{name}` 切换。
      * 把 `url-test` 也收进来会让 setup 选中一个"切了不生效"的分组 ——
-     * 那正是 Phase 8 在 GLOBAL 上踩过的坑（rule 模式下 GLOBAL 不参与选路）。
+     * GLOBAL 就是这种坑（rule 模式下 GLOBAL 不参与选路）。
      */
     expect(parseSubscription(yaml).hints?.selectorGroups).toEqual(["Proxy"]);
   });
@@ -319,7 +319,7 @@ describe("多层 Base64", () => {
 
   it("二进制不会被当成解码成功", () => {
     /*
-     * 变异测试逼出来的加强版。第一版用的是纯 0x00-0x08，而那串解出来
+     * 不能只用纯 0x00-0x08：那串解出来
      * **也不含任何 `://`**，于是"不是 base64"这条判断被"解出来也没有链接"
      * 顺带满足了 —— 把控制字符检查去掉，测试依然全绿。
      *
@@ -524,8 +524,6 @@ describe("导入合并", () => {
 
   it("Clash 未启用时，只能桥接的新节点导入成**停用**并报出来", () => {
     /*
-     * 这条是写测试时被 schema 驳回来才发现的一个真实问题（不是断言写错）。
-     *
      * `ConfigSchema` 有一条 superRefine：**已启用**且只能桥接的代理，
      * 在 `clash.enabled` 为 false 时是配置矛盾。那条规则是对的。
      * 而订阅里绝大多数节点恰好都是只能桥接的（vless/hysteria2/anytls），

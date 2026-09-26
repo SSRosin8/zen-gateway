@@ -14,7 +14,7 @@ import { messagesSurface } from "../../src/core/protocols/messages.ts";
  * token 用量解析。
  *
  * 本文件最要紧的一组断言是**「没报用量」与「用了 0 个」必须区分开** ——
- * 返回全零对象会让 Phase 7 的 usage 覆盖率永远是 100%,而那个指标存在的
+ * 返回全零对象会让 usage 覆盖率永远是 100%,而那个指标存在的
  * 意义正是发现没覆盖到的面。
  */
 
@@ -189,7 +189,7 @@ describe("各面的 usage 信封", () => {
      *
      * 要说清它测不到什么:三个面都认**顶层** usage,而那**不只是非流式响应的
      * 形状** —— chat 的流式末帧与 messages 的 `message_delta` 也是顶层 usage。
-     * 所以"能查出的只有流式事件"这个说法是错的(我先前这么写过):
+     * 所以"能查出的只有流式事件"这个说法是错的:
      * 真正的判据是**嵌套与否**,而七个真实形态里只有两个是嵌套的。
      *
      * 完整矩阵与后果分析在 `usage.ts` 的文件头。下一条用断言把它钉住。
@@ -353,9 +353,9 @@ describe("createUsageCollector —— 流式增量收集", () => {
 
   it("一条巨长的无换行流被丢掉,**且后续无换行的事件仍能读到**", () => {
     /*
-     * ## 这条测试第一版是空壳,第六轮变异验证查出来的
+     * ## 第二次 feed 不能以换行开头,否则这条测试是空壳
      *
-     * 我原先的第二次 feed **以 `\n` 开头**:
+     * 若第二次 feed **以 `\n` 开头**:
      *
      * ```
      * c.feed(`data: {"usage":${"x".repeat(600 * 1024)}`);
@@ -382,10 +382,10 @@ describe("createUsageCollector —— 流式增量收集", () => {
 
   it("我们**自己丢了内容**时 `dropped()` 为真 —— 与「上游没报」分得开", () => {
     /*
-     * 「上游没报用量」与「我们把那一行扔了」在外部先前完全无法区分,
+     * 没有 `dropped()`,「上游没报用量」与「我们把那一行扔了」在外部完全无法区分,
      * 两者都表现为 `usage() === null`。而处置完全不同:前者不用改代码,
-     * 后者说明界定错了(`MAX_LINE_LENGTH` 就把 Responses 面一条合法的
-     * 600 KB `response.completed` 整条弃掉过,且结果取决于上游的分块位置)。
+     * 后者说明界定错了(`MAX_LINE_LENGTH` 过小会把 Responses 面一条合法的
+     * 600 KB `response.completed` 整条弃掉,且结果取决于上游的分块位置)。
      *
      * 任何常量都可能被越过,所以**越过时可观测**比把常量调大更耐久。
      * 这与 `readUsage` 全零时返回 `null`(而不是全零对象)是同一条理由的延伸。
@@ -408,7 +408,7 @@ describe("createUsageCollector —— 流式增量收集", () => {
 
   it("**合法的巨大 `response.completed`** 不再被丢掉 —— 上限与响应体同量级", () => {
     /*
-     * 第六轮审核查出的真实缺陷:`MAX_LINE_LENGTH` 先前是 512 KB,而 Responses 面的
+     * `MAX_LINE_LENGTH` 不能是 512 KB 这种量级:Responses 面的
      * `response.completed` 事件**内嵌整个 response 对象**(全部输出文本 + usage),
      * 所以那一行的大小 ∝ 生成长度 —— 而它是该面**唯一**带用量的事件。
      *
@@ -424,7 +424,7 @@ describe("createUsageCollector —— 流式增量收集", () => {
     for (const padKB of [400, 600, 900]) {
       const c = createUsageCollector((p) => responsesSurface.parseUsage(p));
       const ev = body(padKB);
-      // 16 KB 逐块 —— 模拟真实分块,这正是先前会丢失的那种喂法。
+      // 16 KB 逐块 —— 模拟真实分块,这正是上限过小时会丢失的那种喂法。
       for (let i = 0; i < ev.length; i += 16 * 1024) c.feed(ev.slice(i, i + 16 * 1024));
       const u = c.usage();
       expect(u?.promptTokens, `${padKB}KB 的 response.completed 必须出数`).toBe(1200);

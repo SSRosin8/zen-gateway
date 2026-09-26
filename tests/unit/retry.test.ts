@@ -167,15 +167,12 @@ describe("重试链：失败与重试", () => {
     /*
      * 这条断言的方向与直觉相反，记下依据：
      *
-     * Phase 2 定下 `isRetryable("auth") === false` 而 `shouldCooldown("auth") === true`。
+     * `isRetryable("auth") === false` 而 `shouldCooldown("auth") === true`。
      * 于是「换 Worker」发生在**请求之间**而非请求之内：这次请求把坏 key 的 Worker
      * 打进短冷却（默认 60s）并把 401 原样返回客户端，下一个请求就会跳过它。
      *
      * 代价是**一个冷却周期内会有一次用户可见的失败**。好处是配错的 key 会暴露，
      * 而不是被链内重试静默补偿掉（`authFailMs` 默认 60s 而非 15min 正是这个用意）。
-     *
-     * 我最初把这条写成「链内换下一个」并被驳回。核对后确认是断言错、代码对。
-     * 是否改成链内重试见 plan 里给 Phase 5 留的待决问题。
      */
     const d = deps([jsonResponse(401, { error: "invalid key" })]);
     const r = await runRetryChain({ ...baseInput, targets: targets(2), deps: d.deps });
@@ -199,6 +196,43 @@ describe("重试链：失败与重试", () => {
       onAttempt: (x) => records.push(x),
     });
     expect(records[0]!.blameWorker).toBe(true);
+  });
+
+  it("模型未经目录核验时 401 不归咎 Worker —— 免 key 请求未知模型也是 401", async () => {
+    const records: AttemptRecord[] = [];
+    const d = deps([jsonResponse(401, {})]);
+    await runRetryChain({
+      ...baseInput,
+      targets: targets(1),
+      deps: d.deps,
+      modelVerified: false,
+      onAttempt: (x) => records.push(x),
+    });
+    expect(records[0]!.failure).toBe("auth");
+    expect(records[0]!.blameWorker).toBe(false);
+  });
+
+  it("模型已核验时 401 仍归咎;未核验只豁免 401,不豁免 403", async () => {
+    const verified: AttemptRecord[] = [];
+    await runRetryChain({
+      ...baseInput,
+      targets: targets(1),
+      deps: deps([jsonResponse(401, {})]).deps,
+      modelVerified: true,
+      onAttempt: (x) => verified.push(x),
+    });
+    expect(verified[0]!.blameWorker).toBe(true);
+
+    const forbidden: AttemptRecord[] = [];
+    await runRetryChain({
+      ...baseInput,
+      targets: targets(1),
+      deps: deps([jsonResponse(403, {})]).deps,
+      modelVerified: false,
+      onAttempt: (x) => forbidden.push(x),
+    });
+    expect(forbidden[0]!.failure).toBe("forbidden");
+    expect(forbidden[0]!.blameWorker).toBe(true);
   });
 
   it("maxAttempts 限制尝试次数，即使还有候选", async () => {
@@ -385,13 +419,13 @@ describe("尝试记录", () => {
       failure: null,
       blameWorker: false,
       retryAfter: null,
-      // Phase 7 新增:统计要按尝试记状态码与耗时。
+      // 统计要按尝试记状态码与耗时。
       status: 200,
       latencyMs: 25,
     });
   });
 
-  it("`latencyMs` 恒为**非负整数** —— 时钟倒退或给小数都不会污染存储（缺口 #19）", async () => {
+  it("`latencyMs` 恒为**非负整数** —— 时钟倒退或给小数都不会污染存储", async () => {
     /*
      * 两个都不是理论问题，是喂真 SQLite 实测过的：
      *

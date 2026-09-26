@@ -92,9 +92,9 @@ export function createInstance({ dataDir, port, entry, altEntries = [] }) {
    * 而 `entry` 是绝对路径 —— 直接字符串相等会判不出来。`npm run dev:server`
    * 跑的 `src/server/index.ts` 同理。
    *
-   * `service.mjs` 的锁逻辑早就踩过并解决了这个问题(见它那里的
-   * `cmdlinePointsAtScript`),而这里先前是直接相等比较 —— 同一个坑的两份
-   * 代码里只有一份修好了。这正是把身份判定收进本模块要消除的那种分叉。
+   * `service.mjs` 的锁逻辑也要解决同一个问题(见它那里的
+   * `cmdlinePointsAtScript`),两处都不能用直接相等比较 —— 同一个坑的两份
+   * 代码很容易只修好一份。这正是把身份判定收进本模块要消除的那种分叉。
    *
    * 相对路径要相对**持有者的** cwd 解析,所以先读 `/proc/<pid>/cwd`;
    * 读不到就退回本进程的 cwd(同一个 npm 脚本通常同 cwd)。
@@ -145,8 +145,8 @@ export function createInstance({ dataDir, port, entry, altEntries = [] }) {
   /**
    * 把「端口上在跑什么」「状态文件指向什么」「它是不是我们的」一次问清。
    *
-   * **只读,不做任何清理** —— 先前 service.mjs 的实现顺手删陈旧状态文件,
-   * 结果在「本服务存活但不健康」这条路径上删掉了**活着的**实例的状态文件,
+   * **只读,不做任何清理** —— 若在这里顺手删陈旧状态文件,
+   * 「本服务存活但不健康」这条路径上会删掉**活着的**实例的状态文件,
    * 之后 stop 与 status 都报「未在运行」,只能手工 ss/kill 收场。
    * doctor 更是绝不该写任何东西。
    */
@@ -170,8 +170,8 @@ export function createInstance({ dataDir, port, entry, altEntries = [] }) {
     /*
      * 「端口上有我们的服务,但它不是 service.mjs 启的」—— 独立一态。
      *
-     * `npm run dev:server` 起的进程没有状态文件,先前会被判成
-     * `foreignOnPort`,于是 doctor 报「端口被另一个进程占用」并让用户去
+     * `npm run dev:server` 起的进程没有状态文件,若判成
+     * `foreignOnPort`,doctor 会报「端口被另一个进程占用」并让用户去
      * `ss -ltnp` 查一个**其实是他自己刚启动的开发服务器**。
      *
      * 这一态对两个消费者的意义**相反**,所以只给事实不给结论:

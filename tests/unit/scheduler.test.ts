@@ -39,7 +39,7 @@ function attempt(over: Partial<AttemptRecord> & { workerId: string }): AttemptRe
     retryAfter: over.retryAfter ?? null,
     status: over.status ?? null,
     /*
-     * `latencyMs` **是被读的**（第十轮起）：`record` 用 `now - latencyMs` 算出
+     * `latencyMs` **是被读的**：`record` 用 `now - latencyMs` 算出
      * 这次尝试的发起时刻，`markSuccess` 据此判断这次成功对「现在能用」是否
      * 有信息。默认 0 表示「刚发出就拿到结果」，于是发起时刻等于记账时刻。
      */
@@ -143,19 +143,11 @@ describe("record:不变量 #4", () => {
     expect(plan(s, cfg).targets.map((t) => t.workerId)).toEqual(["w1", "w2", "w3"]);
   });
 
-  it("blameWorker 为 false 时连续失败数被**清零**,不是加一", () => {
+  it("blameWorker 为 false 时连续失败数**保持不变**:不加一,也不清零", () => {
     /*
-     * 这条是变异测试补出来的:去掉 `!record.blameWorker` 这个条件后,
-     * 原有断言全部依然绿 —— 因为 `retry.ts` 里 `blameWorker === false`
-     * 当前恒等于 `kind === "bad_request"`,而 `cooldownMs` 对它也返回 null。
-     * 两层各自挡住,所以**冷却**行为看不出差别。
-     *
-     * 真正有差别的是失败计数:走 `markFailure` 会 +1,走 `markSuccess` 会清零。
-     * 后果具体 —— 一个出口配置错误(同样不归咎 Worker)重复几次把计数推高,
-     * 下一次真实的传输故障就从错误的指数级起跳,于是**一个配置问题让整个池
-     * 的恢复速度变慢**,而两件事看起来毫无关系。
-     *
-     * 所以这里先攒一次真实失败,再用不归咎的失败去验它是否被清掉。
+     * 不加一:否则出口配置错误重复几次把计数推高,下一次真实故障从错误的
+     * 指数级起跳。不清零:夹在两次真实故障之间的坏请求不该把退避拉回起点。
+     * 两个方向都要断言 —— 各自对应一种错误实现。
      */
     const cfg = config(["w1", "w2"]);
     const s = scheduler();
@@ -164,21 +156,33 @@ describe("record:不变量 #4", () => {
 
     s.record(attempt({ workerId: "w1", failure: "bad_request", blameWorker: false }), cfg, NOW);
     expect(s.snapshot(cfg, NOW).workers[0]).toMatchObject({
-      consecutiveFails: 0,
-      lastFailure: null,
+      consecutiveFails: 1,
+      lastFailure: "transport",
     });
+
+    // 下一次真实故障接着计数,退避按第二次失败升级。
+    s.record(attempt({ workerId: "w1", failure: "transport", blameWorker: true }), cfg, NOW);
+    expect(s.snapshot(cfg, NOW).workers[0]?.consecutiveFails).toBe(2);
+  });
+
+  it("不冷却的类别(unknown)即便归咎也不改计数", () => {
+    const cfg = config(["w1", "w2"]);
+    const s = scheduler();
+    s.record(attempt({ workerId: "w1", failure: "transport", blameWorker: true }), cfg, NOW);
+    s.record(attempt({ workerId: "w1", failure: "unknown", blameWorker: true }), cfg, NOW);
+    expect(s.snapshot(cfg, NOW).workers[0]?.consecutiveFails).toBe(1);
   });
 
   it("不归咎的失败**不解除**一个已生效的冷却", () => {
     /*
-     * 第五轮审核查出的缺陷,实测:
+     * 要防的缺陷,实测:
      *
      * ```
      * 429 Retry-After:900 之后  剩余 = 895000 ms
      * 一次出口配置错误之后      剩余 = 0 ms  ready = true
      * ```
      *
-     * 先前 `record` 的非归咎分支直接复用 `markSuccess`,而它把
+     * 若 `record` 的非归咎分支直接复用 `markSuccess`,它会把
      * `cooldownUntil` 写 0 —— `markFailure` 里「冷却只延长不缩短」的
      * `Math.max` 被从旁路整个绕过。上游明确说了等 900 秒,我们 5 秒后
      * 就认为它可用。
@@ -207,8 +211,8 @@ describe("record:不变量 #4", () => {
     const after = s.snapshot(cfg, NOW + 5_000).workers[0];
     expect(after?.cooldownRemainingMs).toBe(895_000);
     expect(after?.ready).toBe(false);
-    // 计数仍然被清零 —— 那是不变量 #4 原本的目的。
-    expect(after?.consecutiveFails).toBe(0);
+    // 计数也不动:不归咎的结局对 Worker 零信息。
+    expect(after?.consecutiveFails).toBe(1);
   });
 
   it("**真正的成功**才解除冷却", () => {
@@ -237,8 +241,7 @@ describe("record:不变量 #4", () => {
 
   it("**发出于冷却生效之前的成功不解除冷却** —— 并发下这是常态", () => {
     /*
-     * 第十轮审核实测的严重缺陷，走的是 `record` 这条正路（先前几轮修的是
-     * `markNotBlamed` 那条旁路）。记账顺序由**上游响应到达顺序**决定：
+     * 这条走的是 `record` 这条正路（上面几条守的是不归咎那条旁路）。记账顺序由**上游响应到达顺序**决定：
      *
      *   请求A 发出 ── 上游慢 300ms ──→ 200      ← 记账在后
      *   请求B 发出 → 立刻 429 Retry-After: 900  ← 记账在前
@@ -264,13 +267,13 @@ describe("record:不变量 #4", () => {
     // 上游说的 900 秒必须还在。
     expect(after.ready).toBe(false);
     expect(after.cooldownRemainingMs).toBeGreaterThan(800_000);
-    // 计数照样清零 —— 那部分与 markNotBlamed 同处置。
+    // 计数照样清零：请求确实成功了，连续失败已经中断。
     expect(after).toMatchObject({ consecutiveFails: 0, lastFailure: null });
   });
 
   it("`unknown` 不冷却时也不得让失败计数膨胀", () => {
     /*
-     * 第四处纪律 #4 分叉(第五轮审核发现)。`shouldCooldown()` 把
+     * 一处纪律 #4 分叉。`shouldCooldown()` 把
      * `bad_request` 与 `unknown` **同等对待**(都不冷却),而 `record` 的
      * 分支条件只看 `blameWorker` —— 两份判断不是同一个真相。
      *
@@ -325,7 +328,7 @@ describe("record:不变量 #4", () => {
       s.record(attempt({ workerId: "w1", failure: "bad_request", blameWorker: false }), cfg, NOW);
       s.record(attempt({ workerId: "w2", failure: "bad_request", blameWorker: false }), cfg, NOW);
     }
-    expect(s.counts(cfg, NOW)).toEqual({ ready: 2, total: 2 });
+    expect(s.runtimeWorkers(cfg, NOW).map((w) => w.ready)).toEqual([true, true]);
   });
 
   it("失败且 blameWorker 为 true → 按类别冷却", () => {
@@ -430,7 +433,7 @@ describe("settleStream:不变量 #3", () => {
      * `settleStream` 里 `staleHit` 是唯一**先于** `complete` 检查的分支，
      * 那是刻意设计（"即使流不完整也要解绑"）。而现有用例的 `staleHit: true`
      * 全部配 `complete: true`，于是把那个分支挪到 `complete` 检查之后
-     * **全绿**（第十轮审核实测）。
+     * **全绿**。
      *
      * 这个形态很实在：上游在 SSE 中途报「推理已失效」然后断流 ——
      * 正是这个功能最该管的情形。少了这条顺序，那条会话会带着一个
@@ -558,39 +561,6 @@ describe("settleStream:不变量 #3", () => {
   });
 });
 
-describe("settleBuffered", () => {
-  it("从响应文本自己判定失效推理", () => {
-    const cfg = config(["w1"]);
-    const s = scheduler();
-    const sessionHash = digestOf("ses-buffered");
-    plan(s, cfg, NOW, sessionHash);
-
-    s.settleBuffered({
-      workerId: "w1",
-      sessionHash,
-      blobHashes: ["b1"],
-      status: 400,
-      bodyText: '{"error":{"message":"reasoning block was not issued to this caller"}}',
-      now: NOW,
-    });
-    expect(s.snapshot(cfg, NOW).affinity).toEqual({ sessions: 0, blobs: 0 });
-  });
-
-  it("正常响应文本照常学习", () => {
-    const cfg = config(["w1"]);
-    const s = scheduler();
-    s.settleBuffered({
-      workerId: "w1",
-      sessionHash: null,
-      blobHashes: ["b1"],
-      status: 200,
-      bodyText: '{"choices":[{"message":{"content":"你好"}}]}',
-      now: NOW,
-    });
-    expect(s.snapshot(cfg, NOW).affinity.blobs).toBe(1);
-  });
-});
-
 describe("跨请求的端到端行为", () => {
   it("限流 → 换人 → 恢复后回到原顺序", () => {
     const cfg = config(["w1", "w2"]);
@@ -671,12 +641,12 @@ describe("rebind:绑定实际承接者", () => {
   });
 });
 
-describe("counts / snapshot / prune", () => {
-  it("counts 供 poolHealth 用", () => {
+describe("runtimeWorkers / snapshot / prune", () => {
+  it("runtimeWorkers 报出每个 Worker 的就绪态", () => {
     const cfg = config(["w1", "w2", "w3"]);
     const s = scheduler();
     s.record(attempt({ workerId: "w2", failure: "auth", blameWorker: true }), cfg, NOW);
-    expect(s.counts(cfg, NOW)).toEqual({ ready: 2, total: 3 });
+    expect(s.runtimeWorkers(cfg, NOW).map((w) => w.ready)).toEqual([true, false, true]);
   });
 
   it("snapshot 不含 apiKey", () => {

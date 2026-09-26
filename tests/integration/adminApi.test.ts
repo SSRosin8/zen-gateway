@@ -24,7 +24,7 @@ import { applyConfigPatch } from "../../src/server/admin/patch.ts";
 import { allSecretValues, displayFingerprint } from "../../src/server/admin/project.ts";
 
 /*
- * 管理 API（Phase 9 批次 1）。
+ * 管理 API。
  *
  * 最要紧的一组断言是**凭证不出进程**：`config.json` 整个文件都是凭证，
  * 而管理面要回答的是「配没配 key」而不是 key 本身。那组测试遍历响应的
@@ -101,7 +101,7 @@ function makeApp(
     address?: string;
     /** 注入假 IP 回显服务 —— 不打真实网络。 */
     probeServices?: Array<{ url: string; extract: (text: string) => string | null }>;
-    /** 注入假订阅 fetch —— 不打真实网络（Phase 10）。 */
+    /** 注入假订阅 fetch —— 不打真实网络。 */
     subscriptionFetch?: { fetchImpl?: typeof fetch; now?: () => number; userAgent?: string };
   } = {},
 ) {
@@ -397,7 +397,7 @@ describe("/api/stats", () => {
 
     /*
      * 断言**下游真的收到了**那个日期键 —— 不只是响应里有这个字段。
-     * 缺口 #14 的要求是「管理 API 应当总是传它」,而那是对**调用**的要求。
+     * 要求是「管理 API 应当总是传它」,而那是对**调用**的要求。
      */
     expect(seenSinceDay.length).toBeGreaterThan(0);
     for (const d of seenSinceDay) {
@@ -633,11 +633,11 @@ describe("写入失败分类", () => {
     expect(getConfig().workers[0]).toMatchObject({ kind: "authenticated", apiKey: "fake-key-replacement-not-real" });
   });
 
-  it("**同一请求里 `delete X` + `create X` 净效果是新建**（缺口 #27）", () => {
+  it("**同一请求里 `delete X` + `create X` 净效果是新建**", () => {
     /*
      * 文件头承诺「删掉一个又同名新建的净效果是新建，而不是建完又被删掉」，
-     * 而先前的重复 id 检查看的是 `next.workers`（那里还有待删的那个）——
-     * 于是这个请求被拒，**注释与行为相反**。用户想换一个 Worker 的 id/key
+     * 若重复 id 检查看的是 `next.workers`（那里还有待删的那个），
+     * 这个请求就会被拒，**注释与行为相反**。用户想换一个 Worker 的 id/key
      * 时必须发两次请求，而中间那一刻配置里少了一个 Worker。
      */
     const config = makeConfig();
@@ -686,10 +686,10 @@ describe("写入失败分类", () => {
     expect(applied).toBe(0);
   });
 
-  it("**把字段写成当前值不算改** —— 表单式保存不该每次都写盘（缺口 #26）", async () => {
+  it("**把字段写成当前值不算改** —— 表单式保存不该每次都写盘", async () => {
     /*
-     * 先前 `changed` 是按"这个字段有没有出现在 patch 里"判定的，
-     * 于是把一个字段写成它**当前的值**也算改了。而管理 UI 提交的是整张表单
+     * 若 `changed` 按"这个字段有没有出现在 patch 里"判定，
+     * 把一个字段写成它**当前的值**也算改了。而管理 UI 提交的是整张表单
      * —— 网关页每次「保存」都会触发一次原子写 + Worker 池 re-sync，
      * 即使用户什么都没动。`admin.ts` 的注释承诺的正是相反的行为。
      *
@@ -762,15 +762,15 @@ describe("写入失败分类", () => {
   it("请求体超过 1 MiB 被拒（管理面的 body 上限）", async () => {
     const { app } = makeApp(makeConfig());
     /*
-     * 规划的安全约束:管理 JSON 有上限,而 relay 透传对多模态保持无界。
-     * 这条约束此前是**空洞成立**的(管理侧没有任何读 body 的代码),
+     * 安全约束:管理 JSON 有上限,而 relay 透传对多模态保持无界。
+     * 管理侧没有读 body 的代码时这条约束是**空洞成立**的,
      * 所以加端点时闸门必须同时到位。
      *
      * ## 载荷必须「超大但其余合法」
      *
-     * 第一版用 `name: "x".repeat(2MiB)` —— 而 `WorkerPatchSchema` 有
+     * 不能用 `name: "x".repeat(2MiB)` —— `WorkerPatchSchema` 有
      * `name.max(200)`,于是 schema 也会拒它,**两条路都返回 400**,
-     * 断言无法区分。变异测试因此存活:把上限改成 MAX_SAFE_INTEGER 后
+     * 断言无法区分。变异测试会存活:把上限改成 MAX_SAFE_INTEGER 后
      * 测试依然绿(它撞的是 schema 而不是上限)。
      *
      * 改用大量**合法**的 delete 项:每项都是合法字符串,总体积超 1 MiB。
@@ -787,10 +787,9 @@ describe("写入失败分类", () => {
 
   it("**`POST /batch-probe` 也有上限** —— 上限属于闸门，不属于某个调用点", async () => {
     /*
-     * 第十轮审核实测：`MAX_ADMIN_BODY_BYTES` 是本文件的常量，而两个写端点里
-     * 只有 `PATCH /config` 用它 —— `/batch-probe` 直接 `c.req.json()`，
-     * 8 MiB 的体被照常接受。也就是说"管理 JSON 有上限"这条约束
-     * **只覆盖了一半的写端点**，而文件头把它写成已兑现。
+     * `MAX_ADMIN_BODY_BYTES` 是 admin 模块的常量；若两个写端点里只有
+     * `PATCH /config` 用它、`/batch-probe` 直接 `c.req.json()`，8 MiB 的体
+     * 会被照常接受 —— "管理 JSON 有上限"这条约束**只覆盖了一半的写端点**。
      */
     const { app } = makeApp(makeConfig());
     const body = { action: "start", padding: "x".repeat(2 * 1024 * 1024) };
@@ -868,7 +867,7 @@ describe("写入失败分类", () => {
  * 热更新真的生效
  * ================================================================== */
 
-describe("配置热更新（缺口 #1）", () => {
+describe("配置热更新", () => {
   it("改配置后调度器立刻看到新的 Worker 池 —— 不必重启", async () => {
     const config = makeConfig();
     const { app } = makeApp(config);
@@ -906,7 +905,7 @@ describe("配置热更新（缺口 #1）", () => {
  * 管理面仅回环（装配期断言）
  * ================================================================== */
 
-describe("管理路由必须被 loopbackOnly 覆盖（缺口 #8）", () => {
+describe("管理路由必须被 loopbackOnly 覆盖", () => {
   it("非回环来源一律 403", async () => {
     const { app } = makeApp(makeConfig(), { address: "203.0.113.9" });
     expect((await app.request("http://127.0.0.1/api/overview")).status).toBe(403);
@@ -980,13 +979,13 @@ describe("POST /api/probe 把实测 IP 写回配置", () => {
 
   it("**探测期间用户改配置不会被覆盖** —— 合并前要重读", async () => {
     /*
-     * 第十轮审核实测的丢失更新。`probeAll` 约 6 秒，那几秒足够用户在
-     * Worker 页改个名并保存。先前这里用的是探测**开始前**那份快照，
-     * 于是探测返回后写回时把用户的改动凭空覆盖 —— 响应 200、
+     * 守的是丢失更新。`probeAll` 约 6 秒，那几秒足够用户在
+     * Worker 页改个名并保存。若用探测**开始前**那份快照合并，
+     * 探测返回后写回时会把用户的改动凭空覆盖 —— 响应 200、
      * `changed: true`，没有任何症状。
      *
      * 同一文件的订阅刷新与 `batchRunner.#persist` 都显式防了这个并写明了
-     * 理由；三处同类路径里只有这一处漏了（纪律 #4）。
+     * 理由；三处同类路径必须一致（纪律 #4）。
      */
     /*
      * 卡住的 IP 回显服务 —— 让探测停在半路，期间发 PATCH。
@@ -1048,11 +1047,10 @@ describe("POST /api/probe 把实测 IP 写回配置", () => {
 
   it("探测成功后 egressIp 落进配置,隔离视图随之成立", async () => {
     /*
-     * 这条补的是一个**结构性**缺口:接上 Overview 时实测发现 `isolation`
-     * 恒为 `{groups:[], unknownWorkerIds:[全部], isolated:false}` ——
-     * 因为 `applyProbeResult()` 那个纯函数**零生产调用点**,探测结果从未
-     * 写进 `config.proxies[].egressIp`。于是「按实测 IP 分组」这条规划
-     * 核心要求一直没有数据来源。
+     * 这条守的是一个**结构性**缺口:若 `applyProbeResult()` 那个纯函数
+     * **零生产调用点**,探测结果就不会写进 `config.proxies[].egressIp`,
+     * `isolation` 恒为 `{groups:[], unknownWorkerIds:[全部], isolated:false}` ——
+     * 「按实测 IP 分组」这条核心要求没有数据来源。
      */
     /*
      * 代理用 **direct 模式**（socks5 到一个本机端口），不用桥接。
@@ -1140,7 +1138,7 @@ describe("POST /api/probe 把实测 IP 写回配置", () => {
     expect(JSON.stringify(getConfig())).toBe(before);
   });
 
-  it("**本机直连的实测 IP 也要落盘并参与隔离分组**（缺口 #28）", async () => {
+  it("**本机直连的实测 IP 也要落盘并参与隔离分组**", async () => {
     /*
      * `proxyId: null` 的 Worker 走本机网络出口，而**它与某个代理 NAT 到
      * 同一个公网 IP 恰好是「看起来隔离其实没隔离」的形态** ——
@@ -1184,10 +1182,10 @@ describe("POST /api/probe 把实测 IP 写回配置", () => {
     expect(directGroup).toBeDefined();
   }, 20_000);
 
-  it("**响应过 schema，且不泄漏凭证**（缺口 #25）", async () => {
+  it("**响应过 schema，且不泄漏凭证**", async () => {
     /*
-     * 这一条先前是唯一绕过 schema 与投影层的管理响应 —— 它手工拼装
-     * `ProbeOutcome` 的字段。今天不泄漏（`reason` 来自
+     * 这一条若手工拼装 `ProbeOutcome` 的字段,就成了唯一绕过 schema 与
+     * 投影层的管理响应。眼下不泄漏（`reason` 来自
      * `safeErrorMessage`/`describeResolveFailure`，而 `probe.ts` 明确拒绝
      * 把响应正文放进 `reason`），**但那条纪律的全部价值在于
      * "新增端点时漏掉一个字段没有任何症状"** —— 一个在纪律之外的端点
@@ -1269,7 +1267,7 @@ describe("配置写入是原子的且权限正确", () => {
 });
 
 /* ================================================================== *
- * 批次 2 的端点
+ * 代理、模型与批测端点
  * ================================================================== */
 
 describe("/api/proxies", () => {
@@ -1427,7 +1425,7 @@ describe("/api/batch-probe", () => {
 });
 
 /* ================================================================== *
- * 订阅（Phase 10）
+ * 订阅
  * ================================================================== */
 
 const SUB_TOKEN = "sub-token-not-real-abcdef123456";
@@ -1658,18 +1656,17 @@ describe("订阅刷新", () => {
 });
 
 /* ================================================================== *
- * 凭证清单自己也要有关卡（第十轮审核）
+ * 凭证清单自己也要有关卡
  * ================================================================== */
 
 describe("`allSecretValues` 与 schema 的凭证字段不脱节", () => {
   /*
-   * `allSecretValues` 的注释说它「从 `Config` 的实际结构推导」，而实际上
-   * 它是**逐字段手写枚举**（`relayToken` / `w.apiKey` / `b.apiSecret` /
+   * `allSecretValues` 是**逐字段手写枚举**（`relayToken` / `w.apiKey` / `b.apiSecret` /
    * `p.password` / 订阅 URL）—— 也就是它自己就是那条纪律要避免的手写名单，
    * 只是搬到了 `src/` 下。
    *
-   * 第十轮审核的变异：同时把 clash secret 从名单里删掉、并让 `clashView`
-   * 真的泄漏它的明文前 8 位 → **62 条全绿**。那正是它声称防住的形态
+   * 变异验证：同时把 clash secret 从名单里删掉、并让 `clashView`
+   * 真的泄漏它的明文前 8 位 → 没有这层时**全绿**。那正是它声称防住的形态
    * （名单脱节 + 同一字段泄漏），而唯一的守卫（上面那条 `allSecretValues`
    * 断言）的输入就是那份名单本身 —— **关卡的判据来自被检查的对象**。
    *
@@ -1697,7 +1694,7 @@ describe("`allSecretValues` 与 schema 的凭证字段不脱节", () => {
 
     /*
      * 关卡自己不能是空的：正则改坏、schema 改写法都会让下面在零个字段上通过。
-     * 本机实测 4 个（password / apiSecret / apiKey / relayToken）。
+     * 当前 schema 有 4 个（password / apiSecret / apiKey / relayToken）。
      */
     expect(fields.length).toBeGreaterThanOrEqual(4);
 

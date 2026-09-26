@@ -101,7 +101,7 @@ const DEFAULT_PROBE_TIMEOUT_MS = 10_000;
  * 桥接模式下,「切换 selector + 发出请求直到响应头到达」在锁内完成;
  * 响应体的读取在锁外 —— 见 SelectorLock 的说明:锁若跨到流结束,
  * 整个网关会被单条长连接串行化。探测的响应体只有几十字节,
- * 这里的差别不大,但保持同一套边界,免得 Phase 3 照抄出错。
+ * 这里的差别不大,但保持同一套边界,免得转发链路照抄出错。
  */
 export async function probeEgress(req: ProbeRequest): Promise<ProbeOutcome> {
   const services = req.services ?? DEFAULT_IP_ECHO_SERVICES;
@@ -174,7 +174,7 @@ export async function probeEgress(req: ProbeRequest): Promise<ProbeOutcome> {
     }
 
     /*
-     * 走 `elapsedMs()` 而不是裸减法（第十轮审核）：`now` 是可注入的，
+     * 走 `elapsedMs()` 而不是裸减法：`now` 是可注入的，
      * 而 `probe_results.latency_ms` 是 STRICT 表的 INTEGER 列、
      * `ProbeResultSchema` 要求 `.int().nonnegative()`。理由见那个函数。
      */

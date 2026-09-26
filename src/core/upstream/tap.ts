@@ -36,14 +36,14 @@ export type StreamTap = {
  * **拒绝消息**,它若存在必然出现在开头附近;漏判还是自纠正的 ——
  * 失效指纹会让下一轮同样失败,而那一轮的拒绝消息就在开头,预算内必被扫到。
  *
- * ## 这个预算先前加在 `tapReadable` 的 `onText` 上，那是个真实缺陷
+ * ## 这个预算不能加在 `tapReadable` 的 `onText` 上
  *
  * `onText` 有**两个**消费者(失效推理扫描、token 用量),而它们对"看流的哪一段"
  * 的要求**正好相反**:扫描器只需要开头,用量需要**整条流**
  * (chat/responses 的用量只在末帧;Anthropic 更糟 —— 拆在两端)。
  *
- * 两个相反的需求共用一个闸门,必然牺牲一个,而先前牺牲的恰好是没写在闸门旁边
- * 的那个。实测(复刻 relay 接线,唯一变量是流长度):
+ * 两个相反的需求共用一个闸门,必然牺牲一个,而被牺牲的会是没写在闸门旁边
+ * 的那个。预算加在 `onText` 上时的实测(复刻 relay 接线,唯一变量是流长度):
  *
  * ```
  * Anthropic  36 KB 流 → in=812 out=37 total=849   ✓
@@ -58,8 +58,8 @@ export type StreamTap = {
  * 按真实 chunk 尺寸估算,约 1 万个输出 token 就跨过 1 MiB,
  * 而长回答恰好是**最值得统计**的那一类。
  *
- * 所以预算移到它的理由所在的那一层:`createOverlapScanner` 自己数字节,
- * `tapReadable` 不再对 `onText` 设限。代价是整条流都要解码 ——
+ * 所以预算放在它的理由所在的那一层:`createOverlapScanner` 自己数字节,
+ * `tapReadable` 不对 `onText` 设限。代价是整条流都要解码 ——
  * 但那本来就是用量所必需的,而省下的是四条正则。
  */
 const DEFAULT_SCAN_BUDGET_BYTES = 1024 * 1024;
@@ -97,7 +97,7 @@ export function tapReadable(
      * `"推理 signature invali"`。
      *
      * 当前四条失效推理模式(`affinity.ts`)全是 ASCII,所以影响接近零。
-     * 但这是个结构性小洞:Phase 6 若往模式表里加中文措辞就会变成真问题,
+     * 但这是个结构性小洞:若往模式表里加中文措辞就会变成真问题,
      * 而那时症状是"只有拒绝消息刚好结束在流末尾时才漏检"——极难复现。
      *
      * flush 要在 `finished = true` **之前**:`scan` 有一条
@@ -105,8 +105,8 @@ export function tapReadable(
      *
      * `decoded > 0` 只是"这条流确实解码过内容"的廉价判断 —— 没解码过时
      * `decoder.decode()` 本来也返回空串。这里**不再有预算条件**:
-     * 先前写的是 `decoded < SCAN_BUDGET_BYTES`,于是超过 1 MiB 的流连收尾
-     * flush 都被跳过,而末尾那一截恰好是 chat/responses 面用量的所在。
+     * 写成 `decoded < SCAN_BUDGET_BYTES` 的话,超过 1 MiB 的流连收尾
+     * flush 都会被跳过,而末尾那一截恰好是 chat/responses 面用量的所在。
      */
     if (decoded > 0) {
       try {
@@ -134,7 +134,7 @@ export function tapReadable(
      * 而 `staleHit` 是 `settleStream` 里唯一**先于** `complete` 检查的分支
      * (刻意设计成"即使流不完整也要解绑"),越界恰好把那条唯一可用的路径关掉。
      *
-     * 第五轮审核用一个可控的假 reader 复现了这个时序。我随后用**真实**
+     * 用一个可控的假 reader 能复现这个时序;用**真实**
      * ReadableStream 复测两种形态(同步入队、异步延迟入队),都无法触发 ——
      * 真实 reader 在 cancel 之后按规范以 `done: true` 兑现,不会带着值回来。
      * 所以这是一条**纵深防御**,不是修一个已知可达的缺陷:
@@ -203,7 +203,7 @@ export function tapReadable(
  * 拒绝消息,它若存在必然出现在开头附近,而漏判是自纠正的(失效指纹会让下一轮
  * 同样失败,那一轮的拒绝消息就在开头)。
  *
- * 先前它加在 `tapReadable` 的 `onText` 上,于是**连带掐断了 token 用量收集** ——
+ * 加在 `tapReadable` 的 `onText` 上会**连带掐断 token 用量收集** ——
  * 而用量的要求正好相反(要整条流)。详见 `DEFAULT_SCAN_BUDGET_BYTES` 的说明。
  * 把预算放在它的理由所在的这一层,那种连带就写不出来了。
  *
