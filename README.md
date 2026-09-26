@@ -41,7 +41,8 @@ Clash selector；它不单独证明 Zen 实际请求的出口。
 网关实际端口由 `ZG_PORT`、`data/config.json` 的 `gateway.port`、默认值 9876
 依次决定。先运行 `npm run status` 查看当前端口，再按
 [`docs/usage.md`](docs/usage.md) 的兼容 OpenCode 1/2 配置示例替换端口和 Relay
-Token。后台网关页可选择 1.x 或 2.x 格式生成对应配置块，其中 Relay Token 仍是占位符。
+Token。后台网关页可选择 1.x 或 2.x 格式生成对应配置块；两种格式都只覆盖 Base URL
+和 API Key，Relay Token 仍是占位符，模型与 SDK 继续由 OpenCode 自己管理。
 
 用真实 OpenCode CLI 验证当前可用的 Chat Completions 模型：
 

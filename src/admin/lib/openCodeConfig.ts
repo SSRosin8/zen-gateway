@@ -2,18 +2,11 @@ const relayTokenPlaceholder = "<把配置文件里的 gateway.relayToken 填进�
 
 export type OpenCodeVersion = "1" | "2";
 
-const clientModels = [
-  ["muse-spark-1.3-contributor-free", "aisdk:@ai-sdk/openai"],
-  ["big-pickle", "aisdk:@ai-sdk/openai-compatible"],
-  ["space-bunny-free", "aisdk:@ai-sdk/openai-compatible"],
-  ["mimo-v2.6-flash-free", "aisdk:@ai-sdk/openai-compatible"],
-] as const;
-
 /**
  * 生成 OpenCode 对应版本的 provider 配置。
  *
- * v1 只覆盖连接选项，保留内置 provider 的 npm/模型适配；v2 需要显式的
- * package 和逐模型 settings，避免 OpenCode 内置模型地址覆盖本地网关。
+ * 两个版本都只覆盖内置 opencode provider 的连接设置。OpenCode 自己维护
+ * provider package、模型目录和模型协议适配，网关不应复制或覆盖那份目录。
  */
 export function createOpenCodeConfig(port: number, version: OpenCodeVersion = "2") {
   const settings = {
@@ -33,16 +26,8 @@ export function createOpenCodeConfig(port: number, version: OpenCodeVersion = "2
   }
 
   return {
-    providers: {
-      opencode: {
-        package: "aisdk:@ai-sdk/openai-compatible",
-        settings,
-        models: Object.fromEntries(
-          clientModels.map(([id, packageName]) => [id, { package: packageName, settings }]),
-        ),
-      },
-    },
     $schema: "https://opencode.ai/config.json",
+    providers: { opencode: { settings } },
   };
 }
 

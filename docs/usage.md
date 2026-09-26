@@ -68,47 +68,17 @@ service 脚本和 Vite 代理使用同一解析逻辑。数据目录可用 `ZG_D
 }
 ```
 
-OpenCode 2.x 使用复数 `providers`/`package`/`settings`，内置模型需要逐模型设置：
+OpenCode 2.x 使用复数 `providers`/`settings`。只覆盖已有 `opencode` provider 的连接设置，
+不要填写 `package` 或 `models`；OpenCode 会继续管理内置 SDK 和模型目录：
 
 ```json
 {
   "$schema": "https://opencode.ai/config.json",
   "providers": {
     "opencode": {
-      "package": "aisdk:@ai-sdk/openai-compatible",
       "settings": {
         "baseURL": "http://127.0.0.1:<实际端口>/v1",
         "apiKey": "<把 data/config.json 中 gateway.relayToken 的值填入>"
-      },
-      "models": {
-        "muse-spark-1.3-contributor-free": {
-          "package": "aisdk:@ai-sdk/openai",
-          "settings": {
-            "baseURL": "http://127.0.0.1:<实际端口>/v1",
-            "apiKey": "<把 data/config.json 中 gateway.relayToken 的值填入>"
-          }
-        },
-        "big-pickle": {
-          "package": "aisdk:@ai-sdk/openai-compatible",
-          "settings": {
-            "baseURL": "http://127.0.0.1:<实际端口>/v1",
-            "apiKey": "<把 data/config.json 中 gateway.relayToken 的值填入>"
-          }
-        },
-        "space-bunny-free": {
-          "package": "aisdk:@ai-sdk/openai-compatible",
-          "settings": {
-            "baseURL": "http://127.0.0.1:<实际端口>/v1",
-            "apiKey": "<把 data/config.json 中 gateway.relayToken 的值填入>"
-          }
-        },
-        "mimo-v2.6-flash-free": {
-          "package": "aisdk:@ai-sdk/openai-compatible",
-          "settings": {
-            "baseURL": "http://127.0.0.1:<实际端口>/v1",
-            "apiKey": "<把 data/config.json 中 gateway.relayToken 的值填入>"
-          }
-        }
       }
     }
   }
@@ -116,7 +86,8 @@ OpenCode 2.x 使用复数 `providers`/`package`/`settings`，内置模型需要�
 ```
 
 选择对应版本的片段放进 `~/.config/opencode/opencode.json` 或项目根目录，token 是
-占位符，仍需填入真实值。用真实 OpenCode CLI 验证：
+占位符，仍需填入真实值。不要把具体模型或 SDK package 从 OpenCode 配置复制到这里，
+否则会覆盖 OpenCode 自己维护的目录。用真实 OpenCode CLI 验证：
 
 ```bash
 opencode run --model opencode/space-bunny-free "Reply with exactly: OK"
