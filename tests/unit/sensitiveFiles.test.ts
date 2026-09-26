@@ -41,6 +41,9 @@ describe("本地敏感文件关卡", () => {
     expect(fixture("fixture.ts", "const x = 'AKIA1234567890ABCDEF';\n")).toMatchObject({
       status: 1,
     });
+    expect(fixture("fixture.ts", "const x = 'oc_sk_live_value_that_must_be_detected';\n")).toMatchObject({
+      status: 1,
+    });
   });
 
   it("不把 apiKey 字段名、Bearer 占位符或 fake fixture 当成秘密", () => {
@@ -48,5 +51,15 @@ describe("本地敏感文件关卡", () => {
       "fixture.ts",
       'const apiKey = "fake-key-not-real";\nconst header = "Bearer <relayToken>";\n',
     ).status).toBe(0);
+  });
+
+  it("只豁免上游重验使用的精确虚构 oc_sk_ key", () => {
+    expect(fixture("fixture.ts", "const x = 'oc_sk_0000_obviously_fake_not_a_real_key';\n").status).toBe(0);
+    expect(
+      fixture(
+        "fixture.ts",
+        "const x = 'oc_sk_0000_obviously_fake_not_a_real_key'; const y = 'oc_sk_live_value_that_must_be_detected';\n",
+      ).status,
+    ).toBe(1);
   });
 });

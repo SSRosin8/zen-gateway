@@ -183,9 +183,16 @@ export function extractBlobHashes(body: unknown): string[] {
     }
     if (value === null || typeof value !== "object" || depth >= MAX_TRAVERSE_DEPTH) continue;
 
-    for (const [key, entry] of Object.entries(value)) {
+    const record = value as Record<string, unknown>;
+    /*
+     * 不用 Object.entries：它会在循环开始前读取并分配全部字段，宽对象可因此
+     * 绕过下面的遍历预算。for...in 逐个读取，预算耗尽后立即停止。
+     */
+    for (const key in record) {
       if (budget <= 0) break;
       budget -= 1;
+      if (!Object.hasOwn(record, key)) continue;
+      const entry = record[key];
       if (typeof entry === "string" && ENCRYPTED_BLOB_KEYS.has(key)) {
         if (entry.length >= MIN_BLOB_VALUE_LENGTH && entry.length <= MAX_BLOB_VALUE_LENGTH) {
           hashes.add(digestOf(entry));

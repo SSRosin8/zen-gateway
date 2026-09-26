@@ -77,6 +77,7 @@ function config(over: Partial<Config> = {}): Config {
     workers: over.workers ?? [
       { id: "w1", name: "", kind: "authenticated", apiKey: "fake-key-1-not-real", enabled: true, proxyId: null },
     ],
+    ...(over.proxies !== undefined ? { proxies: over.proxies } : {}),
     ...(over.models !== undefined ? { models: over.models } : {}),
   });
 }
@@ -638,6 +639,54 @@ describe("/v1/models 目录", () => {
     };
     const res = await app().request("/v1/models", { headers: { authorization: `Bearer ${TOKEN}` } });
     expect(res.status).toBe(502);
+  });
+
+  it("首个目录 Worker 的出口不可达时回退到后面的健康 Worker", async () => {
+    handler = (_req, res) => {
+      res.writeHead(200, { "content-type": "application/json" });
+      res.end(JSON.stringify({ data: [{ id: "big-pickle" }] }));
+    };
+    const cfg = config({
+      proxies: [
+        {
+          id: "p-bad",
+          name: "不可达出口",
+          type: "http",
+          host: "127.0.0.1",
+          port: 9,
+          enabled: true,
+          source: "manual",
+          direct: true,
+          bridgeable: false,
+          egressIp: null,
+        },
+      ],
+      workers: [
+        {
+          id: "w-bad",
+          name: "",
+          kind: "authenticated",
+          apiKey: "fake-key-bad-egress-not-real",
+          enabled: true,
+          proxyId: "p-bad",
+        },
+        {
+          id: "w-good",
+          name: "",
+          kind: "authenticated",
+          apiKey: "fake-key-good-egress-not-real",
+          enabled: true,
+          proxyId: null,
+        },
+      ],
+    });
+
+    const res = await app(cfg).request("/v1/models", {
+      headers: { authorization: `Bearer ${TOKEN}` },
+    });
+    expect(res.status).toBe(200);
+    expect(upstreamCalls).toHaveLength(1);
+    expect(upstreamCalls[0]?.headers.authorization).toBe("Bearer fake-key-good-egress-not-real");
   });
 
   it("上游目录不是合法 JSON 时返回 502 而非崩溃", async () => {

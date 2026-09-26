@@ -51,11 +51,28 @@ service 脚本和 Vite 代理使用同一解析逻辑。数据目录可用 `ZG_D
 
 ## 客户端接入
 
-先运行 `npm run status` 取得服务实际端口。OpenCode 2 需要为每个内置模型写入
-网关地址和 SDK package：
+先运行 `npm run status` 取得服务实际端口。后台网关页可以选择 OpenCode 主版本并
+复制对应片段。OpenCode 1.x 使用单数 `provider`/`options`：
 
 ```json
 {
+  "$schema": "https://opencode.ai/config.json",
+  "provider": {
+    "opencode": {
+      "options": {
+        "baseURL": "http://127.0.0.1:<实际端口>/v1",
+        "apiKey": "<把 data/config.json 中 gateway.relayToken 的值填入>"
+      }
+    }
+  }
+}
+```
+
+OpenCode 2.x 使用复数 `providers`/`package`/`settings`，内置模型需要逐模型设置：
+
+```json
+{
+  "$schema": "https://opencode.ai/config.json",
   "providers": {
     "opencode": {
       "package": "aisdk:@ai-sdk/openai-compatible",
@@ -98,8 +115,8 @@ service 脚本和 Vite 代理使用同一解析逻辑。数据目录可用 `ZG_D
 }
 ```
 
-后台网关页的复制按钮复制同样的结构，但 token 是占位符，仍需填入真实值。新增模型
-时也要按协议选择 SDK 并添加逐模型 `settings`。用真实 OpenCode CLI 验证：
+选择对应版本的片段放进 `~/.config/opencode/opencode.json` 或项目根目录，token 是
+占位符，仍需填入真实值。用真实 OpenCode CLI 验证：
 
 ```bash
 opencode run --model opencode/space-bunny-free "Reply with exactly: OK"
