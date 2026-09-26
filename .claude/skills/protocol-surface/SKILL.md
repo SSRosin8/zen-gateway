@@ -106,13 +106,14 @@ description: 新增或修改客户端协议面、转发请求链、重试、冷�
 
 `messages` 那条的失败方式最糟：只给 Bearer 时上游返回 **500** →
 归 `upstream_error` → 可重试且**归咎 Worker** → 客户端一用 Messages 面就把
-整池 Worker 打进冷却。详见 `docs/upstream-quirks.md` §8。
+整池 Worker 打进冷却。详见 `docs/upstream-quirks.md` 的“Messages 面的凭证头”。
 
 ## 客户端验收使用真实 OpenCode CLI
 
-历史手工探针遇到过 `403 FreeTierError`，真实 OpenCode CLI 经本网关也有成功记录。
-这些是特定日期、身份和请求形态的观察，不能推出所有 curl 都失败、所有 CLI 都成功，
-也不能用 403 证明 key 有效。具体证据见 `docs/upstream-quirks.md`。
+历史手工探针遇到过 `403 FreeTierError`。近期真实 OpenCode CLI 在有限的出口、
+认证/匿名身份和免费模型样本上验证过成功与失败两类结果；这些是特定日期、身份、
+出口和请求形态的观察，不能推出所有 curl 都失败、所有 CLI 都成功，也不能用 403
+证明 key 有效。具体证据见 `docs/upstream-quirks.md`。
 
 且证明"流量真的经过网关"要用**控制实验**（停掉网关 → 同一条命令必须失败
 → 重启 → 恢复），而不是读日志。

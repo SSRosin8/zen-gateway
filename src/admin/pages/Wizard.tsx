@@ -1,6 +1,7 @@
 import type { Overview } from "../../shared/contract.ts";
 import { Mono, Panel, Strong } from "../components/Panel.tsx";
 import { StatusIndicator } from "../components/StatusIndicator.tsx";
+import { openCodeConfigSnippet } from "../lib/openCodeConfig.ts";
 
 /**
  * 首启向导。
@@ -34,17 +35,7 @@ export function Wizard({ data }: { data: Overview }) {
   const hasUsableWorker = data.pool.total > 0;
   const hasCatalog = data.catalog.freeCount !== null && data.catalog.freeCount > 0;
 
-  const snippet = `{
-  "$schema": "https://opencode.ai/config.json",
-  "provider": {
-    "opencode": {
-      "options": {
-        "baseURL": "http://127.0.0.1:${data.gateway.port}/v1",
-        "apiKey": "<data/config.json 里的 gateway.relayToken>"
-      }
-    }
-  }
-}`;
+  const snippet = openCodeConfigSnippet(data.gateway.port);
 
   const steps: Step[] = [
     {
@@ -74,13 +65,14 @@ export function Wizard({ data }: { data: Overview }) {
       title: "配出口代理",
       body: hasProxy ? (
         <p className="text-text-muted">
-          已有 {data.proxies.total} 个代理，{data.proxies.withEgressIp} 个已实测出口 IP。
+          已有 {data.proxies.total} 个代理，{data.proxies.withEgressIp} 个已实测回显出口 IP。
         </p>
       ) : (
         <>
           <p className="text-text-muted">
-            出口隔离是这个工具存在的理由 —— 多个 Zen 账号必须从<Strong>不同的公网 IP</Strong>
-            发出，否则有被上游判定关联的风险。一条命令自动探测本机 Clash 并导入节点：
+            为不同 Zen 账号配置不同的出口，并用 IP 回显目标检查是否共用公网 IP。
+            回显结果只反映该目标；Zen 实际请求需在发起期间核对上游连接。一条命令自动探测
+            本机 Clash 并导入节点：
           </p>
           <Cmd>npm run setup</Cmd>
         </>
@@ -107,7 +99,7 @@ export function Wizard({ data }: { data: Overview }) {
           </p>
           <Cmd>{`{ "id": "w1", "kind": "authenticated", "apiKey": "<你的 key>", "proxyId": "<代理 id>" }\n{ "id": "anon-1", "kind": "anonymous", "proxyId": "<代理 id>" }`}</Cmd>
           <p className="mt-2 text-text-muted">
-            改完跑 <Mono>npm run restart</Mono>（或用「代理池」页的批量探测实测出口）。
+            改完跑 <Mono>npm run restart</Mono>（或用「代理池」页的批量探测实测回显出口）。
           </p>
         </>
       ),
@@ -118,17 +110,21 @@ export function Wizard({ data }: { data: Overview }) {
       body: (
         <>
           <p className="text-text-muted">
-            覆盖内置的 <Mono>opencode</Mono> provider。放在{" "}
+            OpenCode 2 配置：覆盖内置的 <Mono>opencode</Mono> provider 及下列模型的连接设置。放在{" "}
             <Mono>~/.config/opencode/opencode.json</Mono> 或项目根目录：
           </p>
           <pre className="mt-2 overflow-x-auto rounded-md border border-border-strong bg-bg p-3 font-mono">
             {snippet}
           </pre>
           <p className="mt-2 text-text-muted">
-            然后验证 —— <Strong>只能用真实 OpenCode CLI，<Mono>curl</Mono> 不算</Strong>
-            （免费闸门查请求<Strong>形态</Strong>不查 key，手搓 curl 必得 403）：
+            保留逐模型的 <Mono>settings</Mono>，避免内置模型设置覆盖网关地址。
+            片段不保证上游接受这些模型；新增模型时也要指定对应协议的 SDK 和网关地址。
           </p>
-          <Cmd>opencode run --model opencode/mimo-v2.6-flash-free &quot;Reply with exactly: OK&quot;</Cmd>
+          <p className="mt-2 text-text-muted">
+            然后用真实 OpenCode CLI 验证当前可用的免费 Chat 模型。<Mono>curl</Mono>
+            的请求形态不同，不能替代客户端验收：
+          </p>
+          <Cmd>opencode run --model opencode/space-bunny-free &quot;Reply with exactly: OK&quot;</Cmd>
         </>
       ),
     },

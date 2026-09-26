@@ -4,7 +4,7 @@
 
 ## 系统边界
 
-zen-gateway 是本机单用户 HTTP 网关。请求经过 Relay Token 鉴权、原始体读取、免费模型判定、协议能力判定、Worker 选择、上游尝试和流式透传，再经直连出口或本机 Clash 出口访问 OpenCode Zen。
+zen-gateway 是本机单用户 HTTP 网关。请求经过 Relay Token 鉴权、原始体读取、免费模型判定、协议能力判定、Worker 选择、上游尝试和流式透传，再经配置的直连出口或本机 Clash 出口访问 OpenCode Zen；IP 回显报告用于发现探测目标的共用出口，Zen 实际连接需单独核对。
 
 网关不提供多用户账户系统、管理面远程认证、provider 抽象、静态网站托管或部署编排。上游地址、免费规则、Worker、出口和运行参数由配置文件决定。
 
@@ -74,7 +74,7 @@ WorkerPool 是唯一持有 Worker 运行状态的组件。启用认证 Worker �
 
 候选顺序是就绪亲和命中、其他就绪 Worker 的稳定策略排序、全员冷却时最早恢复的一个。重试链实际承接者在 settled 后成为新的会话绑定。会话键和推理指纹只保存 SHA-256 摘要；过长会话键不截断而是不参与亲和；TTL 是滑动闲置时间。SQLite 只做写入镜像和启动恢复，关键请求路径不查同步数据库。
 
-## 出口隔离
+## 出口与回显报告
 
 EgressService 统一管理 dispatcher、Clash Controller 和 selector 锁；转发与探测共享同一实例、池和锁。
 
@@ -84,7 +84,7 @@ EgressService 统一管理 dispatcher、Clash Controller 和 selector 锁；转�
 - Controller 缓存指纹含地址和凭证摘要，等长 secret 改变也会重建。
 - selector 切换和建连在同一把锁内，body 开始流后释放锁。
 
-隔离报告按实测公网 IP 分组；未知 IP 不算已隔离。直连出口保存到 gateway.directEgressIp，使用专用合成 id。探测目标与上游目标可能命中不同规则分支，doctor 读取 /rules 检查选中分组是否参与规则及是否是 MATCH 目标，doctor --deep 以实测 IP 做出口分组核对；它不能单独证明真实 Zen 请求命中了同一条规则。
+回显报告按 IP 回显目标的实测公网 IP 分组；未知 IP 不计为独立。直连出口保存到 gateway.directEgressIp，使用专用合成 id。探测目标与上游目标可能命中不同规则分支，doctor 读取 /rules 检查选中分组是否参与规则及是否是 MATCH 目标，doctor --deep 以回显 IP 做分组核对；它不能单独证明真实 Zen 请求命中了同一条规则。真实 CLI 请求需在发起期间核对目标为 opencode.ai 的 Clash `/connections`。
 
 Clash 支持 manual 和 auto。manual 不自动切换；auto 按探活、可用节点、priority 和 id 选择并保持健康内核。批量探测期间锁定一个内核。
 
@@ -123,4 +123,4 @@ shared 不导入 node:*。本地完整关卡是 typecheck、双构建和全部�
 
 ## 当前完成范围
 
-当前代码已包含回环网关、三个协议面、免费模型目录判定、Worker 调度和亲和、直连与 Clash 出口隔离、配置热更新、统计持久化、管理 API、六页后台、订阅刷新和服务端批量探测。仍需外部工具或手工配置的边界见需求文档的“当前未实现或需要外部配合的范围”。
+当前代码已包含回环网关、三个协议面、免费模型目录判定、Worker 调度和亲和、直连与 Clash 出口绑定及回显分组报告、配置热更新、统计持久化、管理 API、六页后台、订阅刷新和服务端批量探测。仍需外部工具或手工配置的边界见需求文档的“当前未实现或需要外部配合的范围”。

@@ -3,13 +3,14 @@ import type { Overview } from "../../shared/contract.ts";
 import { Mono, Panel, PrimaryButton, Strong } from "../components/Panel.tsx";
 import { StatusIndicator } from "../components/StatusIndicator.tsx";
 import { patchConfig } from "../lib/api.ts";
+import { openCodeConfigSnippet } from "../lib/openCodeConfig.ts";
 
 /**
  * 网关页 —— 连接信息与客户端配置片段。
  *
  * ## 这一页的主要价值是那段可复制的配置
  *
- * 规划要求「直接给出可一键复制的 **V2 格式** `opencode.json` 片段」。
+ * 提供 OpenCode 2 的 `opencode.json` 片段。
  * 手写那段配置是最容易出错的一步（端口、路径、token 三处都能写错），
  * 而写错的症状是 401 或连接被拒 —— 两者都指不到「你的 baseURL 少了 /v1」。
  *
@@ -22,17 +23,7 @@ export function GatewayPage({ data, refresh }: { data: Overview; refresh?: () =>
   const [saving, setSaving] = useState(false);
   const [message, setMessage] = useState<string | null>(null);
   const [copied, setCopied] = useState(false);
-  const snippet = `{
-  "$schema": "https://opencode.ai/config.json",
-  "provider": {
-    "opencode": {
-      "options": {
-        "baseURL": "http://127.0.0.1:${data.gateway.port}/v1",
-        "apiKey": "<把 data/config.json 里的 gateway.relayToken 填进来>"
-      }
-    }
-  }
-}`;
+  const snippet = openCodeConfigSnippet(data.gateway.port);
 
   return (
     <div className="space-y-4">
@@ -110,8 +101,7 @@ export function GatewayPage({ data, refresh }: { data: Overview; refresh?: () =>
 
       <Panel title="客户端配置">
         <p className="mb-3 text-text-muted">
-          覆盖 OpenCode 内置的 <Mono>opencode</Mono> provider，只给{" "}
-          <Mono>baseURL</Mono> 与 <Mono>apiKey</Mono>。放在{" "}
+          OpenCode 2 配置：覆盖内置的 <Mono>opencode</Mono> provider 及下列模型的连接设置。放在{" "}
           <Mono>~/.config/opencode/opencode.json</Mono> 或项目根目录。
         </p>
         <div className="relative">
@@ -132,8 +122,9 @@ export function GatewayPage({ data, refresh }: { data: Overview; refresh?: () =>
           </button>
         </div>
         <p className="mt-3 text-text-muted">
-          <Strong>不要写 <Mono>models</Mono> 块</Strong> —— 内置 provider 自带模型表，
-          手写一份会随上游目录变化而过期。
+          <Strong>保留逐模型的 <Mono>settings</Mono></Strong>：仅修改 provider 地址可能被
+          内置模型设置覆盖。片段中的模型仍受上游权限与免费规则约束；新增模型时也要指定
+          对应协议的 SDK 和网关地址。
         </p>
       </Panel>
 
