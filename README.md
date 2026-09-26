@@ -49,12 +49,8 @@ Relay Token；后台网关页也能生成对应片段。两种格式都只覆盖
 opencode run --model opencode/big-pickle "Reply with exactly: OK"
 ```
 
-验收要点（详见 [`docs/usage.md`](docs/usage.md#客户端验收)）：
-
-- 用真实 OpenCode CLI 验收，手工 curl 的结果不能推广到客户端。
-- 停止网关后同一命令应失败、重启后恢复，以此确认请求经过网关。
-- 匿名 Worker 验收使用全新会话和隔离状态目录，否则旧亲和会继续用原 Worker。
-- CLI 报 `Model unavailable` 先查客户端自己的模型目录。
+验收要用真实 CLI 和“停网关即失败、重启即恢复”的控制实验，方法见
+[`docs/usage.md`](docs/usage.md#客户端验收)。
 
 ## 主要能力
 
@@ -83,8 +79,8 @@ npm run doctor
 npm run validate
 ```
 
-`validate` 会先做类型检查，再构建服务端和后台，最后运行全部测试。上游重验
-脚本需要网络，单独运行 `npm run discover:upstream`，不会进入本地关卡。
+`validate` 是本地完整关卡（见 [`AGENTS.md`](AGENTS.md#开发与验证)）；需要网络的
+`npm run discover:upstream` 单独运行。
 
 ## 文件与安全
 

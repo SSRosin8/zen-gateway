@@ -455,3 +455,94 @@ describe("isWorkerReady 对非有限输入保守处理", () => {
     }
   });
 });
+
+describe("sync 的 proxyId 分支(proxyId 必须真的变一次)", () => {
+  function configWithProxies(
+    workers: Array<{ id: string; proxyId?: string | null; apiKey?: string }>,
+    proxies: Array<{ id: string }> = [],
+  ): Config {
+    return ConfigSchema.parse({
+      version: 1,
+      gateway: { relayToken: "unit-test-relay-token-x" },
+      proxies: proxies.map((p) => ({
+        id: p.id,
+        name: `proxy-${p.id}`,
+        type: "http",
+        // RFC 5737 文档用地址,虚构。
+        host: "203.0.113.9",
+        port: 8080,
+        enabled: true,
+        source: "manual",
+        direct: true,
+      })),
+      workers: workers.map((w) => ({
+        id: w.id,
+        name: "",
+        kind: "authenticated",
+        apiKey: w.apiKey ?? `fake-key-${w.id}-not-real`,
+        enabled: true,
+        proxyId: w.proxyId ?? null,
+      })),
+    });
+  }
+
+  it("proxyId 真的换一个值时,冷却仍然保留", () => {
+    /*
+     * 原有那条名为「proxyId 变了**不**重置冷却」的测试,两次都传
+     * `proxyId: null` —— 出口根本没变,所以它断言的契约结构上无法被违反。
+     * 变异验证:给 `keySame` 加上 `&& prior.proxyId === w.proxyId`(恰好取反
+     * 那条测试声明的契约)后全绿。
+     *
+     * 归类:调用点存在但输入集为空,与 `chatSurface.sessionKeyFrom` 同型。
+     */
+    const before = configWithProxies([{ id: "w1", proxyId: null }], [{ id: "p1" }]);
+    const after = configWithProxies([{ id: "w1", proxyId: "p1" }], [{ id: "p1" }]);
+
+    const pool = new WorkerPool(before);
+    pool.markFailure({
+      workerId: "w1", kind: "rate_limit", retryAfter: "600", config: before, now: NOW, jitter: 0,
+    });
+    expect(pool.get("w1")?.proxyId).toBeNull();
+
+    pool.sync(after);
+    // 出口换了,但额度与鉴权状态没变 —— 冷却必须留着。
+    expect(pool.get("w1")?.proxyId).toBe("p1");
+    expect(pool.isReady("w1", NOW)).toBe(false);
+    expect(pool.get("w1")?.cooldownUntil).toBe(NOW + 600_000);
+  });
+});
+
+describe("markFailure 返回**生效后**的时刻,不是本次算出的时刻", () => {
+  it("短冷却撞上已生效的长冷却时,返回的是那个长的", () => {
+    /*
+     * 「冷却只延长不缩短」那条测试读的是 `pool.get()`,没读返回值 ——
+     * 于是把 `return` 改成"本次算出的值"不会被发现。而调用方
+     * (`scheduler.record` 的将来版本、诊断输出)会拿它当"这个 Worker
+     * 什么时候恢复"。
+     */
+    const cfg = config([{ id: "w1" }]);
+    const pool = new WorkerPool(cfg);
+    pool.markFailure({
+      workerId: "w1", kind: "rate_limit", retryAfter: "900", config: cfg, now: NOW, jitter: 0,
+    });
+    const returned = pool.markFailure({
+      workerId: "w1", kind: "transport", retryAfter: null, config: cfg, now: NOW, jitter: 0,
+    });
+    expect(returned).toBe(NOW + 900_000);
+  });
+});
+
+describe("snapshot.ready 的边界与 isReady 必须逐点一致", () => {
+  it("恰好到期的那一刻两者都说就绪", () => {
+    const cfg = config([{ id: "w1" }]);
+    const pool = new WorkerPool(cfg);
+    pool.markFailure({
+      workerId: "w1", kind: "rate_limit", retryAfter: "60", config: cfg, now: NOW, jitter: 0,
+    });
+    for (const at of [NOW, NOW + 59_999, NOW + 60_000, NOW + 60_001]) {
+      expect(pool.snapshot(at)[0]?.ready).toBe(pool.isReady("w1", at));
+    }
+    expect(pool.snapshot(NOW + 59_999)[0]?.ready).toBe(false);
+    expect(pool.snapshot(NOW + 60_000)[0]?.ready).toBe(true);
+  });
+});

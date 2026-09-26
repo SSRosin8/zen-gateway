@@ -675,3 +675,65 @@ describe("runtimeWorkers / snapshot / prune", () => {
     expect(s.snapshot(onlyW2, NOW).affinity.sessions).toBe(0);
   });
 });
+
+describe("2xx 的上界(3xx 也要进 settleStream)", () => {
+  it("304 不学习指纹 —— 它不是成功的生成响应", () => {
+    /*
+     * 变异验证:把 `status >= 300` 改成 `>= 400` 后全绿,因为没有任何用例
+     * 用 3xx 调用过 settleStream。
+     */
+    const cfg = config(["w1"]);
+    const s = new Scheduler({ jitter: () => 0 });
+    s.plan({ config: cfg, now: NOW, sessionHash: null, blobHashes: [] });
+    s.settleStream({
+      workerId: "w1", sessionHash: null, blobHashes: ["b1"],
+      status: 304, staleHit: false, complete: true, now: NOW,
+    });
+    expect(s.snapshot(cfg, NOW).affinity.blobs).toBe(0);
+  });
+
+  it("恰好 299 学习,恰好 300 不学习", () => {
+    const cfg = config(["w1"]);
+    for (const [status, expected] of [[299, 1], [300, 0]] as const) {
+      const s = new Scheduler({ jitter: () => 0 });
+      s.plan({ config: cfg, now: NOW, sessionHash: null, blobHashes: [] });
+      s.settleStream({
+        workerId: "w1", sessionHash: null, blobHashes: ["b1"],
+        status, staleHit: false, complete: true, now: NOW,
+      });
+      expect(s.snapshot(cfg, NOW).affinity.blobs).toBe(expected);
+    }
+  });
+});
+
+describe("runtimeWorkers/snapshot 必须自己 sync(不先 plan)", () => {
+  it("全新 Scheduler 的第一个操作就问 runtimeWorkers", () => {
+    /*
+     * 每条用例都先调 `plan()`(它会 sync)时,去掉这两个方法里的 `#ensureSynced`
+     * 仍然全绿。而管理面完全可能在任何转发请求之前就来问池状态。
+     */
+    const cfg = config(["w1", "w2"]);
+    expect(new Scheduler().runtimeWorkers(cfg, NOW).map((w) => w.ready)).toEqual([true, true]);
+  });
+
+  it("全新 Scheduler 的第一个操作就问 snapshot", () => {
+    const cfg = config(["w1"]);
+    expect(new Scheduler().snapshot(cfg, NOW).workers).toHaveLength(1);
+  });
+});
+
+describe("rebind 拒绝不存在的 Worker 时不留垃圾条目", () => {
+  it("绑一个不存在的 id 之后,亲和表里不多一条", () => {
+    /*
+     * `lookupSession` 的 `workerExists` 也会挡住它,所以行为上看不出差别 ——
+     * 差别在**留不留垃圾**。上限是 10000,而一个反复重试的客户端可以
+     * 持续制造这种条目。
+     */
+    const cfg = config(["w1"]);
+    const s = new Scheduler({ jitter: () => 0 });
+    s.plan({ config: cfg, now: NOW, sessionHash: null, blobHashes: [] });
+    const before = s.snapshot(cfg, NOW).affinity.sessions;
+    s.rebind("a".repeat(64), "ghost-worker", NOW);
+    expect(s.snapshot(cfg, NOW).affinity.sessions).toBe(before);
+  });
+});

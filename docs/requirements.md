@@ -60,7 +60,7 @@
 
 ### 5.2 管理后台
 
-- `npm run dev` 启动 Vite 管理后台，默认开发端口为 5173。
+- `npm run dev` 启动 Vite 管理后台，端口固定为 5173，被占用时直接失败。
 - Vite 只代理 `/health` 和 `/api` 到网关；转发请求应直接访问网关的 `/v1/*`，不能把 `/v1` 当作 Vite 代理路径。
 - 页面和列表筛选状态写入 URL hash；用量时间范围和未提交表单只保留在当前页面内存中。
 - 网关不会把已构建的后台静态资源自动伺服出来，网关端口 `GET /` 返回 404。
@@ -116,7 +116,7 @@
 - `enforceCatalog` 开启时与最近一次成功目录求交集，自动剔除已下架模型。
 - `defaultSurfaces` 与 `surfaceOverrides` 只用于模型页展示协议面提示，不是转发放行闸门。
 - `routing.strategy` 支持 `anonymous_first`（默认）、`authenticated_first` 和 `mixed`；字段与默认值见 [usage.md](usage.md#调度-routing)。
-- 冷却按限流、鉴权（401）、禁止（403，短冷却）、传输/超时/上游错误等类别分别处理；坏请求和未知错误不冷却 Worker；目录未核验模型的 401 不归咎 Worker。
+- 冷却按限流、鉴权（401）、禁止（403，短冷却并换 Worker 重试）、传输/超时/上游错误等类别分别处理；坏请求和未知错误不冷却 Worker；目录未核验模型的 401 不归咎 Worker。
 - 会话亲和和 Responses 的 `previous_response_id`/`response.id` 只保存摘要，不保存原始敏感值。
 
 ## 7. 转发面要求
@@ -227,7 +227,7 @@
 - 生产环境的后台静态文件托管不由网关负责，需要单独的静态服务器或开发环境中的 Vite。
 - 代理、Clash 内核和订阅的完整编辑界面尚未提供；仍需手工编辑配置或运行命令行工具。
 - `defaultSurfaces` 和 `surfaceOverrides` 不在配置补丁 schema 中，没有后台入口，只能手工编辑配置文件后重启。
-- `gateway.headersTimeoutMs`、`gateway.bodyTimeoutMs` 和 `gateway.relayToken` 可通过 `PATCH /api/config` 修改，但后台没有对应表单。
+- `gateway.headersTimeoutMs`、`gateway.bodyTimeoutMs`、`gateway.relayToken` 和 `models.catalogTtlMs` 可通过 `PATCH /api/config` 修改，但后台没有对应表单。
 - `routing` 整节不在配置补丁 schema 中，只能手工编辑配置文件后重启。
 - 新的无后缀免费模型需要人工确认后加入名单；上游目录本身不提供价格信息。
 - 匿名 Worker 是否可用取决于 Zen 上游的实际认证策略，网关不会替上游承诺匿名访问成功。

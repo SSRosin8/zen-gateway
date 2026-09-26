@@ -117,8 +117,49 @@ key 的目录槽位。不能由少量样本推断完整目录按某个单一维�
 | 用户默认 OpenCode 会话与网关日志 | 分别观察到 MiMo、Big Pickle 的成功用量；默认会话中 Muse Spark 受地域限制，而经网关的该轮出口样本成功 | 一次地域拒绝可推广到所有出口；两者矛盾（地域限制是出口与上游策略的组合结果） |
 | 旧矩阵：同时启用 OpenCode 权限拒绝规则，并做逐变量控制实验 | 旧矩阵得到 403；控制实验显示关键变量是该权限规则，空的 XDG 目录本身不构成失败原因 | 旧矩阵的 403 代表上游可用性 |
 | 匿名专项复核：三个真实出口，每次只启动一个匿名 Worker；每个 CLI 进程设置 `PWD`、绝对 `OPENCODE_CONFIG`、隔离 XDG 目录和全新会话 | Big Pickle、Space Bunny Chat 在三个出口上均返回 `200`；MiMo 在该隔离客户端目录中未注册，CLI 直接报 `Model unavailable`，没有发出网关请求；Muse Spark Responses 均因当前地域策略返回 `403`；三个临时运行库都只出现对应的匿名 Worker，未出现认证 Worker | MiMo 不能经网关匿名使用（请求未发出）；Muse 的 403 与 Worker 类型有关 |
-| 本分支复核（OpenCode CLI v2.0.12，隔离配置与状态目录，3 个认证 Worker）| Big Pickle、Nemotron 3 Ultra 的 Chat Completions 与 Muse Spark 1.3 的 Responses 经网关返回 `OK`；`space-bunny-free`、`mimo-v2.5-free` 在该客户端目录中未注册，CLI 报 `Model unavailable`。同期 Clash `/connections` 显示 `opencode.ai` 被本机 DNS 解析到内网地址，命中 `IPCIDR,10.0.0.0/8 → DIRECT` | 网关的出口绑定已对 Zen 生效；该环境下各 Worker 的 Zen 请求实际共用直连出口，需先调整 Clash 规则 |
+| 规则调整前的对照（OpenCode CLI v2.0.12，隔离配置与状态目录，3 个认证 Worker）| Big Pickle、Nemotron 3 Ultra 的 Chat Completions 与 Muse Spark 1.3 的 Responses 经网关返回 `OK`；`space-bunny-free`、`mimo-v2.5-free` 在该客户端目录中未注册，CLI 报 `Model unavailable`。当时 Clash `/connections` 显示 `opencode.ai` 被企业 DNS 解析到内网地址，命中私网 `IPCIDR → DIRECT`，即调整规则之前各 Worker 的 Zen 请求共用直连出口；这是下一节控制实验的前态，不是当前状态 | 网关的出口绑定在该前态下已对 Zen 生效；回显报告各自独立即可证明 Zen 请求已隔离 |
 | 匿名 `/v1/models` 的 CA 对照 | 服务进程未设置 `NODE_EXTRA_CA_CERTS` 时返回 `502 upstream_unreachable`；带上服务使用的 CA 后返回 `200`，目录槽位为 `keyless` | 502 与出口/上游策略有关，或上述地域 403 与信任库有关；两类条件不能互相归因 |
+
+### 全新克隆到多出口真实 CLI 验收（2026-09-26）
+
+**环境**：全新克隆 → `npm install` → `npm start`（默认端口 9876）→
+`npm run setup -- --api <本机 Controller> --secret <secret>`，接入 1 个本机 mihomo
+内核并导入 69 个节点 → 通过 `PATCH /api/config` 新建 3 个认证 Worker 和 3 个匿名
+Worker，各绑定一个不同的 Clash 节点 → `npm run doctor` 各层通过 →
+`POST /api/probe` 6/6 成功，回显报告为 6 个不同的回显 IP。
+
+**客户端**：OpenCode CLI v2.0.12，`opencode run --standalone`，每次运行使用隔离的
+`PWD`、`OPENCODE_CONFIG`、XDG 目录和全新会话；每轮只启用一个 Worker。
+
+| 模型（协议面） | 6 个 Worker 上的结果 |
+|---|---|
+| `big-pickle`（Chat Completions） | 全部 `OK` |
+| `nemotron-3-ultra-free`（Chat Completions） | 全部 `OK` |
+| `muse-spark-1.3-contributor-free`（Responses） | 5 个 `OK`；1 个匿名 Worker 收到 403 `This model is not available in your country`（地域拒绝，网关分类为 `forbidden`，短冷却；当时 403 不换 Worker 重试） |
+| `mimo-v2.6-flash-free` | CLI 报 `Model unavailable`：客户端目录没有该模型，未发出上游请求 |
+
+每次上游尝试都落在当轮启用的 Worker 上；同期 Clash `/connections` 中目标为
+`opencode.ai` 的连接走该 Worker 自己的节点，命中的是 `DomainSuffix` 规则。
+
+**403 换 Worker 重试的复核**：之后把 `forbidden` 改为可换 Worker 重试，全部 Worker
+启用、全新会话下再发同一个 Muse Spark 请求：首个尝试在上述匿名 Worker 上得到 403，
+同一请求的第二个尝试换到另一个匿名 Worker 返回 `200`，CLI 输出 `OK`。这只证明该组
+出口中存在可用出口时重试能绕过地域拒绝，不证明所有 403 都能靠换出口解决（免费闸门
+的 403 换 Worker 仍会失败）。
+
+**控制变量**：在 Clash 规则最前面加入 `DOMAIN-SUFFIX,opencode.ai,<分组>` 之前，
+企业 DNS 把 `opencode.ai` 解析到私网 `10.x` 地址，排在前面的私网 `IPCIDR → DIRECT`
+先命中，所有 Zen 请求直连（见上表“规则调整前的对照”）。加入规则后 Zen 连接改走
+各自节点。`npm run doctor` 第 5 层现在会检测这种首条命中不经过所选分组的情况。
+
+**不能推出的结论**：
+
+- 其他账号、其他时间或其他地区的出口会得到相同结果；地域拒绝取决于出口所在地和
+  上游当时的策略。
+- 这次 403 与 Worker 是匿名还是认证有关（只有一个样本，且与出口节点混在一起）。
+- Messages 面在真实 CLI 下可用（本轮未测）。
+- 客户端目录外的模型经网关是否可用（请求未发出）。
+- 没有前置 `DOMAIN-SUFFIX` 规则的其他 Clash 配置也会走所选节点。
 
 当前没有可用于 Messages 真实验收的免费模型；Messages 仍只有本地协议级验证，等待
 上游提供可验模型。

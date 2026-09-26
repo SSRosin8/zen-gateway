@@ -14,7 +14,7 @@ import type { ProtocolSurface } from "../../src/core/protocols/types.ts";
 /**
  * 转发链路的集成测试 —— 对着**真实 HTTP 假上游**跑。
  *
- * 用真服务器而不是 mock fetch，是因为本阶段最关键的那条不变量（#1）恰好只在
+ * 用真服务器而不是 mock fetch，是因为转发链路最关键的那条不变量（#1）恰好只在
  * 真实的流式写出下才会暴露：mock 一个 Response 对象无法表达「头已经发出去、
  * 字节已经流了一部分、然后连接断了」这个时序。
  */
@@ -435,6 +435,29 @@ describe("上游 401/403 的冷却归咎", () => {
     expect(state.lastFailure).toBe("auth");
   });
 
+  it("403 换 Worker 重试：地区限制换一个出口即可成功", async () => {
+    let call = 0;
+    handler = (_req, res) => {
+      call += 1;
+      if (call === 1) {
+        res.writeHead(403, { "content-type": "application/json" });
+        res.end('{"type":"error","error":{"type":"ModelError","message":"This model is not available in your country."}}');
+        return;
+      }
+      res.writeHead(200, { "content-type": "application/json" });
+      res.end('{"id":"c1","choices":[]}');
+    };
+    const cfg = twoWorkers();
+    const scheduler = new Scheduler();
+    const gateway = createApp({ configOf: () => cfg, egress, scheduler, log: () => {} });
+    const res = await gateway.request("/v1/chat/completions", relay({ model: "big-pickle", messages: [] }));
+    expect(res.status).toBe(200);
+    expect(call).toBe(2);
+    expect(res.headers.get("x-zen-gateway-attempts")).toBe("2");
+    expect(res.headers.get("x-zen-gateway-worker")).not.toBe(cfg.workers[0]!.id);
+    expect(w1(scheduler, cfg).lastFailure).toBe("forbidden");
+  });
+
   it("403 只冷却 forbiddenMs 那么短", async () => {
     handler = (_req, res) => {
       res.writeHead(403, { "content-type": "application/json" });
@@ -445,6 +468,8 @@ describe("上游 401/403 的冷却归咎", () => {
     const gateway = createApp({ configOf: () => cfg, egress, scheduler, log: () => {} });
     const res = await gateway.request("/v1/chat/completions", relay({ model: "big-pickle", messages: [] }));
     expect(res.status).toBe(403);
+    // 两个 Worker 都试过：403 换出口可能成功，最后一次的 403 原样交给客户端。
+    expect(res.headers.get("x-zen-gateway-attempts")).toBe("2");
     const state = w1(scheduler, cfg);
     expect(state.lastFailure).toBe("forbidden");
     expect(state.cooldownRemainingMs).toBeGreaterThan(0);
@@ -1022,4 +1047,97 @@ describe("匿名身份切换的实际请求头", () => {
       expect(JSON.stringify(upstreamCalls[1]!.headers)).not.toContain("fake-client-key-not-real");
     },
   );
+});
+
+/* ================================================================== *
+ * 带 Authorization 时绝不跟随重定向
+ * ================================================================== */
+
+describe("上游重定向：带凭证时绝不跟随", () => {
+  let redirectTarget: Server;
+  let targetHits: number;
+  let targetAuthSeen: string[];
+  let upstream: Server;
+  let upstreamPort: number;
+  let targetPort: number;
+
+  beforeEach(async () => {
+    targetHits = 0;
+    targetAuthSeen = [];
+
+    // 重定向目标:记录它是否收到过请求、以及是否看到了 Authorization。
+    redirectTarget = createServer((req, res) => {
+      targetHits += 1;
+      const auth = req.headers["authorization"];
+      if (typeof auth === "string") targetAuthSeen.push(auth);
+      res.writeHead(200, { "content-type": "application/json" });
+      res.end('{"stolen":true}');
+    });
+    redirectTarget.listen(0, "127.0.0.1");
+    await once(redirectTarget, "listening");
+    const ta = redirectTarget.address();
+    if (ta === null || typeof ta === "string") throw new Error("no target port");
+    targetPort = ta.port;
+
+    // 假上游:一律回 302 指向上面那个目标。
+    upstream = createServer((req, res) => {
+      req.resume();
+      req.on("end", () => {
+        res.writeHead(302, { location: `http://127.0.0.1:${targetPort}/stolen` });
+        res.end();
+      });
+    });
+    upstream.listen(0, "127.0.0.1");
+    await once(upstream, "listening");
+    const ua = upstream.address();
+    if (ua === null || typeof ua === "string") throw new Error("no upstream port");
+    upstreamPort = ua.port;
+  });
+
+  afterEach(async () => {
+    upstream.close();
+    redirectTarget.close();
+    await Promise.all([
+      once(upstream, "close").catch(() => {}),
+      once(redirectTarget, "close").catch(() => {}),
+    ]);
+  });
+
+  it("上游回 302 时不跟随，Worker key 不会发给重定向目标", async () => {
+    /*
+     * 请求头里带着 Worker 的上游 key。若跟随一个指向别处的 302,
+     * 那个 Bearer key 会被原样发给重定向目标 —— 一个被劫持或配错的上游
+     * 就此变成凭证窃取原语。这是第 7 号安全要求,先前**零测试覆盖**:
+     * 把 `redirect: "manual"` 改成 `"follow"` 后全套测试依然全绿。
+     */
+    const cfg = ConfigSchema.parse({
+      version: 1,
+      gateway: { relayToken: TOKEN, baseUrl: `http://127.0.0.1:${upstreamPort}/v1` },
+      workers: [
+        {
+          id: "w1",
+          name: "",
+          kind: "authenticated",
+          apiKey: "fake-key-must-not-leak-001",
+          enabled: true,
+          proxyId: null,
+        },
+      ],
+    });
+
+    const app = createApp({ configOf: () => cfg, egress, log: () => {} });
+    const res = await app.request("/v1/chat/completions", {
+      method: "POST",
+      headers: { authorization: `Bearer ${TOKEN}`, "content-type": "application/json" },
+      body: JSON.stringify({ model: "big-pickle", messages: [] }),
+    });
+
+    // 核心断言:重定向目标从未被访问,因此也从未见过那个 key。
+    expect(targetHits, "重定向目标不该收到任何请求").toBe(0);
+    expect(targetAuthSeen).toEqual([]);
+
+    // 302 被原样透传给客户端（由它自己决定怎么处理）。
+    expect(res.status).toBe(302);
+    expect(await res.text()).not.toContain("stolen");
+  });
 });

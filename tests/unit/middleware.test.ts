@@ -260,7 +260,7 @@ describe("assertEveryRouteGuarded 真的会拦住裸路由", () => {
    * 之后全量测试依然全绿。一条指向不存在的测试的注释比没有注释更糟:
    * 它让下一个人以为这里有守卫。
    *
-   * 其他碰到它的只有 `auditRound4.test.ts` 对一个**正确**的 app 断言
+   * 其他碰到它的只有 `routeGuards.test.ts` 对一个**正确**的 app 断言
    * `.not.toThrow()`,那只能发现误报,发现不了断言被阉掉。
    *
    * 这与隔壁 `assertAdminRoutesLoopbackOnly` 是同一个洞,用同一手法补:
@@ -438,5 +438,43 @@ describe("Relay Token 定长比较", () => {
     const body = src.slice(src.indexOf("export function secureCompare"));
     const fnEnd = body.indexOf("\n}\n");
     expect(body.slice(0, fnEnd)).toContain("timingSafeEqual");
+  });
+});
+
+/* ================================================================== *
+ * 空 Relay Token 必须 fail-closed
+ * ================================================================== */
+
+describe("Relay Token 为空时必须拒绝（第二道防护）", () => {
+  function app(token: string): Hono {
+    const a = new Hono();
+    a.use("/v1/*", relayAuth({ tokenOf: () => token }));
+    a.get("/v1/x", (c) => c.json({ reached: true }));
+    return a;
+  }
+
+  it("期望值为空串且请求不带 Authorization 时拒绝", async () => {
+    /*
+     * 若无防御就会 fail-open:`secureCompare("", "")` 比较两个零长 Buffer,
+     * `timingSafeEqual` 返回 true → 放行。于是**不带** token 的请求通过,
+     * 而带了任意 token 的反而 401 —— 一个彻底反转的闸门。
+     *
+     * 不能只依赖 schema 的 `.min(16)`,中间件自身要有防御与测试。
+     * `models/free.ts` 为同样理由留了第二道,这里与之一致。
+     */
+    expect((await app("").request("/v1/x")).status).toBe(401);
+  });
+
+  it("期望值为空串时，带任意 token 也拒绝", async () => {
+    const res = await app("").request("/v1/x", { headers: { authorization: "Bearer anything" } });
+    expect(res.status).toBe(401);
+  });
+
+  it("空期望值的两种失败措辞一致，不泄露「服务端没配 token」", async () => {
+    const a = await (await app("").request("/v1/x")).json();
+    const b = await (
+      await app("").request("/v1/x", { headers: { authorization: "Bearer x" } })
+    ).json();
+    expect(a).toEqual(b);
   });
 });
