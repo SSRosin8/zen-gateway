@@ -127,13 +127,13 @@ describe("sync", () => {
 
   it("停用再启用**保留**冷却 —— 停用不是「用户修好了这个账号」", () => {
     /*
-     * 先前这条断言的是相反的行为(「重新加回来的 Worker 不带旧冷却」),
-     * 理由写的是「状态已随删除消失」。第五轮审核指出那是**实现细节泄漏成契约**:
+     * 不能断言相反的行为(「重新加回来的 Worker 不带旧冷却」),
+     * 理由「状态已随删除消失」是**实现细节泄漏成契约**:
      * `sync` 的 `previous` Map 从已被 `filter(isUsable)` 过滤的列表建,
      * 停用的 Worker 不在里面,于是冷却被清 —— 而这不是任何人的设计意图。
      *
      * 实测后果:429 `Retry-After: 900` 之后停用再启用,剩余冷却 900000ms → 0。
-     * Phase 9 的管理后台点两下就能抹掉上游明确要求的等待,而那正是冷却
+     * 在管理后台点两下就能抹掉上游明确要求的等待,而那正是冷却
      * 存在的理由。
      *
      * 判断依据很直接:上游的限流不会因为我在本地改了一行配置而失效。
@@ -185,11 +185,6 @@ describe("sync", () => {
 });
 
 describe("就绪与计数", () => {
-  it("空池的 counts 是 0/0 —— poolHealth 据此报 empty", () => {
-    const pool = new WorkerPool(config([]));
-    expect(pool.counts(NOW)).toEqual({ ready: 0, total: 0 });
-  });
-
   it("不存在的 Worker 不就绪,而不是抛错", () => {
     const pool = new WorkerPool(config([{ id: "w1" }]));
     expect(pool.isReady("nope", NOW)).toBe(false);
@@ -281,12 +276,12 @@ describe("markSuccess", () => {
 
   it("**发出于冷却生效之前的成功不清冷却** —— 它对「现在能用」零信息", () => {
     /*
-     * 第十轮审核实测的严重缺陷。记账顺序由**上游响应到达顺序**决定：
+     * 记账顺序由**上游响应到达顺序**决定：
      *
      *   请求A 发出 ── 上游慢 300ms ──→ 200 成功   ← 记账在后
      *   请求B 发出 → 立刻 429 Retry-After: 900    ← 记账在前
      *
-     * 先前无条件 `cooldownUntil: 0`，于是请求 A 那次成功把上游明确要求的
+     * 若成功时无条件 `cooldownUntil: 0`，请求 A 那次成功把上游明确要求的
      * 900 秒清成 0。而 429 通常是账号级的，多轮对话客户端天然并发 ——
      * 「一个 in-flight 请求恰好在 429 之前发出」是限流场景的常态。
      */
@@ -300,7 +295,7 @@ describe("markSuccess", () => {
     // 冷却必须还在：上游说的 900 秒不该被一次更早发出的请求推翻。
     expect(pool.isReady("w1", NOW)).toBe(false);
     expect(pool.get("w1")!.cooldownUntil).toBe(until);
-    // 但计数照样清零 —— 那部分与 markNotBlamed 同处置。
+    // 但计数照样清零：请求确实成功了，连续失败已经中断。
     expect(pool.get("w1")).toMatchObject({ consecutiveFails: 0, lastFailure: null });
   });
 
@@ -401,13 +396,13 @@ describe("snapshot", () => {
 });
 
 /* ================================================================== *
- * 非有限输入的守卫（第十轮审核）
+ * 非有限输入的守卫
  * ================================================================== */
 
 describe("isWorkerReady 对非有限输入保守处理", () => {
   /*
-   * 这两行 `Number.isFinite` 先前**零覆盖** —— 全仓没有任何测试给
-   * `isWorkerReady` 喂过非有限值，删掉它们后 122 条相关测试全绿。
+   * 这两行 `Number.isFinite` 需要专门的用例：其余测试都不给
+   * `isWorkerReady` 喂非有限值，删掉它们不会有别的测试变红。
    *
    * 而它是**承重的**：穷举 `{NaN, ±Infinity, 0, 1, 1e15}` 的 36 种组合，
    * 与裸 `cooldownUntil <= now` 有 9 处分歧，其中

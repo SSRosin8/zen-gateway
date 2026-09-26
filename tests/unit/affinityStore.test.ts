@@ -170,12 +170,12 @@ describe("内存淘汰要镜像到库 —— 否则被淘汰的条目重启后�
 
   it("被淘汰的**指纹**也不在库里(真的灌满 BLOB_CAP)", () => {
     /*
-     * 第七轮审核查出：上面那条只灌了会话表（注释自己写明「这里用会话表验」），
-     * 而**指纹表的同一条路径没有任何测试** —— 去掉 `learnBlobs` 的淘汰镜像后
-     * 163 条相关测试全绿。
+     * 上面那条只灌了会话表（注释自己写明「这里用会话表验」），
+     * 指纹表的同一条路径要单独守 —— 没有这条时，去掉 `learnBlobs` 的淘汰镜像后
+     * 相关测试全绿。
      *
-     * commit message 声称「**每一次**内存变更都通知 sink —— 包括容量淘汰
-     * 删掉的那些」，指纹侧那半句此前无人守着。BLOB_CAP 是 5000，比会话表小，
+     * 契约是「**每一次**内存变更都通知 sink —— 包括容量淘汰
+     * 删掉的那些」，这条守指纹侧那半句。BLOB_CAP 是 5000，比会话表小，
      * 所以这条比它还快。
      */
     const map = new AffinityMap(store);
@@ -216,8 +216,8 @@ describe("内存淘汰要镜像到库 —— 否则被淘汰的条目重启后�
 
   it("findBlobWorker 读到指向已删除 Worker 的指纹时,内存与库都清掉", () => {
     /*
-     * 第七轮审核查出：`findBlobWorker` 先前只 `return null`，一条 `delete`
-     * 都没有 —— 而文件头写着「`lookupSession` / `findBlobWorker` 读到过期
+     * `findBlobWorker` 若只 `return null`、一条 `delete`
+     * 都没有，就违背了文件头写的「`lookupSession` / `findBlobWorker` 读到过期
      * 条目时就地删掉」。会话侧成立，指纹侧缺席（纪律 #4）。
      *
      * **指向已删除 Worker** 的条目最要紧：`expires_at` 还在未来所以
@@ -276,7 +276,7 @@ describe("内存淘汰要镜像到库 —— 否则被淘汰的条目重启后�
 
 describe("装载受容量上限约束（restore 不调 evict）", () => {
   /*
-   * 第七轮审核：`loadSessions` 先前无 `LIMIT`，而 `restore()` 不调 `evict` ——
+   * `loadSessions` 需要 `LIMIT`，因为 `restore()` 不调 `evict` ——
    * 装载量超过 cap 时内存会一直超容到**下一次 `bindSession`**，而那一次
    * `evict` 会一口气 FIFO 淘汰掉 (size - cap) 个**活跃**绑定 —— 正是
    * 「先清过期」那条承重规则要防的事，只是触发路径换成了「重启」。
@@ -379,11 +379,11 @@ describe("写入失败不影响内存行为", () => {
 describe("不传 sink 时是纯内存", () => {
   it("带 sink 的落盘、不带的不落 —— 同一个库上对照", () => {
     /*
-     * 先前这里只断言 `store.loadSessions(T0)` 为空，而 `store` 由 beforeEach
+     * 只断言 `store.loadSessions(T0)` 为空不够：`store` 由 beforeEach
      * 新建在空库上、从头到尾没被写过 —— 那是**初始状态**而不是行为结果，
-     * 把整个被测动作删掉断言也通过（第七轮审核实测）。
+     * 把整个被测动作删掉断言也通过（实测）。
      *
-     * 改成同库对照：两个 map 各写一条，断言库里**只有**带 sink 那条。
+     * 所以用同库对照：两个 map 各写一条，断言库里**只有**带 sink 那条。
      */
     const withSink = new AffinityMap(store);
     const withoutSink = new AffinityMap();

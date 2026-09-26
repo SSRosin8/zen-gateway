@@ -7,7 +7,7 @@ import { readUsage, type TokenUsage } from "../models/usage.ts";
  *
  * ## 这个面必须把 key **镜像**到 `x-api-key`,否则整池 Worker 会被冷却
  *
- * 这是本阶段实测出来的最要紧一条(2026-09-23,先免 key 再用真实 key 在
+ * 这是实测出来的最要紧一条(2026-09-23,先免 key 再用真实 key 在
  * **免费模型**上复验,各两次):
  *
  * | 发给 `/zen/v1/messages` 的凭证头 | 状态 |
@@ -37,9 +37,8 @@ import { readUsage, type TokenUsage } from "../models/usage.ts";
  * 所以镜像只能由**知道自己需要它**的那一层加,也就是本面的
  * `extraUpstreamHeaders` —— 而它拿得到 `ctx.apiKey` 正是为此。
  *
- * 顺带解掉一处死信息:`UpstreamHeaderCtx.apiKey` 先前**没有任何读者**
- * (chat 面返回 `{}`),按第五轮审核的四分类属于"代码里有死信息"。现在它有
- * 了真实用途,而不是继续声称自己有用。
+ * 这也是 `UpstreamHeaderCtx.apiKey` 唯一的读者(chat 面返回 `{}`)。没有这里,
+ * 它就是"代码里有死信息"。
  *
  * ## `anthropic-version` 由网关设定,绝不取自客户端
  *
@@ -70,6 +69,8 @@ export const messagesSurface: ProtocolSurface = {
    * 而 Messages 客户端两种都常用。
    */
   streaming: "optional",
+  // Anthropic SDK 用 `x-api-key` 发凭证;它在 `headers.ts` 里被剥掉,不会到上游。
+  acceptsApiKeyHeader: true,
 
   extractModel: readModelField,
   wantsStream: readStreamField,

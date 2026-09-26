@@ -48,12 +48,13 @@ description: 新增或修改客户端协议面、转发请求链、重试、冷�
    **实际承接者**而不是候选链首位。`plan` 绑 w1 而重试链静默转到 w2 成功时，
    签发推理块的是 w2 —— 不改绑则 w1 冷却结束后客户端回放必被拒。
    **这个缺陷只有集成测试查得出来**（单测模拟的是"冷却发生在 plan 之前"）。
-4. **`bad_request` 与出口配置错误不归咎 Worker**：失败计数清零，已有冷却保留。
+4. **`bad_request` 与出口配置错误不归咎 Worker**：连续失败计数不变（只有成功清零），已有冷却保留。
    `Scheduler.record()` 结合 `blameWorker` 与 `shouldCooldown` 判定，
-   只有成功才清除冷却；401/403 的 `auth` 仍会冷却该 Worker。
+   成功只在尝试开始时间晚于冷却时才清除冷却；401 的 `auth` 与 403 的
+   `forbidden` 仍会冷却该 Worker。
 5. **selector 锁的范围**：`fetch.ts` 返回 Response 而**不是**读完 body 的
    promise —— keep-alive 连接复用会击穿锁，所以 `nodeName` 必须参与
-   dispatcher 的缓存键。
+   dispatcher 的缓存键。锁只覆盖切换 selector 与建立连接，连接建立后即释放；桥接统一走 CONNECT 隧道，保证 Clash 在切换后选路。
 6. **headers/body 超时分开，三个时刻分开**：会话绑定用 **plan** 时刻、
    冷却用**失败**时刻、指纹学习用**流结束**时刻。
    冷却按尝试结束时刻计算，不把漫长的等待算进冷却期。当前尝试在响应头
@@ -110,10 +111,9 @@ description: 新增或修改客户端协议面、转发请求链、重试、冷�
 
 ## 客户端验收使用真实 OpenCode CLI
 
-历史手工探针遇到过 `403 FreeTierError`。近期真实 OpenCode CLI 在有限的出口、
-认证/匿名身份和免费模型样本上验证过成功与失败两类结果；这些是特定日期、身份、
-出口和请求形态的观察，不能推出所有 curl 都失败、所有 CLI 都成功，也不能用 403
-证明 key 有效。具体证据见 `docs/upstream-quirks.md`。
+手工探针遇到过 `403 FreeTierError`，真实 OpenCode CLI 在有限样本上既有成功也有
+失败；这些是特定日期、身份、出口和请求形态的观察，不能推出所有 curl 都失败、
+所有 CLI 都成功，也不能用 403 证明 key 有效。具体证据见 `docs/upstream-quirks.md`。
 
 且证明"流量真的经过网关"要用**控制实验**（停掉网关 → 同一条命令必须失败
 → 重启 → 恢复），而不是读日志。

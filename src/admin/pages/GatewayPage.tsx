@@ -1,7 +1,17 @@
 import { useState } from "react";
 import type { Overview } from "../../shared/contract.ts";
-import { Mono, Panel, PrimaryButton, Strong } from "../components/Panel.tsx";
+import {
+  FormStatus,
+  Mono,
+  Panel,
+  PrimaryButton,
+  SecondaryButton,
+  Strong,
+  errorMessage,
+  type FormMessage,
+} from "../components/Panel.tsx";
 import { StatusIndicator } from "../components/StatusIndicator.tsx";
+import { SimpleTable, type Column } from "../components/DataTable.tsx";
 import { patchConfig } from "../lib/api.ts";
 import { openCodeConfigSnippet, type OpenCodeVersion } from "../lib/openCodeConfig.ts";
 
@@ -18,10 +28,51 @@ import { openCodeConfigSnippet, type OpenCodeVersion } from "../lib/openCodeConf
  * 占位符并告诉用户去哪儿取 —— 把 token 渲染进 DOM 等于让它进截图、进
  * 浏览器扩展、进 devtools 的保存。
  */
+/** 与 `GatewayPatchSchema.maxAttempts` 相同的范围；提交前校验，错误直接指出规则。 */
+export function validateMaxAttempts(raw: string): { ok: true; value: number } | { ok: false; message: string } {
+  const trimmed = raw.trim();
+  const value = Number(trimmed);
+  if (trimmed === "" || !Number.isInteger(value) || value < 1 || value > 10) {
+    return { ok: false, message: "最多尝试 Worker 数必须是 1 到 10 的整数" };
+  }
+  return { ok: true, value };
+}
+
+type Bridge = Overview["clash"]["bridges"][number];
+
+function bridgeColumns(activeBridgeId: string | null): ReadonlyArray<Column<Bridge>> {
+  return [
+    {
+      key: "id",
+      header: "内核",
+      render: (b) => (
+        <>
+          <Mono>{b.id}</Mono>
+          {!b.enabled && <span className="ml-2 text-text-muted">（已停用）</span>}
+          {b.id === activeBridgeId && <span className="ml-2 text-accent-fg">当前</span>}
+        </>
+      ),
+    },
+    { key: "api", header: "控制面", render: (b) => <Mono>{b.apiBase}</Mono> },
+    { key: "port", header: "代理端口", numeric: true, render: (b) => <Mono>{b.localProxyPort}</Mono> },
+    { key: "group", header: "分组", render: (b) => <Mono>{b.selectorGroup}</Mono> },
+    {
+      key: "secret",
+      header: "secret",
+      render: (b) =>
+        b.apiSecret.present ? (
+          <Mono>{b.apiSecret.fingerprint}</Mono>
+        ) : (
+          <span className="text-text-muted">无</span>
+        ),
+    },
+  ];
+}
+
 export function GatewayPage({ data, refresh }: { data: Overview; refresh?: () => void }) {
   const [maxAttempts, setMaxAttempts] = useState(String(data.gateway.maxAttempts));
   const [saving, setSaving] = useState(false);
-  const [message, setMessage] = useState<string | null>(null);
+  const [message, setMessage] = useState<FormMessage>(null);
   const [copied, setCopied] = useState(false);
   const [openCodeVersion, setOpenCodeVersion] = useState<OpenCodeVersion>("2");
   const snippet = openCodeConfigSnippet(data.gateway.port, openCodeVersion);
@@ -68,16 +119,23 @@ export function GatewayPage({ data, refresh }: { data: Overview; refresh?: () =>
       <Panel title="运行设置">
         <form
           className="flex flex-wrap items-end gap-3"
+          /* 自己校验并给出规则说明，不依赖浏览器原生气泡（它不进 aria-live 区域）。 */
+          noValidate
           onSubmit={(event) => {
             event.preventDefault();
+            const checked = validateMaxAttempts(maxAttempts);
+            if (!checked.ok) {
+              setMessage({ tone: "error", text: checked.message });
+              return;
+            }
             setSaving(true);
             setMessage(null);
-            void patchConfig({ gateway: { maxAttempts: Number(maxAttempts) } })
+            void patchConfig({ gateway: { maxAttempts: checked.value } })
               .then(() => {
-                setMessage("已保存");
+                setMessage({ tone: "success", text: "已保存" });
                 refresh?.();
               })
-              .catch((err) => setMessage(err instanceof Error ? err.message : String(err)))
+              .catch((err) => setMessage(errorMessage(err)))
               .finally(() => setSaving(false));
           }}
         >
@@ -87,16 +145,18 @@ export function GatewayPage({ data, refresh }: { data: Overview; refresh?: () =>
               type="number"
               min={1}
               max={10}
+              step={1}
               required
+              aria-invalid={message?.tone === "error" ? true : undefined}
               value={maxAttempts}
               onChange={(e) => setMaxAttempts(e.target.value)}
               className="min-h-[44px] w-40 rounded-sm border border-border-strong bg-bg px-3"
             />
           </label>
-          <PrimaryButton type="submit" onClick={() => undefined} disabled={saving}>
+          <PrimaryButton type="submit" disabled={saving}>
             {saving ? "保存中…" : "保存"}
           </PrimaryButton>
-          {message !== null && <span className="text-text-muted">{message}</span>}
+          <FormStatus message={message} />
         </form>
       </Panel>
 
@@ -121,18 +181,18 @@ export function GatewayPage({ data, refresh }: { data: Overview; refresh?: () =>
           <pre className="overflow-x-auto rounded-md border border-border-strong bg-bg p-3 pr-28 font-mono">
             {snippet}
           </pre>
-          <button
-            type="button"
-            className="absolute right-2 top-2 min-h-[40px] rounded-xs border border-border-strong bg-surface px-3"
-            onClick={() => {
-              void navigator.clipboard?.writeText(snippet).then(() => {
-                setCopied(true);
-                window.setTimeout(() => setCopied(false), 1500);
-              });
-            }}
-          >
-            {copied ? "已复制" : "复制"}
-          </button>
+          <div className="absolute right-2 top-2 bg-surface">
+            <SecondaryButton
+              onClick={() => {
+                void navigator.clipboard?.writeText(snippet).then(() => {
+                  setCopied(true);
+                  window.setTimeout(() => setCopied(false), 1500);
+                });
+              }}
+            >
+              {copied ? "已复制" : "复制"}
+            </SecondaryButton>
+          </div>
         </div>
         <p className="mt-3 text-text-muted">
           {openCodeVersion === "1" ? (
@@ -162,53 +222,15 @@ export function GatewayPage({ data, refresh }: { data: Overview; refresh?: () =>
               icon={data.clash.bridges.some((b) => b.enabled) ? "✓" : "!"}
               label={`已启用 · ${data.clash.bridges.filter((b) => b.enabled).length}/${data.clash.bridges.length} 个内核`}
             />
-            <table className="mt-3 w-full border-collapse text-left">
-              <thead>
-                <tr className="border-b border-border-strong text-text-muted">
-                  <th className="py-2 font-medium">内核</th>
-                  <th className="py-2 font-medium">控制面</th>
-                  <th className="py-2 font-medium" data-numeric="">
-                    代理端口
-                  </th>
-                  <th className="py-2 font-medium">分组</th>
-                  <th className="py-2 font-medium">secret</th>
-                </tr>
-              </thead>
-              <tbody>
-                {data.clash.bridges.map((b) => (
-                  <tr
-                    key={b.id}
-                    className="border-b border-border last:border-0"
-                    style={{ height: "44px" }}
-                    data-bridge={b.id}
-                  >
-                    <td>
-                      <Mono>{b.id}</Mono>
-                      {!b.enabled && <span className="ml-2 text-text-muted">（已停用）</span>}
-                      {b.id === data.clash.activeBridgeId && (
-                        <span className="ml-2 text-accent-fg">当前</span>
-                      )}
-                    </td>
-                    <td>
-                      <Mono>{b.apiBase}</Mono>
-                    </td>
-                    <td data-numeric="">
-                      <Mono>{b.localProxyPort}</Mono>
-                    </td>
-                    <td>
-                      <Mono>{b.selectorGroup}</Mono>
-                    </td>
-                    <td>
-                      {b.apiSecret.present ? (
-                        <Mono>{b.apiSecret.fingerprint}</Mono>
-                      ) : (
-                        <span className="text-text-muted">无</span>
-                      )}
-                    </td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
+            <div className="mt-3">
+              <SimpleTable
+                label="Clash 内核"
+                rows={data.clash.bridges}
+                columns={bridgeColumns(data.clash.activeBridgeId)}
+                rowKey={(b) => b.id}
+                rowAttr="data-bridge"
+              />
+            </div>
             <p className="mt-3 text-text-muted">
               <Strong>代理端口必须与内核实际的 <Mono>mixed-port</Mono> 一致</Strong> ——
               不一致时桥接会连到一个没人监听的端口：所有桥接代理传输失败，

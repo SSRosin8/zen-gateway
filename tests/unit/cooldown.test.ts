@@ -45,7 +45,7 @@ describe("与 shouldCooldown 的一致性", () => {
 
   it("FAILURE_KINDS 覆盖了全部类别(否则上面那条遍历是空壳)", () => {
     // 类别数写死:新增一个类别时这条会红,提醒去看上面的遍历是否仍然成立。
-    expect(FAILURE_KINDS).toHaveLength(7);
+    expect(FAILURE_KINDS).toHaveLength(8);
     expect(new Set(FAILURE_KINDS).size).toBe(FAILURE_KINDS.length);
   });
 });
@@ -161,6 +161,22 @@ describe("auth:固定短退避,不随次数增长", () => {
   });
 });
 
+describe("forbidden:固定且比 auth 更短的冷却", () => {
+  it("零抖动时就是配置里的 forbiddenMs,且不随次数增长", () => {
+    expect(ms({ kind: "forbidden", jitter: 0 })).toBe(config.forbiddenMs);
+    expect(ms({ kind: "forbidden", fails: 10, jitter: 0 })).toBe(config.forbiddenMs);
+  });
+
+  it("默认只有几秒,短于 auth —— 免费闸门的 403 取决于请求形态", () => {
+    expect(config.forbiddenMs).toBeLessThanOrEqual(10_000);
+    expect(ms({ kind: "forbidden", jitter: 0 })!).toBeLessThan(ms({ kind: "auth", jitter: 0 })!);
+  });
+
+  it("抖动最多加 25%", () => {
+    expect(ms({ kind: "forbidden", jitter: 1 })).toBe(Math.ceil(config.forbiddenMs * 1.25));
+  });
+});
+
 describe("transport / timeout / upstream_error:指数退避", () => {
   it.each(["transport", "timeout", "upstream_error"] as FailureKind[])(
     "%s 首次失败是基准值",
@@ -255,12 +271,12 @@ describe("cooldownUntil", () => {
 });
 
 /* ================================================================== *
- * 非有限 now 的守卫（第十轮审核）
+ * 非有限 now 的守卫
  * ================================================================== */
 
 describe("cooldownUntil 对非有限 now 返回 null", () => {
   /*
-   * 这行 `Number.isFinite(input.now)` 先前零覆盖 —— 删掉它后相关测试全绿。
+   * 这行 `Number.isFinite(input.now)` 只有这里守着 —— 删掉它后其余测试全绿。
    *
    * 它的价值在于**选对了保守方向**：去掉之后算出 `NaN` / `±Infinity` 写进
    * `cooldownUntil`，而下游 `isWorkerReady` 的守卫会把它们全判成不就绪 ——

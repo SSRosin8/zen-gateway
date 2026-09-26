@@ -39,7 +39,7 @@ export function contrastRatio(a: string, b: string): number {
  * 必须在解析之前做，否则注释里的色值会被当成真的声明。
  * 实测过的失败形态：真实声明是不及格的 `--zg-warn: #8a6a12`，
  * 后面跟一句 `/* 压深前的值：--zg-warn: #75580d *\/`，
- * 解析器按「最后匹配生效」读出 #75580d，**53 条断言全绿而线上 CSS 不合规**。
+ * 解析器按「最后匹配生效」读出 #75580d，**断言全绿而线上 CSS 不合规**。
  * tokens.css 里本来就有一条引用旧色值的注释，离触发只差一次文档编辑。
  */
 export function stripComments(css: string): string {
@@ -57,8 +57,7 @@ export function stripComments(css: string): string {
  *
  * 必须匹配「选择器紧跟 `{`」而不是选择器的首次出现:
  * `[data-theme="dark"]` 也出现在文件顶部的 `@custom-variant` 声明里,
- * 按首次出现取块会拿到 :root 的内容,于是深色主题被静默当成浅色来断言
- * —— 这是本函数第一版的 bug。
+ * 按首次出现取块会拿到 :root 的内容,于是深色主题被静默当成浅色来断言。
  */
 function findBlocks(css: string, selector: string): string[] {
   const bodies: string[] = [];
@@ -130,7 +129,7 @@ export function parseTokenBlock(rawCss: string, selector: string): TokenMap {
  * 必须一起检查：token 定义得再对，只要 @theme 里少一条映射，
  * Tailwind 就不会生成对应的工具类，`text-warn` 直接消失，
  * 组件渲染出一个没有颜色类的状态 —— 而只看 :root 的关卡对此全无感知。
- * 实测删掉 `--color-warn` 后 53 条断言照样全绿。
+ * 实测删掉 `--color-warn` 后断言照样全绿。
  *
  * 返回 `--color-X` → 其引用的 token 名（`var(--zg-Y)` 里的 Y），
  * 字面量色值则记为 `#rrggbb` 形态以便单独拒绝。

@@ -49,7 +49,7 @@ async function main(): Promise<void> {
    * 统计、探测历史与亲和持久化都是**可用性改善**，不是转发的正确性前提。
    * 一个坏掉的统计库（磁盘满、档位高于本程序、权限错）让整个网关起不来
    * 是错误的取舍 —— 用户要的是转发能用。失败只打一行然后继续，
-   * 三个 sink 保持未注入，行为退回 Phase 6。
+   * 三个 sink 保持未注入，行为等同于没有持久化的纯内存网关。
    *
    * 与 `loadConfig` 刻意相反：配置坏了**必须**拒绝启动，因为那意味着凭证、
    * 出口绑定、放行规则都是未知的 —— 那是正确性。
@@ -59,8 +59,9 @@ async function main(): Promise<void> {
   let stats: StatsStore | undefined;
   let affinityStore: AffinityStore | undefined;
   let batchStore: BatchProbeStore | undefined;
+  let db: Awaited<ReturnType<typeof openRuntimeDb>> | undefined;
   try {
-    const db = await openRuntimeDb();
+    db = await openRuntimeDb();
     stats = new StatsStore(db);
     affinityStore = new AffinityStore(db);
     batchStore = new BatchProbeStore(db);
@@ -75,7 +76,7 @@ async function main(): Promise<void> {
       headersTimeoutMs: config.gateway.headersTimeoutMs,
       bodyTimeoutMs: config.gateway.bodyTimeoutMs,
     },
-    // 探测结果落盘 —— `egressIp` 是出口隔离判定的唯一依据，而先前它只活在返回值里。
+    // 探测结果落盘 —— `egressIp` 是出口隔离判定的唯一依据，只活在返回值里就无从复查。
     ...(stats !== undefined ? { probes: stats } : {}),
   });
 
@@ -84,8 +85,7 @@ async function main(): Promise<void> {
    * Clash selector 的 `now` 是进程外的全局状态，两套锁会让探测量到的出口
    * 与转发实际用的出口不一致，而出口隔离报告正是按实测 IP 分组。
    *
-   * 配置读取做成函数，让热更新后下一个请求即生效（Phase 9 加管理 API 时
-   * 不必回头改所有调用点）。
+   * 配置读取做成函数，让热更新后下一个请求即生效，调用点不必各自感知热更新。
    *
    * 调度器在这里建，而不是让 `createApp` 兜底 new 一个 ——
    * 它需要拿到 `affinityStore` 才能镜像落盘，而装配层不该认识数据库。
@@ -101,7 +101,7 @@ async function main(): Promise<void> {
    * 头几个请求会看到一张空表，于是刚重启的那一刻粘滞失效 ——
    * 那正是持久化要解决的问题本身。
    *
-   * 失败只打一行：内存里那份是空的，行为退回 Phase 6，不影响正确性。
+   * 失败只打一行：内存里那份是空的，只是粘滞从零开始，不影响正确性。
    */
   if (affinityStore !== undefined) {
     try {
@@ -146,9 +146,8 @@ async function main(): Promise<void> {
    * 统计/持久化的写失败**汇合到一处报告**。
    *
    * 两个 store 各有一个 `writeFailures()`，而 `affinityStore` 被塞进
-   * `Scheduler` 的构造参数后就再也拿不出来 —— 第七轮审核指出这是个会在
-   * Phase 8 才发现的装配问题（doctor 要报两个数，而进程里没有地方同时
-   * 持有两个引用）。现在这里持有它们，`/health` 读这个函数。
+   * `Scheduler` 的构造参数后就再也拿不出来 —— 而 doctor 要报这些数，
+   * 进程里必须有一处同时持有全部引用。这里持有它们，`/health` 读这个函数。
    *
    * 吞掉写失败是对的（诊断设施不该让转发失败），但**吞掉不等于可以不知道**：
    * 一个一直写失败的库会安静地给出全 0 报表，而那看起来像「没人用」。
@@ -163,10 +162,10 @@ async function main(): Promise<void> {
   const catalog = new ModelCatalog({ log: (message) => console.error(message) });
 
   /*
-   * 配置热更新的**唯一**写入点（Phase 9，缺口 #1 到期）。
+   * 配置热更新的**唯一**写入点。
    *
-   * `configOf()` 从 Phase 3 起就是函数，但先前没有任何东西会改它指向的对象 ——
-   * 所以它返回的恒是启动时那份，「热更新只有形状没有入口」。
+   * `configOf()` 是函数，但只有这里会改它指向的对象 —— 没有这个入口，
+   * 它返回的恒是启动时那份，「热更新只有形状没有入口」。
    *
    * ## 顺序刻意是「先写盘，再换引用」
    *
@@ -193,31 +192,27 @@ async function main(): Promise<void> {
         next.gateway.headersTimeoutMs !== config.gateway.headersTimeoutMs ||
         next.gateway.bodyTimeoutMs !== config.gateway.bodyTimeoutMs;
       config = next;
-      if (timeoutsChanged) {
-        egress.updateTimeouts({
-          headersTimeoutMs: next.gateway.headersTimeoutMs,
-          bodyTimeoutMs: next.gateway.bodyTimeoutMs,
-        });
-      } else {
-        void egress.reset().catch((err) => {
-          console.error(`出口缓存重置失败(下次请求可能仍用旧连接):${safeErrorMessage(err)}`);
-        });
+      /*
+       * 出口缓存失效。
+       *
+       * `EgressService` 按 bridgeId 缓存 Controller 客户端、按节点名缓存
+       * dispatcher，而 `apiBase`/`apiSecret` 变了必须重建 —— 否则会继续连旧地址
+       * 或用旧凭证，症状是「密码明明改对了还是 401」。超时变了则新池带新超时。
+       *
+       * 失败(停机中服务已关闭)只记日志:配置已经写盘生效,这一点不该被它推翻。
+       */
+      try {
+        egress.reset(
+          timeoutsChanged
+            ? { headersTimeoutMs: next.gateway.headersTimeoutMs, bodyTimeoutMs: next.gateway.bodyTimeoutMs }
+            : undefined,
+        );
+      } catch (err) {
+        console.error(`出口缓存重置失败(下次请求可能仍用旧连接):${safeErrorMessage(err)}`);
       }
     });
     configWrite = run.catch(() => {});
     await run;
-    /*
-     * 出口缓存失效。
-     *
-     * `EgressService` 按 bridgeId 缓存 Controller 客户端、按节点名缓存
-     * dispatcher，而 `apiBase`/`apiSecret` 变了必须重建 —— 否则会继续连旧地址
-     * 或用旧凭证，症状是「密码明明改对了还是 401」。`reset()` 正是为此存在的
-     * （它的注释写着「配置变更后让缓存失效」），而在 Phase 9 之前
-     * **没有任何调用点**。
-     *
-     * 不 await 也不吞掉:它只关连接池,失败不影响配置已经生效这个事实,
-     * 但要能被看见。
-     */
   };
 
   /*
@@ -235,7 +230,7 @@ async function main(): Promise<void> {
   }
 
   /*
-   * 批量探测的执行器（Phase 9 批次 2）。
+   * 批量探测的执行器。
    *
    * **必须在 `applyConfig` 之后建**：它要拿那个函数把实测 IP 写回配置。
    *
@@ -257,7 +252,7 @@ async function main(): Promise<void> {
       store: batchStore,
       log: (message) => console.error(message),
       /*
-       * 批测前探一遍内核并锁定一个（Phase 10）。
+       * 批测前探一遍内核并锁定一个。
        *
        * `probeBridges` 只读 `/version` 与 `/proxies`，不改任何状态，
        * 所以能并发、也不会干扰在途的转发。
@@ -304,11 +299,9 @@ async function main(): Promise<void> {
   /*
    * 端口由 `store/port.ts` 单点解析 —— `ZG_PORT` > `config.gateway.port` > 9876。
    *
-   * 这里刻意**不**自己读 `config.gateway.port`,尽管配置已在内存里:端口先前在
-   * 三处各自手写解析(本文件、`service.mjs`、`vite.config.ts`),而 Phase 3 就因
-   * 两处脱节炸过一次 —— 我把监听端口改成读配置却没同步脚本,脚本于是去探一个
-   * 没人监听的端口,健康等待超时后报「启动失败」,而服务其实已经起来了。
-   * 第三处(vite 代理)到 2026-09-23 梳理时还是硬编码的 9876。
+   * 这里刻意**不**自己读 `config.gateway.port`,尽管配置已在内存里:本文件、
+   * `service.mjs`、`vite.config.ts` 若各自手写解析,任意两处脱节都会让脚本去探
+   * 一个没人监听的端口,健康等待超时后报「启动失败」,而服务其实已经起来了。
    *
    * 必须在 `loadConfig()` **之后**调用:首启时那一步才会把默认配置落盘。
    */
@@ -337,8 +330,7 @@ async function main(): Promise<void> {
      *
      * 顺序要紧:预热要发网络请求,而它放在 `listen` 之前会把启动时间挂在
      * 上游的响应速度上。`service.mjs` 的健康等待有超时,于是一次上游慢响应
-     * 会被报成「启动失败」,而服务其实完全正常 —— 那正是 Phase 3 端口脱节
-     * 时踩过的同一种误报。
+     * 会被报成「启动失败」,而服务其实完全正常 —— 与端口脱节是同一种误报。
      *
      * 失败无所谓:`refreshIfStale` 自己吞异常并记失败时刻,而
      * `/v1/models` 被访问时会再试一次(`ensure`)。预热只是让**第一个**
@@ -360,13 +352,57 @@ async function main(): Promise<void> {
     process.exit(1);
   });
 
-  const shutdown = async (): Promise<void> => {
-    // 关掉 dispatcher 池,避免 keep-alive 连接把进程吊住。
-    await egress.close().catch(() => {});
-    process.exit(0);
+  /*
+   * 优雅停机:停止接受新连接 → 限时等在途请求与出口连接排空 → 超时就强断 →
+   * 关库 → 退出。
+   *
+   * 限时低于 `service.mjs` 的 10 秒停止等待:一条长 SSE 可能持续几分钟,
+   * 无限期等待会让 `npm run stop` 报「未响应 SIGTERM」。超时后先断客户端连接,
+   * 客户端取消会沿请求链传到上游;再 destroy 出口池,收拾余下的上游连接。
+   * 热更新换下、仍在排空的旧池无法从外部强断,由随后的进程退出结束。
+   *
+   * 重复信号(SIGTERM 后又按 Ctrl-C)复用同一次停机,不重入。
+   */
+  let stopping: Promise<void> | null = null;
+  const shutdown = (): Promise<void> => {
+    stopping ??= (async () => {
+      // 先等 HTTP 服务排空再关出口:undici 的池一旦开始 close 就无法再被 destroy,
+      // 超时路径需要当前池仍可强断。
+      const drained = new Promise<void>((resolve) => server.close(() => resolve()))
+        .then(() => egress.close())
+        .then(() => true);
+      let timer: NodeJS.Timeout | undefined;
+      const timedOut = new Promise<false>((resolve) => {
+        timer = setTimeout(() => resolve(false), SHUTDOWN_DRAIN_MS);
+      });
+      const clean = await Promise.race([drained, timedOut]);
+      clearTimeout(timer);
+      if (!clean) {
+        console.error(`停机等待在途请求超过 ${SHUTDOWN_DRAIN_MS / 1000}s,强制断开剩余连接`);
+        closeAllConnections(server);
+        egress.destroy();
+      }
+      try {
+        db?.close();
+      } catch (err) {
+        console.error(`关闭运行时数据库失败:${safeErrorMessage(err)}`);
+      }
+      process.exit(0);
+    })();
+    return stopping;
   };
   process.on("SIGTERM", () => void shutdown());
   process.on("SIGINT", () => void shutdown());
+}
+
+/** 停机时等待在途请求排空的上限。须低于 `scripts/service.mjs` 的 10 秒停止等待。 */
+const SHUTDOWN_DRAIN_MS = 5_000;
+
+/** `serve()` 的返回类型是 http/http2 服务的联合;只有 http 服务有这个方法。 */
+function closeAllConnections(server: object): void {
+  if ("closeAllConnections" in server && typeof server.closeAllConnections === "function") {
+    (server.closeAllConnections as () => void).call(server);
+  }
 }
 
 await main();

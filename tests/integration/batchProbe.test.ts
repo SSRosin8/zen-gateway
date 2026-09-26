@@ -126,7 +126,7 @@ describe("进度归服务端所有", () => {
     expect(store.load()).toEqual({ progress: INITIAL, startedAt: null });
   });
 
-  it("**`started_at` 每批都要更新** —— 否则第一批的值会存一辈子（缺口 #28）", () => {
+  it("**`started_at` 每批都要更新** —— 否则第一批的值会存一辈子", () => {
     /*
      * 先前 `started_at` 不在 upsert 的列清单里，于是行建好之后再也不变。
      * 当时没有读者所以不出症状，而那正是"死信息"的形态 —— 一旦有人显示
@@ -162,6 +162,21 @@ describe("进度归服务端所有", () => {
      */
     const fresh = new BatchProbeStore(db);
     expect(fresh.load().progress).toEqual(progress);
+  });
+
+  it("读不出进度时不抛:记一次失败、返回初始进度、之后不再写", () => {
+    store.save({ ...INITIAL, state: "running" }, 1_700_000_000_000);
+    const broken = new BatchProbeStore(db);
+    // 语句已预编译;之后表结构坏掉,读取才在运行期失败 —— 模拟部分损坏的库。
+    db.exec("DROP TABLE batch_probe_jobs");
+    db.exec("CREATE TABLE batch_probe_jobs (id TEXT PRIMARY KEY)");
+
+    expect(() => broken.recoverInterrupted(1_700_000_000_000)).not.toThrow();
+    expect(broken.load().progress).toEqual(INITIAL);
+    expect(broken.writeFailures().count).toBeGreaterThan(0);
+    const failuresAfterLoad = broken.writeFailures().count;
+    broken.save({ ...INITIAL, state: "screening" }, 1_700_000_000_000);
+    expect(broken.writeFailures().count).toBe(failuresAfterLoad);
   });
 
   it("六个状态都能落盘（库的 CHECK 与状态机字母表同源）", () => {
@@ -319,14 +334,13 @@ describe("执行器", () => {
     /*
      * 这是分两段的**全部意义**:一个配置坏了的代理不该占一次几秒的真实探测。
      *
-     * ## 构造这个 fixture 花了两次
+     * ## 为什么不用「只能桥接的代理 + `clash.enabled: false`」
      *
-     * 第一版用「只能桥接的代理 + `clash.enabled: false`」—— 被 `ConfigSchema`
-     * 的 `superRefine` 拒了（它有一条「该代理只能经 Clash 桥接，但
-     * clash.enabled 为 false」）。**那是 schema 在做它该做的事**：那种配置
+     * 那种配置会被 `ConfigSchema` 的 `superRefine` 拒掉（它有一条「该代理
+     * 只能经 Clash 桥接，但 clash.enabled 为 false」）。**那是 schema 在做它该做的事**：那种配置
      * 加载时就该失败，所以它不可能作为一份合法配置存在。
      *
-     * 换成**已停用**的代理:`resolveProxy` 对 `disabled` 也返回失败，
+     * 所以用**已停用**的代理:`resolveProxy` 对 `disabled` 也返回失败，
      * 而 `enabled: false` 的代理在 schema 里完全合法（那是用户的正常操作）。
      * 于是筛选段的「挡掉」行为有了一条**真实可达**的路径。
      *
@@ -389,8 +403,6 @@ describe("执行器", () => {
 
   it("中途暂停再恢复后，进度不丢 —— 完成时 mainDone 必须追平 mainTotal", async () => {
     /*
-     * 第八轮审核查出的一个**真实缺陷**在这里钉住。
-     *
      * `#waitIfPaused()` 原先只在循环**开头**等,于是「点暂停时正在途中的那一发」
      * 会照常返回并 dispatch `probed`。reducer 对暂停态的处置是「不推进」——
      * 那条规则本身是对的（它挡的是前端在途轮询造成的「暂停了进度还在涨」）,
@@ -402,7 +414,7 @@ describe("执行器", () => {
      *
      * ## 为什么必须用一个可控的探测,而不是本机 echo
      *
-     * 第一版用真实 echo 服务写这条,**它对着缺陷版本也通过** —— 因为本机探测
+     * 用真实 echo 服务写这条,**它对着缺陷版本也通过** —— 因为本机探测
      * 几毫秒就结束了,`pause()` 根本挤不进「探测在途」那个窗口。
      * 那是一条空壳断言:缺陷要求的时序是「pause 发生在 await 期间」,
      * 而那条路径在测试里从不发生（纪律 #1 的四分类里的「路径不存在」）。
@@ -493,7 +505,7 @@ describe("执行器", () => {
 });
 
 /* ================================================================== *
- * 第 0 段：内核择优的结果必须写回配置（第十轮审核）
+ * 第 0 段：内核择优的结果必须写回配置
  * ================================================================== */
 
 describe("批测前的内核锁定真的改变后续行为", () => {

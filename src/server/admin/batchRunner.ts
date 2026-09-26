@@ -45,7 +45,7 @@ export type BatchRunnerDeps = {
   readonly log?: (message: string) => void;
   readonly now?: () => number;
   /**
-   * 批测开始前探一遍 Clash 内核（Phase 10）。
+   * 批测开始前探一遍 Clash 内核。
    *
    * 不传则跳过锁定 —— 那是**降级而不是等价**：不锁的话一批探测跑到一半
    * 换了内核，后半批量到的是另一个内核的出口，而隔离报告把两批混在一起
@@ -123,10 +123,10 @@ export class BatchProbeRunner {
      *
      * 判据用 `isUsable` 而不是手写一份 `enabled && apiKey.trim() !== ""`:
      * `POST /api/probe` 用的就是它（`routes/admin.ts`）,两处必须同源。
-     * 这里先前是手写的第二份 —— 今天两者行为相同,但 `isUsable` 的判据
+     * 手写第二份的话,今天两者行为相同,但 `isUsable` 的判据
      * （看 key 而不看 kind）是一个**记录在案的决定**,它变的时候手写那份不会跟着变。
      * 分叉方向具体:批量探测会去探调度器永远不会用的节点,
-     * 而隔离报告正是拿两边的结果拼出来的。第八轮审核查出（纪律 #4）。
+     * 而隔离报告正是拿两边的结果拼出来的（纪律 #4）。
      */
     const proxyIds = [...new Set(config.workers.filter(isUsable).map((w) => w.proxyId))];
     if (proxyIds.length === 0) return false;
@@ -192,7 +192,7 @@ export class BatchProbeRunner {
      */
     let config = this.#deps.configOf();
 
-    /* ---- 第 0 段：锁定单内核（Phase 10） ---- */
+    /* ---- 第 0 段：锁定单内核 ---- */
     if (this.#deps.probeBridges !== undefined && config.clash.enabled) {
       /*
        * 批测期间锁定一个内核 —— 不变量 #5 的延伸。
@@ -209,10 +209,10 @@ export class BatchProbeRunner {
        *
        * `pickBridge`（`pool.ts`）是转发与探测**实际**取端口的地方，而它是纯
        * 配置推导 —— 它从不知道内核是否活着，auto 模式下优先用
-       * `activeBridgeId`（"最近一个健康内核"）。先前这里只把 `locked.reason`
-       * 打进日志、丢掉 `bridgeId`，于是两者给出相反的答案：日志正确地说
+       * `activeBridgeId`（"最近一个健康内核"）。若只把 `locked.reason`
+       * 打进日志、丢掉 `bridgeId`，两者会给出相反的答案：日志正确地说
        * "自动切换到 live kernel"，而随后每次 `resolveProxy` 仍拿到死内核的
-       * 端口，全部桥接代理传输失败。**"锁定"这个词在那个版本里没有所指。**
+       * 端口，全部桥接代理传输失败。**"锁定"这个词就没有所指。**
        *
        * 写回 `activeBridgeId` 同时解决两件事：这一批的后续探测走健康内核，
        * 且 `pickBridge` 的 `remembered` 终于真的是"最近一个健康的那个"。
@@ -302,8 +302,8 @@ export class BatchProbeRunner {
        * 而每点一次暂停就再丢一个。
        *
        * 所以:暂停期间**不推进进度条**（用户看到的语义不变）,但恢复之后
-       * 要把这一发补上。等到恢复再 dispatch 就同时满足这两条。
-       * 第八轮审核实测查出（3 个节点暂停一次 → 终态 `mainDone:2/3`）。
+       * 要把这一发补上。等到恢复再 dispatch 就同时满足这两条
+       * （否则 3 个节点暂停一次 → 终态 `mainDone:2/3`）。
        */
       await this.#waitIfPaused();
       this.#dispatch({ type: "probed" });
@@ -332,7 +332,7 @@ export class BatchProbeRunner {
     /*
      * 走 `applyProbeResults`（与 `POST /api/probe` 同一个函数）—— 它同时处理
      * **本机直连**那条（合成 id → `gateway.directEgressIp`）。
-     * 两处各写一遍必然漏，先前就是两处都只并了 proxies（缺口 #28）。
+     * 两处各写一遍必然漏，典型的漏法就是两处都只并了 proxies。
      */
     const merged = applyProbeResults(config, outcomes);
     if (!merged.changed) return;

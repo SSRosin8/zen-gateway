@@ -82,7 +82,7 @@ export type RelayDeps = {
   readonly clock?: () => number;
   readonly log?: (message: string) => void;
   /**
-   * 统计写入（Phase 7）。不传则不记 —— 统计是诊断设施，
+   * 统计写入。不传则不记 —— 统计是诊断设施，
    * 不传它的测试（大多数）测的是转发行为本身，不该为此各建一个库。
    *
    * 实现侧**不得抛异常**：写统计失败绝不能让一个本来会成功的转发失败。
@@ -131,11 +131,24 @@ export type { RejectionReason };
 
 /** 客户端请求体上限。转发面对多模态保持宽松,但不能无界。 */
 const MAX_RELAY_BODY_BYTES = 64 * 1024 * 1024;
-const MAX_RESPONSE_ID_BYTES = 128 * 1024;
+export const MAX_RESPONSE_ID_BYTES = 128 * 1024;
 
-function createResponseIdCollector(parse: (payload: unknown) => string | null) {
+/**
+ * 非流式体超出扫描预算时,只认顶层对象的**第一个成员**是 `"id"` 的形态。
+ *
+ * 截断的 JSON 无法整体解析,而这里不另写 JSON 解析器(纪律 #5):第一个成员
+ * 必然在顶层,字符串字面量本身仍交给 `JSON.parse` 解码。Responses 的非流式体
+ * 以 `id` 开头,所以大体积响应(长输出)也能续链;id 不在开头时放弃。
+ */
+const LEADING_ID = /^\s*\{\s*"id"\s*:\s*("(?:[^"\\\u0000-\u001f]|\\.)*")/;
+
+export function createResponseIdCollector(parse: (payload: unknown) => string | null) {
+  /** 当前未结束的行。超过预算时整行丢弃(`dropping`),直到下一个换行。 */
   let pending = "";
+  let dropping = false;
+  /** 非流式体的前缀,最多 `MAX_RESPONSE_ID_BYTES`;`truncated` 表示后面还有。 */
   let buffered = "";
+  let truncated = false;
   let id: string | null = null;
   let sawEvent = false;
 
@@ -154,27 +167,46 @@ function createResponseIdCollector(parse: (payload: unknown) => string | null) {
 
   return {
     feed(text: string): void {
-      if (!sawEvent) {
-        if (buffered.length + text.length <= MAX_RESPONSE_ID_BYTES) buffered += text;
-        else buffered = "";
+      if (!sawEvent && !truncated) {
+        const room = MAX_RESPONSE_ID_BYTES - buffered.length;
+        if (text.length <= room) {
+          buffered += text;
+        } else {
+          buffered += text.slice(0, room);
+          truncated = true;
+        }
       }
-      if (pending.length + text.length > MAX_RESPONSE_ID_BYTES) {
-        pending = "";
-        return;
-      }
-      pending += text;
+      /*
+       * 预算按**行**计:一条超长的 delta 行只丢它自己,同一块里其后的
+       * `response.completed` 行照常解析。超限时若整块丢弃,恰好会丢掉
+       * 跟在长行后面的那条带 id 的事件。
+       */
+      let start = 0;
       for (;;) {
-        const at = pending.indexOf("\n");
+        const at = text.indexOf("\n", start);
         if (at === -1) break;
-        consume(pending.slice(0, at));
-        pending = pending.slice(at + 1);
+        const piece = text.slice(start, at);
+        if (!dropping && pending.length + piece.length <= MAX_RESPONSE_ID_BYTES) consume(pending + piece);
+        pending = "";
+        dropping = false;
+        start = at + 1;
+      }
+      const tail = text.slice(start);
+      if (dropping) return;
+      if (pending.length + tail.length <= MAX_RESPONSE_ID_BYTES) {
+        pending += tail;
+      } else {
+        pending = "";
+        dropping = true;
       }
     },
     value(): string | null {
-      if (pending !== "") consume(pending);
+      if (pending !== "" && !dropping) consume(pending);
       if (id !== null || sawEvent || buffered === "") return id;
       try {
-        return parse(JSON.parse(buffered));
+        if (!truncated) return parse(JSON.parse(buffered));
+        const leading = LEADING_ID.exec(buffered);
+        return leading === null ? null : parse({ id: JSON.parse(leading[1]!) as unknown });
       } catch {
         return null;
       }
@@ -220,9 +252,9 @@ async function handleRelay(
   const nowOf = (): number => deps.clock?.() ?? Date.now();
 
   /*
-   * 网关拒绝的记账（规划要求的第六项统计）。
+   * 网关拒绝的记账（需求里的第六项统计）。
    *
-   * 六条在打上游**之前**就返回的路径此前全部零记录 —— 于是「我有多少请求
+   * 六条在打上游**之前**就返回的路径若不记录 —— 「我有多少请求
    * 被网关自己挡了」无法回答，而 `not_free` 与 `retired` 的处置完全不同
    * （前者改模型名、后者删 `extraFreeIds` 条目），哪种发生得多也不可观测。
    *
@@ -244,7 +276,7 @@ async function handleRelay(
      * **有界读取**，不是 `arrayBuffer()` 然后量长度。
      *
      * 后者下整个体已经进了内存，上限只限制转发而不限制占用 ——
-     * 第十轮审核实测 64 MiB 的闸门下发 200 MiB，网关照旧读入 200 MiB。
+     * 64 MiB 的闸门下发 200 MiB，网关会照旧读入 200 MiB。
      * 理由与实现见 `server/boundedBody.ts`。
      */
     raw = await readBoundedBody(c.req.raw, MAX_RELAY_BODY_BYTES);
@@ -289,7 +321,7 @@ async function handleRelay(
    *
    * ## 槽位必须与写入方同源推导,不能硬写字面量
    *
-   * 先前这里写的是 `cached("keyed")`,理由是"转发候选链里每个 Worker 都有 key,
+   * 不能硬写 `cached("keyed")`,理由看似是"转发候选链里每个 Worker 都有 key,
    * 所以身份恒为带 key"。**那个推理是错的**,而且错在时序上:免费判定是
    * **第 3 步**,选 Worker 是**第 5 步** —— 第 3 步执行时候选链还不存在,
    * 所以"候选链里都有 key"在这一刻不是可用前提。
@@ -300,18 +332,17 @@ async function handleRelay(
    * keyed 槽,「判出下架就刷一次」这个自纠正机制**结构上失效**。
    * 用户按 403 的指引去刷 `/v1/models`,看到模型确实在架,却仍然被拒。
    *
-   * 现在两侧同源:身份与槽位都由 `catalogIdentityOf` 单点决定,分叉写不出来。
+   * 所以两侧同源:身份与槽位都由 `catalogIdentityOf` 单点决定,分叉写不出来。
    *
    * ## 一个槽位的目录用于**所有** Worker,依据是免费子集一致
    *
-   * 本阶段实测(三个付费账号,三轮稳定):整份目录**按账号不同**
+   * 实测(三个付费账号,多次稳定):整份目录**按账号不同**
    * (两个账号 41 个模型、一个 79 个),但**免费子集三个账号完全一致**
    * (各 9 个,逐 id 相同)。交集要的恰好是那个一致的子集,所以这里不需要
    * 知道最终路由到哪个 Worker。
    *
-   * 我先前在这里写的是"目录按带 key／免 key 区分,不按账号个体" ——
-   * **那句也是错的**,第三个账号就推翻了它。详见 `catalog.ts` 文件头记的
-   * 三次修正。现在这条注释只声称被测量支持的那个更弱的性质。
+   * 不能写成"目录按带 key／免 key 区分,不按账号个体" —— 第三个账号就推翻了它,
+   * 推理详见 `catalog.ts` 文件头。这条注释只声称被测量支持的那个更弱的性质。
    *
    * 若免费子集哪天也按账号分化,两侧后果不对称:缓存里**多**一个 →
    * 上游 400 `bad_request`,不重试不归咎,自限;缓存里**少**一个 →
@@ -341,9 +372,9 @@ async function handleRelay(
      * 且是公开目录里的标识,不是凭证也不是他人数据。而没有它这条错误就无法自查
      * —— 用户看到「模型不允许」却不知道是哪个模型被拒。
      *
-     * 两种拒绝分开措辞。`retired` 是 Phase 6 才有的新结局:模型的**免费依据
-     * 成立**(后缀或名单命中)但它**已不在上游在架目录**里。先前这类请求会被
-     * 放行然后由上游返回 400 `Model is unavailable.`,用户看到的是上游措辞,
+     * 两种拒绝分开措辞。`retired` 的含义是:模型的**免费依据
+     * 成立**(后缀或名单命中)但它**已不在上游在架目录**里。若放行这类请求,
+     * 上游会返回 400 `Model is unavailable.`,用户看到的是上游措辞,
      * 完全指不到"这个 id 已经下架了,把它从 extraFreeIds 里删掉"。
      */
     if (verdict.reason === "retired") {
@@ -383,9 +414,9 @@ async function handleRelay(
    * 放行了,但**有没有经过在架核验**要如实报出来。
    *
    * `judgeFree` 刻意为此造了 `suffix_unverified`/`extra_unverified` 两个 reason,
-   * 文件头也写明理由是"让诊断能看出这次没做交集" —— 但第六轮审核 grep 出
-   * **全仓没有任何读者**。那正是第四轮那个 `streaming` 字段的形态:声明了、
-   * 被文档说明、却没有一处读它,只是这次藏在一个看起来被用到的联合类型分支里。
+   * 文件头也写明理由是"让诊断能看出这次没做交集" —— 没有读者的话,它就是
+   * 声明了、被文档说明、却没有一处读它的字段,藏在一个看起来被用到的联合类型分支里。
+   * 这里就是它的读者。
    *
    * 用诊断头而不是日志:一个离线环境里**每个请求**都会是 unverified,
    * 打日志等于每条请求刷一行。而头是按需查看的,与 `x-zen-gateway-route`
@@ -406,10 +437,9 @@ async function handleRelay(
   /*
    * 面声明的流式能力必须真的被执行,否则 `streaming` 只是一个注释。
    *
-   * 这条先前不存在:`ProtocolSurface.streaming` 被声明、被文档说明「`"none"`
-   * 为 jev 这类非流式面预留」,但全仓没有任何一处读它 —— 把 `chatSurface`
-   * 的 `"optional"` 改成 `"none"` 后 859 条测试全绿。那是一个**声明了却不设防
-   * 的能力位**:Phase 6 若按规划新增一个 `streaming: "none"` 的面,客户端发
+   * `ProtocolSurface.streaming` 被声明、被文档说明「`"none"`
+   * 为 jev 这类非流式面预留」;没有这条校验,它就是一个**声明了却不设防
+   * 的能力位**:新增一个 `streaming: "none"` 的面后,客户端发
    * `stream: true` 会被照常加上 `Accept: text/event-stream` 并走流式泵,
    * 而上游那个面根本不产生 SSE —— 症状是挂住或拿到一段解析不了的响应。
    *
@@ -433,7 +463,7 @@ async function handleRelay(
   /*
    * 时钟取值点:**每个需要时刻的动作各自取一次**,不共用一个。
    *
-   * 先前这里只取一次 `now` 并让整条链共用,而第五轮审核实测出后果:
+   * 不能只取一次 `now` 并让整条链共用:
    * 一次尝试可以耗 60-300 秒(headers/body 超时),于是冷却从**请求开始**
    * 时刻起算,算出来的到期时刻早已成为过去。
    *
@@ -518,6 +548,11 @@ async function handleRelay(
       body: raw,
       signal: c.req.raw.signal,
       deps: deps.upstreamOf(config),
+      // 只有做了目录交集且命中的判定才算核验过;关掉交集或缺目录时 401 可能只是模型名问题。
+      modelVerified:
+        config.models.enforceCatalog &&
+        verdict.reason !== "suffix_unverified" &&
+        verdict.reason !== "extra_unverified",
       /*
        * 冷却记账。逐次回调,而不是等链结束一次性记 ——
        * 链中每一次尝试都是一个独立的事实:`w1 限流 → w2 传输失败 → w3 成功`
@@ -529,8 +564,8 @@ async function handleRelay(
        */
       /*
        * 把注入的时钟传下去 —— 否则 `AttemptRecord.latencyMs` 恒用 `Date.now()`,
-       * 于是它**结构上不可被测试固定**。第七轮审核实测:把 `latencyMs` 写死 0
-       * 之后集成测试仍然全绿,因为没有任何断言能预期一个真实 IO 的耗时。
+       * 于是它**结构上不可被测试固定**:把 `latencyMs` 写死 0
+       * 之后集成测试仍会全绿,因为没有任何断言能预期一个真实 IO 的耗时。
        *
        * 传下去之后注入常量时钟会让耗时恒为 0（那是**正确**的:两次读同一个
        * 时钟），所以要钉住"耗时真的被测量"需要一个**递进**的时钟，
@@ -574,6 +609,13 @@ async function handleRelay(
         }),
     });
   } catch (err) {
+    /*
+     * 客户端已断开:重试链因取消而抛出,不是网关故障。不记"转发失败"、不造 500 ——
+     * 那会把每次用户按停止都记成一次错误。已发生的尝试已经在 `onAttempt` 里记过账。
+     */
+    if (c.req.raw.signal.aborted) {
+      return new Response(null, { status: 499 });
+    }
     // buildHeaders 抛的 HeaderValidationError 会走到这里 —— 那是 400。
     const mapped = errorBodyFromException(err);
     deps.log?.(`转发失败: ${logMessageFor(err)}`);
@@ -592,14 +634,14 @@ async function handleRelay(
    *
    * ## body 的释放责任在 pipe,不在这里
    *
-   * 这一点先前写错了。原注释承诺"这层兜底保证**无论如何 body 都被处置**",
-   * 而第五轮审核指出:加了 tap 之后那个承诺**结构上不可能成立** ——
+   * 这层兜底**不能**承诺"无论如何 body 都被处置":
+   * 加了 tap 之后那个承诺**结构上不可能成立** ——
    * `tapReadable` 内部 `getReader()` 锁住了流,于是这里的
    * `upstream.body?.cancel()` 会异步拒绝 `Invalid state: ReadableStream is
    * locked`,并被 `.catch()` 静默吞掉。实测后果:连接泄漏到 `bodyTimeout`
    * (5 分钟)、`onDone` 一次都不触发(不变量 #3 整条漏掉)。
    *
-   * 现在 `pipe.ts` 在自己的失败路径上释放它锁住的流(见那里的
+   * 所以 `pipe.ts` 在自己的失败路径上释放它锁住的流(见那里的
    * `releaseOnFailure`)—— **谁锁的谁负责**。这里只保留日志与错误形状:
    * 那两件事仍然只有这一层能做。
    */
@@ -623,17 +665,13 @@ async function handleRelay(
     /*
      * 用量收集 —— `ProtocolSurface.parseUsage` 的**生产调用点**。
      *
-     * 这一条刻意与面一同落地,而不是等到 Phase 7 需要它时再接。第四轮审核的
-     * `streaming` 字段就是反面教材:它被声明、被文档说明、却**全仓没有一处读它**,
-     * 把 `chatSurface` 的 `"optional"` 改成 `"none"` 后 859 条测试全绿 ——
-     * 一个声明了却不设防的能力位。`parseUsage` 若只有接口与实现而没有调用点,
-     * 就是同一个形态:三个面各写一份解析,而它们是否接对了没有任何东西会发现。
+     * `parseUsage` 若只有接口与实现而没有调用点,就是一个声明了却不设防的
+     * 能力位:三个面各写一份解析,而它们是否接对了没有任何东西会发现。
      *
-     * 现在它有了唯一真实读者,于是"面接错了信封"会在集成测试里表现出来。
-     *
-     * 眼下的消费方式只有日志(Phase 7 才把它写进 `runtime.db` 做聚合)——
-     * 但这是**真的调用**,不是占位:接错面、改坏字段归一化、把跨事件合并
-     * 去掉,都会让日志里的数字变错并被测试抓住。
+     * 这里是它的唯一真实读者,于是"面接错了信封"会在集成测试里表现出来。
+     * 结果既写日志也经 `deps.stats` 入库(见 `onDone`)—— 这是**真的调用**,
+     * 不是占位:接错面、改坏字段归一化、把跨事件合并去掉,都会让数字变错并被
+     * 测试抓住。
      */
     const usage = createUsageCollector((payload) => surface.parseUsage(payload));
     try {
@@ -651,10 +689,10 @@ async function handleRelay(
            * 包着(那个 catch 是对的:结算失败不该让一个已成功的响应炸掉)。
            * 但它的副作用是:回调里**任何**一句抛出,后面的全部不执行,而且静默。
            *
-           * 先前日志排在结算前面,于是 `deps.log` 一旦抛(磁盘满、自定义
-           * logger 出错、Phase 7 换成写 DB 的实现),不变量 #3 的结算
+           * 日志若排在结算前面,`deps.log` 一旦抛(磁盘满、自定义
+           * logger 出错、换成写 DB 的实现),不变量 #3 的结算
            * **一次都不会执行** —— 客户端完全正常拿到全部字节,只是亲和学习
-           * 与解绑静默消失。症状就是 Phase 5 那条"对话隔一会儿报一次错"。
+           * 与解绑静默消失。症状是"对话隔一会儿报一次错"。
            *
            * 规则写成一句耐久的话:**`onDone` 里不变量相关的动作排在诊断动作
            * 之前**。这比"别让 log 抛"耐久 —— 后者是对调用方的期望,前者是结构。
@@ -690,7 +728,7 @@ async function handleRelay(
            * 而每个请求打一行"用量: 无"只会淹没日志。
            *
            * `model` 是**客户端可控的任意字符串**,所以必须过 `redactText`。
-           * 第六轮审核实测出两个后果,都静默:
+           * 不过的话有两个后果,都静默:
            *
            * 1. **日志行注入**。model 里放一个 `\n` 就能伪造一条形态与真实记录
            *    无法区分的用量行(实测:落盘变成 3 行,其中一行完全冒充合法记录)。
@@ -713,7 +751,7 @@ async function handleRelay(
            * **我们自己丢过内容**要如实报出来,而不是让它看起来像"上游没报用量"。
            *
            * 两者的处置完全不同:上游没报不用改代码,而我们丢了说明界定错了
-           * (先前 `MAX_LINE_LENGTH` 就把 Responses 面一条合法的 600 KB
+           * (例如 `MAX_LINE_LENGTH` 过小会把 Responses 面一条合法的 600 KB
            * `response.completed` 整条弃掉,且结果取决于上游的分块位置)。
            * 任何常量都可能被越过,所以**越过时可观测**比把常量调大更耐久。
            */
@@ -722,11 +760,11 @@ async function handleRelay(
           }
 
           /*
-           * 用量入库(Phase 7)。
+           * 用量入库。
            *
            * **`totals === null` 也要记** —— 那一行进 `requests_without_usage`。
            * 少记它会让「usage 覆盖率」的分母漏掉这次请求,于是覆盖率虚高:
-           * 一个「上游从不报用量」的模型会显示成 100% 覆盖。规划里写的
+           * 一个「上游从不报用量」的模型会显示成 100% 覆盖。需求里的
            * 「缺失的 usage 如实显示为缺失,不估算」正是这个意思 ——
            * 而"如实"的前提是分母得数上它。
            *
@@ -744,9 +782,9 @@ async function handleRelay(
               /*
                * **我们自己丢了**要与「上游没报」分开记。
                *
-               * `createUsageCollector.dropped()` 的文档早就写明这两者必须分开
-               * （否则"覆盖率会把我们自己丢的计成上游没报的"），而
-               * Phase 7 只看 `totals`，把 `.dropped()` 的唯一读者留在一行日志上。
+               * `createUsageCollector.dropped()` 的文档写明这两者必须分开
+               * （否则"覆盖率会把我们自己丢的计成上游没报的"）；只看 `totals`
+               * 会把 `.dropped()` 的唯一读者留在一行日志上。
                * 与「不记 without 会让覆盖率虚高」严格对称，而处置方向相反：
                * 这一侧非 0 说明**我们的界定常量**要看（改代码），
                * 那一侧是上游的性质（不用改）。
@@ -801,9 +839,8 @@ async function handleRelay(
         "x-zen-gateway-route": plan.reason,
         /*
          * 成功前试了几个 Worker。**成功路径也要给** ——
-         * 这是「诊断手段只在一半路径可用」的第三次发生(前两次是 `route`
-         * 与 `free`,都修了),而第七轮审核发现文档写着"前三个头在成功与失败时
-         * 都有"却只有失败路径设置它。
+         * 与 `route`、`free` 一样,诊断头不能只在一半路径可用:文档写着
+         * "前三个头在成功与失败时都有"。
          *
          * 成功前重试过 2 个 Worker 恰恰是**该被看见**的信号:多账号轮换下
          * 它意味着前面那些进了冷却,而响应本身完全正常、日志也不会提。
@@ -826,12 +863,11 @@ async function handleRelay(
    * 而不结算会让下一轮回到同一个必败 Worker。状态码非 2xx,所以只会
    * 解绑与遗忘,不会学习 —— 因此 workerId 传 null(见 `settleStream` 的说明)。
    *
-   * ## 诊断头在失败时**更**需要,先前这里漏了
+   * ## 诊断头在失败时**更**需要
    *
-   * 第五轮审核查出:`x-zen-gateway-route` 只在成功路径设置,而我写的文档
-   * 却教用户"全员冷却时看 route 头" —— 那两个条件不可能同时成立
-   * (全员冷却且上游失败时走的正是这条路径)。缺口 #8 还把这个头当作
-   * 「当前唯一的调度状态观察手段」,于是用户在最需要它的时候拿不到。
+   * `x-zen-gateway-route` 若只在成功路径设置,文档教用户的"全员冷却时看
+   * route 头"就不可能成立(全员冷却且上游失败时走的正是这条路径)。它是
+   * 主要的调度状态观察手段,不能在用户最需要它的时候缺席。
    *
    * `worker` 头也补上:失败时"是哪个账号失败的"是首要问题。取最后一次
    * 尝试的 Worker —— 那是产出这个响应的那个。
@@ -849,9 +885,8 @@ async function handleRelay(
          *
          * 它要回答的问题恰好是一个失败:上游返回 400 `Model is unavailable` 时,
          * 是"目录说它在架但上游拒了"还是"我们压根没拿到目录"?只在成功路径设置
-         * 它,等于在唯一需要它的时候缺席 —— 而那正是第五轮查出的
-         * `x-zen-gateway-route` 那个缺陷的形态(我写文档教用户失败时看它,
-         * 而它只在成功时存在)。
+         * 它,等于在唯一需要它的时候缺席 —— 与上面 `x-zen-gateway-route`
+         * 是同一个道理。
          */
         ...freeHeaders,
       },

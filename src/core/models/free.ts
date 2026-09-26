@@ -10,17 +10,16 @@ import type { ModelRules } from "../../shared/schema.ts";
  * 把等价名单写成代码常量的话,目录一变就要
  * 改代码发版,而它硬编码的 `union-alpha` 已从上游目录消失。这里全部读配置。
  *
- * ## 交集这一步(Phase 6 补上的)
+ * ## 交集这一步
  *
  * 少了交集会**放得偏宽**:一个已下架的 `xxx-free` 后缀命中于是被放行,
  * 然后由上游拒绝。实测(2026-09-22,真实 key)真实行为是
  * **400 `Upstream request failed: Model is unavailable.`** → 归为
  * `bad_request` → 不重试、不归咎 Worker、原样透传。
  *
- * > 这里先前写的是推测且推测错了:原文说上游返回 404、经 `classifyStatus`
- * > 归为 `auth`、表现为「换 Worker 重试后仍失败」。实测行为比推测的**更好**
- * > (不会把健康 Worker 打进冷却,正是不变量 #4 要保的那件事),但缺口仍在:
- * > 用户看到的是上游措辞「模型不可用」,而不是「这个模型不在本网关的免费集里」。
+ * 不是 404 → `auth` → 「换 Worker 重试后仍失败」:实测不会把健康 Worker
+ * 打进冷却(正是不变量 #4 要保的那件事)。但缺口仍在:没有交集时,
+ * 用户看到的是上游措辞「模型不可用」,而不是「这个模型不在本网关的免费集里」。
  *
  * 交集还消掉一个**暴露面**:免 key 时同一个已下架 id 得到
  * **401 `ModelError: Model glm-5-free is not supported`** —— 上游把 401 同时
@@ -38,7 +37,7 @@ import type { ModelRules } from "../../shared/schema.ts";
  *   不产生费用。
  *
  * 若这里改成拒绝,一次上游抖动就会让网关拒绝**一切**请求 —— 用一个
- * 不花钱的风险换一次全面不可用。所以缺目录时退回 Phase 5 的行为,
+ * 不花钱的风险换一次全面不可用。所以缺目录时退回只看后缀／名单的判定,
  * 并用一个单独的 `reason` 让诊断能看出这次没做交集。
  *
  * ## 为什么默认拒绝
@@ -114,14 +113,14 @@ export function judgeFree(
  *
  * ## 生产调用点:`admin/project.ts`(Models 页),**只作展示 —— 不要接成闸门**
  *
- * Phase 9 批次 2 给了它第一个生产读者。但那条"不要顺手接上判定"的警告
- * **依然成立**,而且现在更要紧了(已经有一个调用点,下一个人容易照着扩):
+ * 它已经有一个生产读者,所以"不要顺手接上判定"的警告更要紧
+ * (下一个人容易照着扩):
  *
  * `defaultSurfaces` 的默认值是 `["chat", "responses"]`,若把它当放行闸门接上,
- * 默认配置下**所有**模型的 `/v1/messages` 请求都会被拒 —— 而那个面 Phase 6
- * 刚验证可用。也就是说"补上这个判定"会立刻打坏一个能用的功能。
+ * 默认配置下**所有**模型的 `/v1/messages` 请求都会被拒 —— 而那个面
+ * 已验证可用。也就是说"补上这个判定"会立刻打坏一个能用的功能。
  *
- * **语义已定（第九轮）**:它是「后台展示用的提示」，不是放行闸门。
+ * **语义已定**:它是「后台展示用的提示」，不是放行闸门。
  * 依据是已有的测量 —— 上游不按模型区分面（三个面对同一个免费模型都通），
  * 所以当闸门用缺乏依据；而接成闸门会让默认配置下所有 `/v1/messages`
  * 请求被拒。完整理由写在 `schema.ts` 的 `defaultSurfaces` 上。
@@ -129,8 +128,8 @@ export function judgeFree(
  * 真正的放行判定在 `ProtocolSurface.streaming`（协议面接口的能力位，
  * 由 `relay.ts` 第 4 步执行）—— 两者不要混。
  *
- * > 本段先前写着"⚠️ 本函数没有生产调用点"。第八轮审核查出那已过期。
- * > 手写的"有没有读者"标注必然漂 —— 见 `catalog.ts` 的 `status()` 同形态。
+ * 不要在这里手写"有没有生产调用点"之类的标注:那种标注必然漂 ——
+ * 见 `catalog.ts` 的 `status()` 同形态。
  */
 export function surfacesFor(modelId: string, rules: ModelRules): readonly string[] {
   return rules.surfaceOverrides[modelId] ?? rules.defaultSurfaces;

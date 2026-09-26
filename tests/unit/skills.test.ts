@@ -4,7 +4,7 @@ import { basename, join } from "node:path";
 import { PAGE_SIZE } from "../../src/admin/components/DataTable.tsx";
 
 /*
- * Skill 文档的关卡（Phase 11）。
+ * Skill 文档的关卡。
  *
  * ## 为什么 skill 也需要关卡
  *
@@ -13,13 +13,13 @@ import { PAGE_SIZE } from "../../src/admin/components/DataTable.tsx";
  *
  * 而它们恰好最容易漂：里面写满了具体数字（对比度、页长、端口）与
  * 具体符号名（`applyProbeResult`、`isUsable`、`PAGE_SIZE`）。
- * 第八轮审核的教训正是"手写的标注必然漂"，一轮之内漂了两处。
+ * 手写的标注必然漂，这类引用尤其如此。
  *
  * 所以这里钉住**能自动核对的那部分**：
  *   1. frontmatter 齐全（否则 skill 根本不会被加载）；
  *   2. 引用的 npm 脚本真的存在（纪律 #7：文档里写的命令要真跑）；
- *   3. 引用的纪律编号在 `AGENTS.md` 里真的有定义（第八轮发现过引用 #11
- *      而那份文档只定义到 8）；
+ *   3. 引用的纪律编号在 `AGENTS.md` 里真的有定义（编号曾出现两套并分叉，
+ *      引用过只存在于另一套里的编号）；
  *   4. 提到的源码符号真的还在（重命名后 skill 会指向一个不存在的东西）；
  *   5. 写进 skill 的几个关键常量与代码一致。
  *
@@ -81,7 +81,7 @@ const citedAcrossSkills: number[] = [];
 
 describe("skill 文档齐全且格式正确", () => {
   it("四个 skill 都存在", () => {
-    // 规划列的就是这四个。少一个意味着 Phase 11 没交付完。
+    // 固定就是这四个：少一个是 skill 被误删，多一个是新增后没登记到 EXPECTED_SKILLS。
     const dirs = readdirSync(SKILLS_DIR, { withFileTypes: true })
       .filter((e) => e.isDirectory())
       .map((e) => e.name)
@@ -133,7 +133,7 @@ describe("skill 里的引用不悬空", () => {
        */
       const text = skillText(name);
       /*
-       * 字符类要含**连字符**（第十轮审核）：`[a-z:]+` 会把
+       * 字符类要含**连字符**：`[a-z:]+` 会把
        * `npm run build-nonexistent` 截成 `build`（存在）→ 静默通过。
        * 末尾的 `\b` 防止把更长的名字截短后误判成存在的前缀。
        */
@@ -149,15 +149,15 @@ describe("skill 里的引用不悬空", () => {
 
     it(`${name} 引用的纪律编号在 AGENTS.md 里有定义`, () => {
       /*
-       * 第八轮审核发现规划文档在引用「纪律 #11」，而 AGENTS.md 当时只定义到 8
-       * —— 编号存在两套且已分叉。这条防止 skill 重蹈覆辙。
+       * 防止 skill 引用 AGENTS.md 里不存在的纪律编号（编号曾出现两套并分叉，
+       * 文档引用了只存在于另一套里的编号）。
        */
       const text = skillText(name);
       /*
-       * 先抓「纪律 #...」整段再从里面抽全部编号（第十轮审核）：
+       * 先抓「纪律 #...」整段再从里面抽全部编号：
        * `/纪律 #(\d+)/g` 对 `纪律 #8/#4` 只拿到 8 —— 而
-       * `dev-workflow/SKILL.md:107` 正在用这个写法，也就是那里的 `#4`
-       * 此前根本没被检查过。
+       * `dev-workflow/SKILL.md` 正在用这个写法，只抽首个编号会让 `#4`
+       * 这类后续编号逃过检查。
        */
       const cited = [...text.matchAll(/纪律 #\d+(?:\s*[/、]\s*#\d+)*/g)].flatMap((m) =>
         [...m[0].matchAll(/#(\d+)/g)].map((x) => Number(x[1])),
@@ -177,9 +177,9 @@ describe("skill 里的引用不悬空", () => {
        */
       const text = skillText(name);
       /*
-       * **裸文件名也要检查**（第十轮审核）。先前正则要求 `src/`/`scripts/`/
-       * `tests/` 前缀，而实测四个 skill 里带前缀的引用只有 **1 处**，
-       * 另有 10 处是 `` `clash/select.ts` ``、`` `pipe.ts` ``、`` `retry.ts` ``
+       * **裸文件名也要检查**。若正则要求 `src/`/`scripts/`/
+       * `tests/` 前缀，四个 skill 里带前缀的引用只占极少数，
+       * 其余都是 `` `clash/select.ts` ``、`` `pipe.ts` ``、`` `retry.ts` ``
        * 这类裸名 —— 全部在视野外，改坏它们全绿。那是「输入集为空」的形态。
        *
        * 裸名按 basename 在仓库里解析：唯一命中就算存在，命中多个也算
@@ -208,9 +208,9 @@ describe("skill 里的引用不悬空", () => {
     it(`${name} 提到的源码符号都存在`, () => {
       /*
        * 本文件头声称「提到的源码符号真的还在（重命名后 skill 会指向一个
-       * 不存在的东西）」，而第十轮审核实测**这条从来没有实现** ——
-       * 只有路径检查那一条 it，`applyProbeResult → applyProbeResultGONE`
-       * 全绿。那是「注释声称的覆盖 > 实际覆盖」，即给自己写假的强保证。
+       * 不存在的东西）」，这条 it 就是它的实现 —— 只有路径检查时，
+       * 把 skill 里的 `applyProbeResult` 改成 `applyProbeResultGONE` 会全绿。
+       * 那是「注释声称的覆盖 > 实际覆盖」，即给自己写假的强保证。
        *
        * 判据：反引号里形如标识符的词（含 `Xxx.yyy()` 的两段形式），
        * 在 `src/` + `scripts/` 的源码里必须出现过。刻意只认**看起来像符号**
@@ -285,7 +285,7 @@ describe("skill 里的关键常量与代码一致", () => {
   it("debug-egress 写的 CA 症状是 502，不是空列表", () => {
     /*
      * 那条记录错过一次，而错的版本（"200 加空列表"）在三份文档里互相印证了
-     * 一整个阶段，并成了 Phase 8 一整层诊断的设计依据（纪律 #11）。
+     * 很久，并成了一整层诊断的设计依据（纪律 #11）。
      * 这条钉住它不再复活。
      */
     const text = skillText("debug-egress");

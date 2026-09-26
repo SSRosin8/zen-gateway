@@ -45,15 +45,15 @@ const RETIRED_CAP = 512;
 /**
  * 就绪判定的**唯一**定义。
  *
- * 先前这个比较在四处各写一遍(`isReady`、`readyCount`、`snapshot`,以及
- * `select.ts` 的候选过滤)。按纪律 #4,并行的判断必然分叉,而分叉方向是漏 ——
+ * 这个比较有多个使用者(`isReady`、`snapshot`,以及
+ * `select.ts` 的候选过滤),不能各写一遍。按纪律 #4,并行的判断必然分叉,而分叉方向是漏 ——
  * 将来任何对"就绪"语义的改动(加一个 `disabledUntil`、或把 `<=` 改成 `<`)
- * 只会落在一处。更糟的是 `select.ts` 里**同一个函数**内两份判定并存:
+ * 只会落在一处。更糟的是 `select.ts` 里**同一个函数**内会两份判定并存:
  * 候选过滤用手写的,粘滞校验用 `pool.isReady`。
  *
  * NaN 防护在这里,而不是在每个调用点:`NaN <= now` 与 `x <= NaN` 都是 false,
  * 于是一个 NaN 会让 Worker **永久**不就绪 —— 这正是 `normalizeFails` 注释
- * 描述的那个后果,而它当时只防住了失败计数这一个入口。
+ * 描述的那个后果,而那里只防失败计数这一个入口。
  */
 export function isWorkerReady(cooldownUntil: number, now: number): boolean {
   if (!Number.isFinite(now)) return false;
@@ -80,12 +80,12 @@ export class WorkerPool {
   /**
    * 被过滤掉(停用/清空 key)的 Worker 的状态。
    *
-   * 不留这一份的后果是实测出来的:`sync()` 的 `previous` Map 从 `#workers` 建,
+   * 不留这一份的后果:`sync()` 的 `previous` Map 从 `#workers` 建,
    * 而它已被 `filter(isUsable)` 过滤 —— 停用的 Worker 不在里面。于是
    * 「停用 → 再启用」会让 `prior === undefined`,冷却与失败计数全清。
    * 实测:429 `Retry-After: 900` 之后停用再启用,剩余冷却从 900000ms 变成 0。
    *
-   * Phase 9 的管理后台点一下停用再启用就能抹掉上游明确要求的 15 分钟等待,
+   * 管理后台点一下停用再启用就能抹掉上游明确要求的 15 分钟等待,
    * 而那正是冷却存在的理由。所以停用要**保留**状态,与「换 key 才重置」一致。
    *
    * 有上限:配置里 Worker 最多 512 个,但这张表跨多次 sync 累积,
@@ -116,8 +116,8 @@ export class WorkerPool {
    * ## 停用再启用同样保留 —— 状态从 `#retired` 找回
    *
    * 只看 `#workers` 是不够的:它已被 `filter(isUsable)` 过滤,停用的 Worker
-   * 不在里面。第五轮审核实测:429 `Retry-After: 900` 之后停用再启用,
-   * 剩余冷却从 900000ms 变成 0 —— Phase 9 的后台点两下就能抹掉上游明确
+   * 不在里面。429 `Retry-After: 900` 之后停用再启用,
+   * 剩余冷却会从 900000ms 变成 0 —— 后台点两下就能抹掉上游明确
    * 要求的等待。停用不是「用户修好了这个账号」,不该获得与换 key 同等的重置。
    */
   sync(config: Config): void {
@@ -177,19 +177,10 @@ export class WorkerPool {
     return worker !== null && isWorkerReady(worker.cooldownUntil, now);
   }
 
-  readyCount(now: number): number {
-    return this.#workers.filter((w) => isWorkerReady(w.cooldownUntil, now)).length;
-  }
-
-  /** 供 `/health` 与管理后台:`poolHealth()` 的入参。 */
-  counts(now: number): { ready: number; total: number } {
-    return { ready: this.readyCount(now), total: this.#workers.length };
-  }
-
   /**
    * 记一次成功 —— 清零计数，并在**这次尝试确实晚于冷却**时解除冷却。
    *
-   * ## 为什么要看发起时刻（第十轮审核实测）
+   * ## 为什么要看发起时刻
    *
    * 「一次成功证明它现在能用」只在这次尝试**发出于冷却生效之后**才成立。
    * 而 `record()` 的调用顺序由**上游响应到达顺序**决定，不由发起顺序决定：
@@ -199,25 +190,26 @@ export class WorkerPool {
    * 请求B 发出 → 立刻 429 Retry-After: 900      ← 记账在前
    * ```
    *
-   * 先前这里无条件 `cooldownUntil: 0`，于是请求 A 那次成功（它在冷却生效
-   * **之前**就已发出，对"现在能不能用"零信息）把上游明确要求的 900 秒清成 0。
+   * 不能无条件 `cooldownUntil: 0`：那样请求 A 那次成功（它在冷却生效
+   * **之前**就已发出，对"现在能不能用"零信息）会把上游明确要求的 900 秒清成 0。
    * 触发不需要巧合：429 通常是账号级的，而多轮对话客户端天然并发。
    *
-   * 这是 `markNotBlamed` 那条判据的推广。那里写的是「『不归咎于 Worker』
-   * 不等于『证明它现在能用』」；同一条再推一步就是 **「一次成功」不等于
-   * 「现在能用」—— 要看它是什么时候发出的**。
+   * 这是「不归咎于 Worker 不等于证明它现在能用」那条判据的推广（见
+   * `Scheduler.record`）：**「一次成功」不等于「现在能用」—— 要看它是什么时候
+   * 发出的**。
    *
    * `attemptStartedAt` 由调用方按 `now - latencyMs` 算出（`AttemptRecord`
-   * 已有 `latencyMs`，不必新增字段）。取不到时传 `now`，那退化成原来的行为
+   * 已有 `latencyMs`，不必新增字段）。取不到时传 `now`，那退化成无条件解除
    * —— 对「尝试发出时没有冷却」这个最常见的情形完全一致。
    *
-   * 不可重试的 4xx **不要**用这个,用 `markNotBlamed()` —— 见那里的说明。
+   * 不可重试的 4xx **不要**用这个:它们不归咎也不证明可用,`Scheduler.record`
+   * 对它们不改任何状态。
    */
   markSuccess(workerId: string, attemptStartedAt: number): void {
     this.#update(workerId, (current) => {
       /*
        * 这次尝试发出时冷却已经结束（或本来就没有冷却）→ 它对"现在能用"
-       * 确实有信息，清掉冷却。否则只清计数 —— 与 `markNotBlamed` 同一处置。
+       * 确实有信息，清掉冷却。否则只清计数：请求确实成功了，连续失败已经中断。
        *
        * 用 `>=` 而不是 `>`：`cooldownUntil` 恰好等于发起时刻意味着冷却刚到期，
        * 那次尝试是在冷却之后发出的。
@@ -230,34 +222,6 @@ export class WorkerPool {
         lastFailure: null,
       };
     });
-  }
-
-  /**
-   * 记一次**不归咎于该 Worker**的失败:清零失败计数,但**不动冷却**。
-   *
-   * 不变量 #4 要求 400/422 与出口配置错误不打掉健康 Worker。先前这里直接复用
-   * `markSuccess`,第五轮审核实测出后果:
-   *
-   * ```
-   * 429 Retry-After:900 之后  剩余 = 895000 ms
-   * 一次出口配置错误之后      剩余 = 0 ms  ready = true
-   * ```
-   *
-   * 上游明确说了等 900 秒,我们 5 秒后就认为它可用 —— `markFailure` 里
-   * 「冷却只延长不缩短」的 `Math.max` 被从旁路整个绕过。触发不需要巧合:
-   * 全员冷却时 `select` 仍会返回最早恢复的那个,所以坏请求真的会打到它。
-   *
-   * 根因是「记成功」这个动作**过强**:**「不归咎于 Worker」不等于「证明它现在
-   * 能用」**。出口配置错误尤其 —— 那次请求根本没到上游,它对 Worker 的
-   * 可用性零信息。
-   *
-   * 清零计数仍然要做:那是不变量 #4 原本的目的(坏请求不该把退避推到指数级)。
-   */
-  markNotBlamed(workerId: string): void {
-    this.#update(workerId, () => ({
-      consecutiveFails: 0,
-      lastFailure: null,
-    }));
   }
 
   /**
@@ -279,17 +243,9 @@ export class WorkerPool {
     /*
      * 失败计数**无论传入哪种 kind** 都要加 —— 这是本方法的局部不变量。
      *
-     * ⚠️ **这里先前描述了一个 UI 上看不到的诊断场景**（第十轮审核查出）：
-     * 原文说「连续失败 12 次却从未冷却」是「客户端一直在发坏请求」的证据。
-     * 但 `Scheduler.record()` 的分支是
-     * `if (!blameWorker || !shouldCooldown(failure)) → markNotBlamed`（**清零**），
-     * 而 `shouldCooldown` 恰好就是 `kind !== "bad_request" && kind !== "unknown"`
-     * —— 也就是**所有不冷却的类别都走不到这里**。实测 12 次 `bad_request`
-     * 之后连续失败数仍是 0（两种 `blameWorker` 都试过）。
-     *
-     * 所以这段计数对 `bad_request` 是**防御性冗余**：不归咎的类别由 `record`
-     * 拦在前面。`WorkersPage` 的「连续失败」一列仍然有用 —— 它显示的是
-     * 真实故障（限流、传输失败、上游 5xx）的连续次数，那些都会走到这里。
+     * 不冷却的类别由 `Scheduler.record()` 拦在前面(`!blameWorker ||
+     * !shouldCooldown(failure)` 时不改任何状态),所以这里只会见到真实故障。
+     * `WorkersPage` 的「连续失败」一列显示的就是它们的连续次数。
      */
     const consecutiveFails = worker.consecutiveFails + 1;
 

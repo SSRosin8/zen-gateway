@@ -10,7 +10,7 @@ import { credentialFingerprint } from "./credentialFingerprint.ts";
  * 每个代理一个 dispatcher,按 id 缓存复用 —— 每次请求新建会丢掉连接池,
  * 并且在高频下把本地端口耗尽。
  *
- * ## 超时必须分两段(规划的不变量 #6)
+ * ## 超时必须分两段(不变量 #6)
  *
  * 用单一的总时长(例如 `AbortSignal.timeout()` 套整个 fetch)会把响应体
  * 一起 abort:一条正常的长 SSE 到点就被掐断。已实测确认 undici 的语义:
@@ -154,8 +154,10 @@ export class DispatcherPool {
 
     if (target.mode === "bridge") {
       // 桥接统一走本地混合端口;走哪个节点由 selector 决定(需持锁切换)。
+      // 强制 CONNECT 隧道:http 目标默认按绝对 URI 转发,Clash 要读完请求头才拨号;
+      // 隧道让节点在建隧道时就绑定,selector 锁才能在连接就绪时释放(见 fetch.ts)。
       const { host, port } = target.bridge;
-      return new ProxyAgent({ uri: `http://${host}:${port}`, ...common });
+      return new ProxyAgent({ uri: `http://${host}:${port}`, proxyTunnel: true, ...common });
     }
 
     const p = target.proxy;
@@ -196,19 +198,25 @@ export class DispatcherPool {
     );
   }
 
-  /** 配置变更后整体失效。 */
-  async reset(): Promise<void> {
+  /** 不再接受新请求;已开始的响应流读完后连接才关闭。 */
+  async close(): Promise<void> {
+    this.#closed = true;
     const all = [...this.#cache.values()];
     this.#cache.clear();
     await Promise.allSettled(all.map((e) => e.dispatcher.close()));
   }
 
-  async close(): Promise<void> {
+  /**
+   * 立即断开缓存中 dispatcher 的全部连接,之后拒绝再取。
+   *
+   * 只对尚未 `close()` 的 dispatcher 有效:undici 的 Agent 在 close 时就清空了
+   * 内部客户端表,之后的 destroy 找不到正在排空的连接(实测 undici 8.10)。
+   * 所以停机不先 close 再 destroy,而由 HTTP 服务一层限时排空。
+   */
+  destroy(): void {
     this.#closed = true;
-    await this.reset();
-  }
-
-  get size(): number {
-    return this.#cache.size;
+    const all = [...this.#cache.values()];
+    this.#cache.clear();
+    for (const e of all) void e.dispatcher.destroy().catch(() => {});
   }
 }

@@ -26,7 +26,7 @@ import { isSecretKey } from "../../shared/redact.ts";
  * 3. **必须由发起方重算的**(`host`/`content-length`/`content-encoding`)。
  *    `content-encoding` 尤其要紧:我们转发的是**原始未压缩字节**,
  *    残留一个 `gzip` 会让上游去 gunzip 明文。这是 `pipe.ts` 在响应侧
- *    已修掉的同一个 bug 的**请求侧镜像** —— 先前只剥了响应侧。
+ *    处理的同一个 bug 的**请求侧镜像** —— 两侧都要剥。
  * 4. **客户端自称的来源信息**(`x-forwarded-for`/`x-real-ip`/`forwarded`)。
  *    我们不是反向代理链的一环,转发它等于把内网拓扑(如 `10.1.2.3`)
  *    泄露给上游,并代为断言一件我们从未验证过的事。
@@ -65,7 +65,7 @@ const STRIPPED_HEADERS = new Set([
   /*
    * 我们转发原始未压缩字节,所以客户端声明的 content-encoding 必定不成立。
    * 留着它 → 上游对明文做 gunzip → 解码失败。响应侧的同一个 bug 在
-   * pipe.ts 里已修,请求侧先前漏了。
+   * pipe.ts 里处理。
    */
   "content-encoding",
   // 由 fetch 自己按 dispatcher 与解码能力决定。
@@ -84,31 +84,21 @@ const STRIPPED_HEADERS = new Set([
 ]);
 
 /**
- * OpenCode 自己的命名空间 —— 豁免通用凭证规则。
- *
- * 两个理由:这些是我们**必须**原样透传的身份头(`x-opencode-session` 更是
- * chat 面唯一的亲和依据);而且它们发往 OpenCode 自己的上游,即便其中真带了
- * 什么凭证,那也是发回给凭证的主人。
- *
- * 没有这条豁免,将来 OpenCode 加一个名字里含 `key`/`token` 的头
- * (如 `x-opencode-token-budget`)会被通用规则静默剥掉,表现为"某个新功能
- * 在网关后面不工作"。
- */
-const PASSTHROUGH_PREFIX = "x-opencode-";
-
-/**
  * 这个头名看起来像凭证吗?
  *
  * 复用 `redact.ts` 的 `isSecretKey` —— "哪些名字意味着密"这条知识已经
- * 集中在那里并配了测试,不该在本文件复制一份人工名单。实测它对 OpenCode
- * 实际会发的头(四个 `x-opencode-*`、`user-agent`、`anthropic-version`、
- * `x-stainless-*`、`openai-beta` 等)**零误判**。
+ * 集中在那里并配了测试,不该在本文件复制一份人工名单。
+ *
+ * 只有 `OPENCODE_IDENTITY_HEADERS` 这份显式名单豁免通用规则:`x-opencode-session`
+ * 是 chat 面唯一的亲和依据,名字又可能被通用规则命中。豁免整个 `x-opencode-`
+ * 前缀会让 `x-opencode-api-key` 这类客户端可控的凭证头原样发往上游;
+ * 其余 `x-opencode-*` 头名只要不像凭证,仍按黑名单原样透传。
  *
  * 取向说明:过度剥离的后果是"某个功能不工作",看得见;剥漏的后果是
  * "凭证静默外泄",看不见。两侧不对称,所以宁可偏严。
  */
 function isCredentialHeader(name: string): boolean {
-  if (name.startsWith(PASSTHROUGH_PREFIX)) return false;
+  if ((OPENCODE_IDENTITY_HEADERS as readonly string[]).includes(name)) return false;
   return isSecretKey(name);
 }
 
@@ -225,7 +215,7 @@ export function buildUpstreamHeaders(input: BuildUpstreamHeadersInput): Record<s
    *
    * ## 为什么校验不能留在赋值那里
    *
-   * 第六轮审核实测:含换行的 apiKey 在两个面上报**不同**的消息 ——
+   * 实测:含换行的 apiKey 在两个面上报**不同**的消息 ——
    *
    * ```
    * chat:     headerName=authorization  "Worker 的 apiKey 含控制字符或换行,请检查配置中该 Worker 的 apiKey"

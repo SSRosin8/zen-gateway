@@ -4,8 +4,7 @@ import { isIpAddress } from "./ip.ts";
 /**
  * 配置 schema —— server ⇄ admin ⇄ CLI 的唯一契约。
  *
- * 全部对象都是 strict：手工编辑 config.json 是预期用法（Phase 1-8 无 UI 时
- * 就靠它），拼错字段名必须立刻报错，而不是静默忽略后让人困惑「我明明改了」。
+ * 全部对象都是 strict：手工编辑 config.json 是预期用法，拼错字段名必须立刻报错，而不是静默忽略后让人困惑「我明明改了」。
  */
 
 /* ------------------------------------------------------------------ *
@@ -19,7 +18,7 @@ export const PortSchema = z.number().int().min(1024).max(65535);
  * 内部标识符（Worker / 代理 / 订阅 / Clash 内核的 id）。
  *
  * 字符集必须收窄,因为**这些 id 会进 HTTP 头**:转发响应带
- * `x-zen-gateway-worker: <worker.id>`。先前 id 是任意字符串,于是一个含
+ * `x-zen-gateway-worker: <worker.id>`。若 id 可以是任意字符串,一个含
  * CRLF 的 id 会让 `Headers.set()` 抛 TypeError —— 而那个异常发生在
  * 上游**已经成功**之后,客户端拿到裸 500、上游响应体既不转发也不释放。
  *
@@ -30,11 +29,11 @@ export const PortSchema = z.number().int().min(1024).max(65535);
  *
  * `probeProxy(config, null)` 把结果挂在这个 id 下 —— 它不是一个代理 id，
  * `config.proxies` 里永远不会有这一行（落盘时要认出它并写进
- * `gateway.directEgressIp`，否则那次探测的结果无处可存，见缺口 #28）。
+ * `gateway.directEgressIp`，否则那次探测的结果无处可存）。
  *
  * **定义在 `shared/` 而不是 `core/proxy/egress.ts`**：`IdSchema` 要拒绝它
  * （见下），而 `egress.ts` 依赖本文件 —— 反向 import 会成环。
- * `dispatcher.ts` 先前写的是字面量 `"__direct__"`，那是第二份真相。
+ * `dispatcher.ts` 也从这里取，不写字面量 `"__direct__"` —— 那会是第二份真相。
  */
 export const DIRECT_EGRESS_ID = "__direct__";
 
@@ -44,7 +43,7 @@ export const IdSchema = z
   .max(128)
   .regex(/^[A-Za-z0-9._:\-]+$/, { message: "id 只允许字母、数字与 . _ : - " })
   /*
-   * **拒绝合成 id**（第十轮审核）。`__direct__` 同时是「本机直连出口」的键，
+   * **拒绝合成 id**。`__direct__` 同时是「本机直连出口」的键，
    * 于是一个叫这个名字的代理会与直连共用一个身份，两处失效：
    *
    * - `applyProbeResults` 把一次测量同时写进 `proxies[i].egressIp` 与
@@ -91,7 +90,7 @@ const HostSchema = z
   .min(1)
   .max(255)
   // 不得含空白或控制字符:host 会进 URL 与 SOCKS 握手,`a\nb` 这类值
-  // 在拼接场景下是注入原语,而它先前是合法的。
+  // 在拼接场景下是注入原语。
   .regex(/^[A-Za-z0-9._:\-[\]%]+$/, { message: "host 只允许主机名/IP 字面量字符" });
 
 /**
@@ -283,7 +282,7 @@ export const ModelRulesSchema = z.strictObject({
   /**
    * 无 `-free` 后缀但实际零费率的模型。
    *
-   * 这是**出厂默认值**，不是代码里的硬编码判定 —— 用户可改，Phase 6 的
+   * 这是**出厂默认值**，不是代码里的硬编码判定 —— 用户可改，目录的
    * 定时刷新会按真实目录纠正它。把等价的名单写死在代码常量里
    * （`SPECIAL_FREE_MODEL_IDS`），目录一变就必须改代码发版。
    *
@@ -294,9 +293,8 @@ export const ModelRulesSchema = z.strictObject({
    *
    * 不要用 models.dev 的 `opencode` provider 做这份名单：它当日报 105 个模型 /
    * 32 个零费率，与在架目录比对后发现 **23 个零费率项已下架**（`glm-5-free`、
-   * `kimi-k2.5-free`、`minimax-m3-free`、`grok-code` …）。本文件先前的默认值
-   * 里就混进了 `grok-code` —— 它在 Zen 自己的目录和定价页里都不存在，
-   * 与把某个模型 id 硬编码进代码是同一类错误，只是来源换成了第三方聚合站。
+   * `kimi-k2.5-free`、`minimax-m3-free`、`grok-code` …）。以 `grok-code` 为例 ——
+   * 它在 Zen 自己的目录和定价页里都不存在，把它放进默认值与把某个模型 id 硬编码进代码是同一类错误，只是来源换成了第三方聚合站。
    *
    * 注意 `jev-1.13`（无后缀）**不免费**：定价页是输入 $0.042 / 输出免费，
    * 只有 `jev-1.13-free` 才免费。它不能进这份名单。
@@ -305,16 +303,16 @@ export const ModelRulesSchema = z.strictObject({
   /**
    * 默认声明支持的协议面。
    *
-   * ## 语义已定：**后台展示用的提示，不是放行闸门**（缺口 #10，第九轮定案）
+   * ## 语义已定：**后台展示用的提示，不是放行闸门**
    *
-   * 这个字段登记了三个阶段"语义未定"。现在按已有的测量定下来：
+   * 依据是已有的测量：
    *
    * - **上游不按模型区分面** —— 实测三个面（`chat`/`responses`/`messages`）
    *   对同一个免费模型都通。所以"这个模型支持哪些面"在上游那边不存在，
    *   拿它当闸门缺乏依据。
    * - **接成闸门会立刻打坏一个能用的功能**：默认值是 `["chat","responses"]`，
    *   按它放行则默认配置下**所有**模型的 `/v1/messages` 请求都被拒 ——
-   *   而那个面 Phase 6 刚验证可用。
+   *   而那个面已验证可用。
    *
    * 所以它的唯一用途是 Models 页显示"本网关声明支持哪些面"，
    * 由 `surfacesFor()` 读取。**流式能力那种真正的放行判定在
@@ -355,18 +353,17 @@ export const ModelRulesSchema = z.strictObject({
   /**
    * 免费判定是否与在架目录求交集。
    *
-   * 默认开。关掉它等于回到 Phase 5 的行为（放得偏宽：已下架的 `xxx-free`
+   * 默认开。关掉它等于只看后缀／名单（放得偏宽：已下架的 `xxx-free`
    * 会被放行，然后由上游返回 400）。
    *
    * ## 它的作用范围只有一条：**目录存在时是否求交集**
    *
-   * 先前这里写的理由是「交集依赖能联网拉到目录，而离线环境拉不到，那种情况下
-   * 用户应当能明确关掉它，而不是困在『网关不放行任何模型』里」——
-   * **那个前提不成立**：`judgeFree` 在目录缺失时**已经放行**了
+   * 它**不是**离线开关。「交集依赖能联网拉到目录，离线环境拉不到，所以用户
+   * 应当能关掉它，免得困在『网关不放行任何模型』里」—— **这个前提不成立**：`judgeFree` 在目录缺失时**已经放行**了
    * （返回 `*_unverified`，见 `core/models/free.ts` 的「目录缺失时放行」那节）。
    *
    * 实测两个取值在离线场景下对转发**完全无差别**（都放行），对 `/v1/models`
-   * 也无差别（都 502）。所以照那句注释在离线时关掉它，什么都不会改变 ——
+   * 也无差别（都 502）。所以离线时关掉它，什么都不会改变 ——
    * 而用户会以为自己配错了别的东西。
    *
    * 真实的用途是：本地假上游或镜像的目录与真实上游不一致时，交集会误拒 ——
@@ -392,6 +389,11 @@ export const CooldownConfigSchema = z.strictObject({
    * 而不是安静消失 15 分钟让人以为是别的问题。
    */
   authFailMs: z.number().int().min(1_000).max(600_000).default(60_000),
+  /**
+   * 上游 403:很短的冷却。上游免费闸门按请求形态返回 403,且先于密钥校验,
+   * 长冷却会把请求形态问题放大成 Worker 不可用;保留几秒只为挡住连续打同一个 Worker。
+   */
+  forbiddenMs: z.number().int().min(1_000).max(600_000).default(5_000),
   /** 传输失败：指数退避起点与上限。 */
   transportBaseMs: z.number().int().min(100).max(60_000).default(2_000),
   transportMaxMs: z.number().int().min(1_000).max(600_000).default(120_000),
@@ -433,14 +435,14 @@ export const GatewaySchema = z.strictObject({
   /** 一条客户端请求最多尝试几个 Worker。 */
   maxAttempts: z.number().int().min(1).max(10).default(3),
   /**
-   * **本机直连**出口最近一次实测到的公网 IP（缺口 #28）。
+   * **本机直连**出口最近一次实测到的公网 IP。
    *
    * 为什么它要有个地方存：`proxyId: null` 的 Worker 走本机网络出口，
    * 而**它与某个代理 NAT 到同一个公网 IP 恰好是「看起来隔离其实没隔离」
    * 的那种形态** —— 所以它必须参与隔离分组。
    *
-   * 先前探测会真的跑（结果映射到合成 id `__direct__`），但 `config.proxies`
-   * 里没有那一行，于是测量被丢弃：每次批测白发一次网络请求，
+   * 探测会真的跑（结果映射到合成 id `__direct__`），而 `config.proxies`
+   * 里没有那一行 —— 没有这个字段，测量就会被丢弃：每次批测白发一次网络请求，
    * 而直连 Worker 在隔离报告里永远是「未探测」。
    *
    * 放在 `gateway` 而不是造一条假的 `Proxy`：本机直连**不是**一个代理

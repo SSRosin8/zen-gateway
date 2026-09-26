@@ -3,10 +3,10 @@
  *
  * ## 为什么"读完再量"不算上限
  *
- * 两处先前都是 `await c.req.arrayBuffer()` 然后 `if (byteLength > 上限)`。
+ * 不能写成 `await c.req.arrayBuffer()` 然后 `if (byteLength > 上限)`。
  * 那个顺序下**整个体已经在内存里了**，上限只限制"转发出去多少"，
- * 不限制"占用多少"。第十轮审核实测：64 MiB 的闸门下发 200 MiB，
- * 网关照旧读入 200 MiB 才返回 413。
+ * 不限制"占用多少"：64 MiB 的闸门下发 200 MiB，网关会先读入 200 MiB
+ * 才返回 413。
  *
  * 威胁模型不是远端 —— 网关只监听回环 —— 而是**本机上的其他进程**
  * （浏览器里的恶意页面经 fetch 打本地端口、装错的 npm 包），
@@ -15,8 +15,8 @@
  *
  * ## 为什么不能只看 `content-length`
  *
- * 那个头**可以撒谎**，chunked 编码也根本不给。管理面先前查了它（挡住了
- * 声称超限的），但 `transfer-encoding: chunked` 绕过整条检查。
+ * 那个头**可以撒谎**，chunked 编码也根本不给。只查它能挡住声称超限的请求，
+ * 但 `transfer-encoding: chunked` 绕过整条检查。
  * 所以判据只能是"边读边数"。
  *
  * 与 `core/models/catalog.ts` 的 `readBoundedText` 是同一个做法；

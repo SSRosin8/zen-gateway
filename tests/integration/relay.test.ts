@@ -97,8 +97,6 @@ function relay(body: unknown, headers: Record<string, string> = {}) {
 describe("不变量 #1：发过字节之后绝不重试", () => {
   it("上游先吐字节再断连：响应头恰好发一次，且不重试", async () => {
     /*
-     * 这是规划里点名要求的那个测试。
-     *
      * 危险的实现会这样：一边转发一边判断失败，于是「已经发了 200 和一部分 SSE」
      * 之后又去重试下一个 Worker，客户端收到两段拼接的响应 —— 在客户端侧表现为
      * JSON 解析失败或对话内容莫名重复，极难归因到网关。
@@ -108,11 +106,11 @@ describe("不变量 #1：发过字节之后绝不重试", () => {
      *
      * ## 断连时机必须由测试控制，不能同步 destroy
      *
-     * 我第一版在 handler 里 writeHead + write + 立即 `socket.destroy()`，
-     * 结果拿到 502 而非 200 —— 因为同步销毁让 RST 与响应数据一起到达，
+     * 若在 handler 里 writeHead + write + 立即 `socket.destroy()`，
+     * 会拿到 502 而非 200 —— 因为同步销毁让 RST 与响应数据一起到达，
      * undici 在**解析出响应头之前**就报了连接错误。那条链路走的是
      * 「头到达前失败」，属于**可以**重试的情形（下面第三个用例正是它），
-     * 于是这个用例根本没测到它声称要测的东西。
+     * 于是用例根本测不到它声称要测的东西。
      *
      * 改为：handler 写完头与首个数据块后把 res 交给测试，测试**读到第一个块
      * 之后**才触发断连。这样「头已到达」是被断言过的事实，而不是时序巧合。
@@ -354,23 +352,122 @@ describe("免费模型闸门", () => {
   });
 });
 
+describe("客户端取消", () => {
+  it("等响应头时客户端断开:不记「转发失败」,也不再重试", async () => {
+    const arrived: Array<() => void> = [];
+    let firstArrived!: () => void;
+    const first = new Promise<void>((r) => (firstArrived = r));
+    handler = (_req, res) => {
+      firstArrived();
+      arrived.push(() => res.writeHead(500).end("{}"));
+    };
+    const logs: string[] = [];
+    const cfg = config({
+      workers: [
+        { id: "w1", name: "", kind: "authenticated", apiKey: "fake-key-a-not-real", enabled: true, proxyId: null },
+        { id: "w2", name: "", kind: "authenticated", apiKey: "fake-key-b-not-real", enabled: true, proxyId: null },
+      ],
+    });
+    const gateway = createApp({ configOf: () => cfg, egress, log: (m) => logs.push(m) });
+    const abort = new AbortController();
+    const pending = gateway.request(
+      new Request("http://127.0.0.1/v1/chat/completions", {
+        ...relay({ model: "big-pickle", messages: [] }),
+        signal: abort.signal,
+      }),
+    );
+    await first;
+    abort.abort();
+    const res = await pending;
+    for (const release of arrived) release();
+    expect(res.status).toBe(499);
+    expect(logs.filter((m) => m.includes("转发失败"))).toEqual([]);
+    expect(upstreamCalls).toHaveLength(1);
+  });
+});
+
+describe("上游 401/403 的冷却归咎", () => {
+  const twoWorkers = () =>
+    config({
+      workers: [
+        { id: "w1", name: "", kind: "authenticated", apiKey: "fake-key-a-not-real", enabled: true, proxyId: null },
+        { id: "w2", name: "", kind: "authenticated", apiKey: "fake-key-b-not-real", enabled: true, proxyId: null },
+      ],
+    });
+  const w1 = (scheduler: Scheduler, cfg: Config) =>
+    scheduler.runtimeWorkers(cfg, Date.now()).find((w) => w.id === "w1")!;
+
+  it("目录未核验时 401 不冷却 Worker —— 那可能只是模型名问题", async () => {
+    handler = (_req, res) => {
+      res.writeHead(401, { "content-type": "application/json" });
+      res.end('{"error":"ModelError"}');
+    };
+    const cfg = twoWorkers();
+    const scheduler = new Scheduler();
+    const gateway = createApp({ configOf: () => cfg, egress, scheduler, log: () => {} });
+    const res = await gateway.request("/v1/chat/completions", relay({ model: "big-pickle", messages: [] }));
+    expect(res.status).toBe(401);
+    expect(res.headers.get("x-zen-gateway-free")).toBe("extra_unverified");
+    expect(w1(scheduler, cfg).ready).toBe(true);
+  });
+
+  it("目录已核验时 401 冷却 Worker", async () => {
+    let call = 0;
+    handler = (req, res) => {
+      call += 1;
+      if (req.method === "GET") {
+        res.writeHead(200, { "content-type": "application/json" });
+        res.end(JSON.stringify({ data: [{ id: "big-pickle" }] }));
+        return;
+      }
+      res.writeHead(401, { "content-type": "application/json" });
+      res.end('{"error":"invalid key"}');
+    };
+    const cfg = twoWorkers();
+    const scheduler = new Scheduler();
+    const gateway = createApp({ configOf: () => cfg, egress, scheduler, log: () => {} });
+    expect((await gateway.request("/v1/models", { headers: { authorization: `Bearer ${TOKEN}` } })).status).toBe(200);
+    const res = await gateway.request("/v1/chat/completions", relay({ model: "big-pickle", messages: [] }));
+    expect(res.status).toBe(401);
+    expect(call).toBe(2);
+    const state = w1(scheduler, cfg);
+    expect(state.ready).toBe(false);
+    expect(state.lastFailure).toBe("auth");
+  });
+
+  it("403 只冷却 forbiddenMs 那么短", async () => {
+    handler = (_req, res) => {
+      res.writeHead(403, { "content-type": "application/json" });
+      res.end('{"type":"error","error":{"type":"FreeTierError"}}');
+    };
+    const cfg = twoWorkers();
+    const scheduler = new Scheduler();
+    const gateway = createApp({ configOf: () => cfg, egress, scheduler, log: () => {} });
+    const res = await gateway.request("/v1/chat/completions", relay({ model: "big-pickle", messages: [] }));
+    expect(res.status).toBe(403);
+    const state = w1(scheduler, cfg);
+    expect(state.lastFailure).toBe("forbidden");
+    expect(state.cooldownRemainingMs).toBeGreaterThan(0);
+    expect(state.cooldownRemainingMs).toBeLessThanOrEqual(Math.ceil(cfg.routing.cooldown.forbiddenMs * 1.25));
+  });
+});
+
 /* ================================================================== *
  * 面声明的流式能力必须真的被执行
  * ================================================================== */
 
 /**
- * `ProtocolSurface.streaming` 曾是一个**声明了却不设防的能力位**。
+ * `ProtocolSurface.streaming` 不能是一个**声明了却不设防的能力位**。
  *
- * 它被声明、被文档说明「`"none"` 为 jev 这类非流式面预留」,但全仓没有任何
- * 一处读它 —— 把 `chatSurface` 的 `"optional"` 改成 `"none"` 后 859 条测试全绿
- * (2026-09-23 变异 M1 实测)。规划里 Phase 6 明确要新增这样的面,
- * 届时客户端发 `stream: true` 会被照常加上 `Accept: text/event-stream`
+ * 它被声明、被文档说明「`"none"` 为 jev 这类非流式面预留」。若全仓没有任何
+ * 一处读它,把 `chatSurface` 的 `"optional"` 改成 `"none"` 后全量测试全绿;
+ * 新增这样的面时,客户端发 `stream: true` 会被照常加上 `Accept: text/event-stream`
  * 并走流式泵,而上游那个面根本不产生 SSE。
  *
  * 这正是 [[verification-discipline]] 第 1 条的形态:接口字段存在不等于约束成立。
  */
 describe("协议面的流式能力声明", () => {
-  /** 一个非流式面 —— 形态对应规划里的 jev。 */
+  /** 一个非流式面 —— 形态对应 jev。 */
   const noStreamSurface: ProtocolSurface = {
     id: "responses",
     clientPaths: ["/v1/nostream"],
@@ -585,6 +682,44 @@ describe("鉴权与请求校验", () => {
     expect(scheduler.snapshot(cfg, Date.now()).affinity.sessions).toBe(0);
   });
 
+  it.each([
+    // 流式同块形态由 responseIdCollector 单测覆盖:经真实传输无法稳定控制分块。
+    [
+      "非流式:体超过扫描预算但 id 在开头",
+      false,
+      () => JSON.stringify({ id: "resp_large_body_not_real", output: [{ text: "长".repeat(200_000) }] }),
+    ],
+  ])("超出 id 扫描预算时仍能绑定输出 id —— %s", async (_label, stream, body) => {
+    handler = (_req, res) => {
+      res.writeHead(200, { "content-type": stream ? "text/event-stream" : "application/json" });
+      res.end(body());
+    };
+    const cfg = config({
+      workers: [{ id: "w1", name: "", kind: "authenticated", apiKey: "fake-key-w1-not-real", enabled: true, proxyId: null }],
+    });
+    const scheduler = new Scheduler();
+    const gateway = createApp({ configOf: () => cfg, egress, scheduler, log: () => {} });
+    const response = await gateway.request("/v1/responses", relay({ model: "big-pickle", input: "first", stream }));
+    expect(response.status).toBe(200);
+    await response.text();
+    expect(scheduler.snapshot(cfg, Date.now()).affinity.sessions).toBe(1);
+  });
+
+  it("非流式大体的 id 不在开头时放弃绑定,而不是读完整体", async () => {
+    handler = (_req, res) => {
+      res.writeHead(200, { "content-type": "application/json" });
+      res.end(JSON.stringify({ output: [{ text: "长".repeat(200_000) }], id: "resp_late_id_not_real" }));
+    };
+    const cfg = config({
+      workers: [{ id: "w1", name: "", kind: "authenticated", apiKey: "fake-key-w1-not-real", enabled: true, proxyId: null }],
+    });
+    const scheduler = new Scheduler();
+    const gateway = createApp({ configOf: () => cfg, egress, scheduler, log: () => {} });
+    const response = await gateway.request("/v1/responses", relay({ model: "big-pickle", input: "first" }));
+    await response.text();
+    expect(scheduler.snapshot(cfg, Date.now()).affinity.sessions).toBe(0);
+  });
+
   it("停用的 Worker 不被选中", async () => {
     const cfg = config({
       workers: [{ id: "w1", name: "", kind: "authenticated", apiKey: "k-not-real", enabled: false, proxyId: null }],
@@ -734,19 +869,18 @@ describe("health", () => {
 });
 
 /* ================================================================== *
- * 请求体上限（第十轮审核）
+ * 请求体上限
  * ================================================================== */
 
 describe("请求体上限真的限制读入，不是读完再量", () => {
   /*
-   * 先前是 `await c.req.arrayBuffer()` 然后 `if (byteLength > 上限)`。
+   * 若是 `await c.req.arrayBuffer()` 然后 `if (byteLength > 上限)`，
    * 那个顺序下整个体已经在内存里了 —— 上限只限制"转发多少"，
-   * 不限制"占用多少"。第十轮审核实测：64 MiB 的闸门下发 200 MiB，
+   * 不限制"占用多少"。实测：64 MiB 的闸门下发 200 MiB，
    * 网关照旧读入 200 MiB 才返回 413。
    *
-   * 而这两条拒绝路径（`body_too_large` / `body_unreadable`）此前
-   * **零测试覆盖** —— `grep` 确认它们在 tests/ 下一次都没出现过，
-   * 所以"闸门装在错误的位置"这件事也没人发现。
+   * 这两条拒绝路径（`body_too_large` / `body_unreadable`）也要有测试覆盖，
+   * 否则"闸门装在错误的位置"这件事没人会发现。
    *
    * ## 判据是「网关读了多少字节」，不是堆增长
    *
@@ -810,7 +944,7 @@ describe("请求体上限真的限制读入，不是读完再量", () => {
 
   it("读体中途出错记 `body_unreadable` 并返回 400", async () => {
     /*
-     * 这条路径先前也零覆盖。造一个读到一半就 error 的流。
+     * 造一个读到一半就 error 的流。
      */
     let pulls = 0;
     const body = new ReadableStream<Uint8Array>({

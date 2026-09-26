@@ -12,11 +12,12 @@
 @import "./tokens.css";
 
 @layer base {
+  /* 原生控件（滚动条、下拉框、日期选择）跟随当前配色；data-theme 由 index.html 首屏脚本与 lib/theme.ts 设置。 */
   html {
     color-scheme: light;
   }
 
-  html:has([data-theme="dark"]) {
+  html[data-theme="dark"] {
     color-scheme: dark;
   }
 
