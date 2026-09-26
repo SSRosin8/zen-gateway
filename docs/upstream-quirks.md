@@ -105,7 +105,9 @@ key 的目录槽位。不能由少量样本推断完整目录按某个单一维�
 
 **观察日期**：2026-09-26。
 **客户端**：OpenCode CLI v2.0.12，使用原生 `opencode run --standalone --format json`；
-网关配置为每模型的 `settings.baseURL`、Relay Token 和 SDK package。
+当时的隔离验收夹具显式写入了每模型的 `settings.baseURL`、Relay Token 和 SDK package；
+这只是当时的测试配置，不代表接入所需字段。当前推荐配置只覆盖内置 `opencode` provider
+的 Base URL 和 API key，保留 OpenCode 自己的 SDK package 和模型目录。
 **范围**：3 个未绑定到当前 Worker 的临时 Clash 出口、3 把已配置认证 key 和一个
 临时构造的不发送 key 的匿名 Worker、4 个免费模型，共 48 次经网关请求。测试没有
 输出 key、出口名称或公网 IP；每次请求都在 Clash `/connections` 中核对到

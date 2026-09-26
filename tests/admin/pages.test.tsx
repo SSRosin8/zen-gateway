@@ -416,7 +416,7 @@ describe("用量页", () => {
  * 网关页与 Worker 页
  * ================================================================== */
 
-function expectLocalOpenCodeModels(snippet: string, port: number, version: "1" | "2" = "2") {
+function expectLocalOpenCodeProvider(snippet: string, port: number, version: "1" | "2" = "2") {
   const config = JSON.parse(snippet);
   const settings = {
     baseURL: `http://127.0.0.1:${port}/v1`,
@@ -431,23 +431,12 @@ function expectLocalOpenCodeModels(snippet: string, port: number, version: "1" |
   }
   expect(config).toEqual({
     $schema: "https://opencode.ai/config.json",
-    providers: {
-      opencode: {
-        package: "aisdk:@ai-sdk/openai-compatible",
-        settings,
-        models: {
-          "muse-spark-1.3-contributor-free": { package: "aisdk:@ai-sdk/openai", settings },
-          "big-pickle": { package: "aisdk:@ai-sdk/openai-compatible", settings },
-          "space-bunny-free": { package: "aisdk:@ai-sdk/openai-compatible", settings },
-          "mimo-v2.6-flash-free": { package: "aisdk:@ai-sdk/openai-compatible", settings },
-        },
-      },
-    },
+    providers: { opencode: { settings } },
   });
 }
 
 describe("网关页", () => {
-  it("复制 OpenCode 2 配置时每个模型都指向网关，凭证仅有占位符", async () => {
+  it("复制 OpenCode 2 配置时只覆盖 provider 连接设置，凭证仅有占位符", async () => {
     const user = userEvent.setup();
     const data = fakeOverview({
       gateway: {
@@ -460,16 +449,17 @@ describe("网关页", () => {
     const { container } = render(<GatewayPage data={data} />);
     await user.click(screen.getByRole("button", { name: "复制" }));
     const copied = await navigator.clipboard.readText();
-    expectLocalOpenCodeModels(copied, 9877);
+    expectLocalOpenCodeProvider(copied, 9877);
     expect(copied).toBe(screen.getByText(/"providers":/, { selector: "pre" }).textContent);
     expect(copied).not.toContain("example.invalid");
     expect(copied).not.toContain("abcd1234");
     expect(container.textContent).toContain("abcd1234"); // 指纹可以显示
   });
 
-  it("提醒保留逐模型设置并说明模型可用性边界", () => {
+  it("提醒保留 OpenCode 自己的模型目录并说明模型可用性边界", () => {
     render(<GatewayPage data={fakeOverview()} />);
     expect(screen.getByText(/OpenCode 配置格式/)).toBeInTheDocument();
+    expect(screen.getByText(/模型和 SDK 由 OpenCode 自己管理/)).toBeInTheDocument();
     expect(screen.getByText(/模型仍受上游权限与免费规则约束/)).toBeInTheDocument();
   });
 
@@ -479,7 +469,7 @@ describe("网关页", () => {
     await user.selectOptions(screen.getByRole("combobox", { name: "OpenCode 版本" }), "1");
     await user.click(screen.getByRole("button", { name: "复制" }));
     const copied = await navigator.clipboard.readText();
-    expectLocalOpenCodeModels(copied, 9877, "1");
+    expectLocalOpenCodeProvider(copied, 9877, "1");
     expect(copied).not.toContain('"providers"');
     expect(copied).not.toContain('"npm"');
   });
@@ -619,14 +609,14 @@ describe("首启向导", () => {
     expect(screen.getByText(/已拉到 10 个免费模型/)).toBeInTheDocument();
   });
 
-  it("给出的配置让每个模型使用实际网关端口，凭证仅有占位符", () => {
+  it("给出的配置只覆盖网关地址与凭证占位符", () => {
     const data = fakeOverview();
     data.gateway.port = 19876;
     render(<Wizard data={data} />);
     const snippet = screen.getByText(/"providers":/, { selector: "pre" }).textContent ?? "";
-    expectLocalOpenCodeModels(snippet, 19876);
+    expectLocalOpenCodeProvider(snippet, 19876);
     expect(screen.getByText(/OpenCode 配置格式/)).toBeInTheDocument();
-    expect(screen.getByText(/片段不保证上游接受这些模型/)).toBeInTheDocument();
+    expect(screen.getByText(/你选择的模型不保证都能被上游接受/)).toBeInTheDocument();
   });
 
   it("向导切换 OpenCode 1.x 后展示单数 provider 配置", async () => {
@@ -636,7 +626,7 @@ describe("首启向导", () => {
     render(<Wizard data={data} />);
     await user.selectOptions(screen.getByRole("combobox", { name: "OpenCode 版本" }), "1");
     const snippet = screen.getByText(/"provider":/, { selector: "pre" }).textContent ?? "";
-    expectLocalOpenCodeModels(snippet, 19876, "1");
+    expectLocalOpenCodeProvider(snippet, 19876, "1");
   });
 
   it("每一步都给可直接跑的命令", () => {

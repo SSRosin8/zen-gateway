@@ -137,16 +137,18 @@ export function GatewayPage({ data, refresh }: { data: Overview; refresh?: () =>
         <p className="mt-3 text-text-muted">
           {openCodeVersion === "1" ? (
             <>
-              OpenCode 1.x 使用单数 <Mono>provider</Mono> 与 <Mono>options</Mono>，保留内置
-              模型 SDK 选择。
+              OpenCode 1.x 使用单数 <Mono>provider</Mono> 与 <Mono>options</Mono>，只覆盖已有
+              provider 的 <Mono>baseURL</Mono> 与 <Mono>apiKey</Mono>；模型和 SDK 由 OpenCode
+              自己管理。
             </>
           ) : (
             <>
-              OpenCode 2.x 使用复数 <Mono>providers</Mono>、<Mono>package</Mono> 与逐模型{" "}
-              <Mono>settings</Mono>，避免内置模型地址覆盖网关。
+              OpenCode 2.x 使用复数 <Mono>providers</Mono>，只覆盖已有 <Mono>opencode</Mono>{" "}
+              provider 的 <Mono>settings.baseURL</Mono> 与 <Mono>settings.apiKey</Mono>；模型和
+              SDK 由 OpenCode 自己管理。
             </>
           )}{" "}
-          片段中的模型仍受上游权限与免费规则约束。
+          你选择的模型仍受上游权限与免费规则约束。
         </p>
       </Panel>
 
