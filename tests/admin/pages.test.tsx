@@ -125,7 +125,7 @@ describe("代理池页", () => {
     expect(container.textContent).toContain("7897");
   });
 
-  it("出口隔离标签**不分页** —— 一眼看全是它的全部意义", () => {
+  it("回显出口标签**不分页** —— 一眼看全是它的全部意义", () => {
     stubIdleBatch();
     const groups = Array.from({ length: 20 }, (_, i) => ({
       egressIp: `198.51.100.${i + 1}`,
@@ -142,6 +142,10 @@ describe("代理池页", () => {
     // 20 组全部渲染 —— 分页会破坏「找出共用出口的节点」这个任务。
     expect(container.querySelectorAll("li").length).toBeGreaterThanOrEqual(20);
     expect(screen.queryByText(/上一页/)).not.toBeInTheDocument();
+    expect(screen.getByText("回显出口独立 · 20 个出口")).toBeInTheDocument();
+    expect(screen.getByText(/仅反映 IP 回显目标的出口/)).toBeInTheDocument();
+    expect(container.textContent).toContain("Zen 实际出口需核对发往 opencode.ai 的连接");
+    expect(screen.queryByText(/已隔离/)).not.toBeInTheDocument();
   });
 
   it("共用出口的那一组用 error 边框标出来", () => {
@@ -157,7 +161,7 @@ describe("代理池页", () => {
       />,
     );
     /*
-     * 「共用出口」出现两次:状态行的「未隔离 · 1 组共用出口」与那一组自己的
+     * 「共用出口」出现两次:状态行的「回显出口共用 · 1 组共用出口」与那一组自己的
      * 「⚠ 共用出口」标记。两处都要 —— 前者回答「有没有问题」,后者指出「是哪一组」。
      */
     expect(screen.getAllByText(/共用出口/).length).toBeGreaterThanOrEqual(2);
@@ -412,8 +416,31 @@ describe("用量页", () => {
  * 网关页与 Worker 页
  * ================================================================== */
 
+function expectLocalOpenCodeModels(snippet: string, port: number) {
+  const config = JSON.parse(snippet);
+  const settings = {
+    baseURL: `http://127.0.0.1:${port}/v1`,
+    apiKey: "<把配置文件里的 gateway.relayToken 填进来>",
+  };
+  expect(config).toEqual({
+    providers: {
+      opencode: {
+        package: "aisdk:@ai-sdk/openai-compatible",
+        settings,
+        models: {
+          "muse-spark-1.3-contributor-free": { package: "aisdk:@ai-sdk/openai", settings },
+          "big-pickle": { package: "aisdk:@ai-sdk/openai-compatible", settings },
+          "space-bunny-free": { package: "aisdk:@ai-sdk/openai-compatible", settings },
+          "mimo-v2.6-flash-free": { package: "aisdk:@ai-sdk/openai-compatible", settings },
+        },
+      },
+    },
+  });
+}
+
 describe("网关页", () => {
-  it("给出可复制的配置片段，但**不含 Relay Token 的值**", () => {
+  it("复制 OpenCode 2 配置时每个模型都指向网关，凭证仅有占位符", async () => {
+    const user = userEvent.setup();
     const data = fakeOverview({
       gateway: {
         port: 9877,
@@ -423,17 +450,19 @@ describe("网关页", () => {
       },
     });
     const { container } = render(<GatewayPage data={data} />);
-
-    expect(container.textContent).toContain("http://127.0.0.1:9877/v1");
-    // 片段里只能是占位符 —— 把 token 渲染进 DOM 等于让它进截图与扩展。
-    expect(container.textContent).toContain("gateway.relayToken");
+    await user.click(screen.getByRole("button", { name: "复制" }));
+    const copied = await navigator.clipboard.readText();
+    expectLocalOpenCodeModels(copied, 9877);
+    expect(copied).toBe(screen.getByText(/"providers":/, { selector: "pre" }).textContent);
+    expect(copied).not.toContain("example.invalid");
+    expect(copied).not.toContain("abcd1234");
     expect(container.textContent).toContain("abcd1234"); // 指纹可以显示
-    expect(container.textContent).not.toContain("$schema\": \"x"); // 形状哨兵
   });
 
-  it("提醒不要写 models 块", () => {
+  it("提醒保留逐模型设置并说明模型可用性边界", () => {
     render(<GatewayPage data={fakeOverview()} />);
-    expect(screen.getByText(/不要写/)).toBeInTheDocument();
+    expect(screen.getByText(/保留逐模型的/)).toBeInTheDocument();
+    expect(screen.getByText(/模型仍受上游权限与免费规则约束/)).toBeInTheDocument();
   });
 
   it("Clash 已启用时提醒两条实测出来的坑", () => {
@@ -571,11 +600,14 @@ describe("首启向导", () => {
     expect(screen.getByText(/已拉到 10 个免费模型/)).toBeInTheDocument();
   });
 
-  it("**不渲染 Relay Token 的值** —— 只说去哪儿取", () => {
-    const { container } = render(<Wizard data={fakeOverview()} />);
-    expect(container.textContent).toContain("gateway.relayToken");
-    // 向导里给的是占位符。
-    expect(container.textContent).toContain("data/config.json");
+  it("给出的配置让每个模型使用实际网关端口，凭证仅有占位符", () => {
+    const data = fakeOverview();
+    data.gateway.port = 19876;
+    render(<Wizard data={data} />);
+    const snippet = screen.getByText(/"providers":/, { selector: "pre" }).textContent ?? "";
+    expectLocalOpenCodeModels(snippet, 19876);
+    expect(screen.getByText(/保留逐模型的/)).toBeInTheDocument();
+    expect(screen.getByText(/片段不保证上游接受这些模型/)).toBeInTheDocument();
   });
 
   it("每一步都给可直接跑的命令", () => {

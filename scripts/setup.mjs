@@ -308,7 +308,7 @@ async function readController(ctrl) {
  *
  *   → 所有 Worker 的流量都走本机直连出口
  *   → 它们共用同一个公网 IP
- *   → 而出口隔离正是本项目存在的理由
+ *   → 回显出口与上游连接核对是本项目的重要诊断依据
  *
  * 这个故障**不报任何错**:控制面通、切换请求返回 204、探测也能拿到 IP ——
  * 只是每个 Worker 拿到的是**同一个** IP。只有 `doctor --deep` 的隔离报告
@@ -743,7 +743,10 @@ async function main() {
       "\n说明:认证 Worker 需要真实 Zen API key；匿名 Worker 可以在管理页或配置中显式创建。",
     );
   } else {
-    nextStep(`npm run restart && npm run doctor\n验证出口隔离:npm run doctor -- --deep`);
+    nextStep(
+      "npm run restart && npm run doctor\n" +
+        "验证回显出口（不代表 Zen 实际出口）:npm run doctor -- --deep",
+    );
   }
 }
 

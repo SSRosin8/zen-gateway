@@ -9,7 +9,7 @@ import { useProbe, type ProbeResult } from "../lib/api.ts";
  * ## 这一页要回答三个问题，其余都是噪音
  *
  * 1. 网关能用吗（服务活着、有可用 Worker、目录拉到了）
- * 2. 出口隔离成立吗 —— 这是本项目**存在的理由**，不成立必须显眼
+ * 2. 回显出口是否共用 —— 这是配置核对的重要信号，未知状态必须显眼
  * 3. 某个 Worker 为什么没在被用（停用？没 key？在冷却？）
  *
  * 第 3 条先前**无法回答**：配置知道「配了什么」，调度器知道「现在能不能用」，
@@ -153,11 +153,7 @@ function WorkerTable({ workers }: { workers: readonly WorkerView[] }) {
 }
 
 /**
- * 出口隔离面板 —— 本项目存在的理由，所以它有自己的一块。
- *
- * **按实测 `egressIp` 分组，不按代理 id**：两个不同代理可能 NAT 到同一个
- * 公网 IP，那种情况下「已隔离」是假的。未探测出 IP 的**不算已隔离** ——
- * 「还不知道」与「确认不同」是两件事，混在一起会给出虚假的安全感。
+ * 按回显目标的实测 IP 分组；它与 Zen 可能命中不同规则，不能推断上游出口。
  */
 function IsolationPanel({
   isolation,
@@ -169,12 +165,12 @@ function IsolationPanel({
   const { groups, sharedGroups, unknownWorkerIds, isolated } = isolation;
 
   const status = isolated
-    ? { tone: "success" as StatusTone, icon: "✓", label: `已隔离 · ${groups.length} 个独立出口` }
+    ? { tone: "success" as StatusTone, icon: "✓", label: `回显出口独立 · ${groups.length} 个出口` }
     : sharedGroups.length > 0
       ? {
           tone: "error" as StatusTone,
           icon: "✕",
-          label: `未隔离 · ${sharedGroups.length} 组共用出口`,
+          label: `回显出口共用 · ${sharedGroups.length} 组共用出口`,
         }
       : {
           tone: "warn" as StatusTone,
@@ -184,7 +180,7 @@ function IsolationPanel({
 
   return (
     <Panel
-      title="出口隔离"
+      title="回显出口"
       action={
         <PrimaryButton onClick={() => void probe.run()} disabled={probe.running}>
           {probe.running ? "探测中…" : "探测出口"}
@@ -192,12 +188,15 @@ function IsolationPanel({
       }
     >
       <StatusIndicator tone={status.tone} icon={status.icon} label={status.label} />
+      <p className="mt-3 text-text-muted">
+        仅反映 IP 回显目标的出口；Zen 实际出口需核对发往 opencode.ai 的连接。
+        已保存的 IP 是最后一次成功探测结果，不代表当前仍然可用。
+      </p>
 
       {sharedGroups.length > 0 && (
         <div className="mt-3">
           <p className="text-error">
-            以下 Worker 从<Strong>同一个</Strong>公网 IP 出去 —— 多账号同 IP 有被上游判定
-            关联的风险：
+            以下 Worker 访问 IP 回显目标时使用<Strong>同一个</Strong>公网 IP：
           </p>
           <ul className="mt-2 space-y-1">
             {sharedGroups.map((g) => (
@@ -213,7 +212,7 @@ function IsolationPanel({
       {unknownWorkerIds.length > 0 && (
         <p className="mt-3 text-text-muted">
           未探测：{unknownWorkerIds.join("、")} —— 点「探测出口」实测公网 IP。
-          「还不知道」不算作已隔离。
+          尚不能判断这些回显出口是否独立。
         </p>
       )}
 

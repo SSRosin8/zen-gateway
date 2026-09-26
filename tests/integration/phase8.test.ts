@@ -1066,6 +1066,15 @@ describe("两个脚本都拒绝未识别的参数", () => {
     expect(good.stdout).not.toContain("未识别的参数");
   });
 
+  it("doctor --help 明确 --deep 只测回显目标，不宣称 Zen 已隔离", async () => {
+    const result = await run(DOCTOR, ["--help"]);
+
+    expect(result.code).toBe(0);
+    expect(result.stdout).toContain("IP 回显目标");
+    expect(result.stdout).toContain("不证明 Zen 实际出口");
+    expect(result.stdout).not.toContain("额外实测每个出口的公网 IP");
+  });
+
   it("`--help` 提示 npm 调用要加 `--` —— 那是这个陷阱的高频入口", async () => {
     /*
      * `npm run setup --dry-run` 会被 npm 自己吃掉 flag，脚本收不到，

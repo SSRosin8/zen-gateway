@@ -122,9 +122,9 @@ describe("出口隔离视图", () => {
     });
     render(<OverviewPage data={data} />);
 
-    expect(screen.getByText(/未隔离/)).toBeInTheDocument();
+    expect(screen.getByText(/回显出口共用/)).toBeInTheDocument();
     /*
-     * 多账号同 IP 有被上游判定关联的风险 —— 必须说出是哪几个。
+     * 共用回显出口必须说出是哪几个 Worker。
      * 「w1、w2」在页面上出现两次(共用组的警示列表 + 全部分组列表),
      * 所以用 getAllByText —— 至少一处即成立,而**两处都在**恰是设计意图:
      * 警示区回答「出了什么问题」,分组列表回答「现在是什么状况」。
@@ -165,7 +165,7 @@ describe("出口隔离视图", () => {
     expect(tones).not.toContain("success");
   });
 
-  it("三个独立出口报已隔离", () => {
+  it("回显出口独立时仍明确 Zen 实际出口未验证", () => {
     const data = withWorkers([worker()], {
       isolation: {
         groups: [
@@ -178,7 +178,10 @@ describe("出口隔离视图", () => {
       },
     });
     render(<OverviewPage data={data} />);
-    expect(screen.getByText(/已隔离 · 2 个独立出口/)).toBeInTheDocument();
+    expect(screen.getByText(/回显出口独立 · 2 个出口/)).toBeInTheDocument();
+    expect(screen.getByText(/Zen 实际出口需核对发往 opencode.ai 的连接/)).toBeInTheDocument();
+    expect(screen.getByText(/最后一次成功探测结果，不代表当前仍然可用/)).toBeInTheDocument();
+    expect(screen.queryByText(/已隔离/)).not.toBeInTheDocument();
   });
 });
 

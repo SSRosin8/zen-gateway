@@ -10,22 +10,22 @@ import type { ClashController } from "./clash/controller.ts";
 /**
  * 出口探测 —— 数据面。
  *
- * 唯一目的:**实测这条链路的公网出口 IP**。
+ * 唯一目的:**实测发往 IP 回显目标的这条链路的公网出口 IP**。
  *
  * 为什么不能用 Clash Controller 的 `/delay` 代替:那是控制面延迟,由 Clash
  * 自己去连测试 URL。它证明节点可用,但**不证明我们的流量真的从那个节点出去**。
- * 出口隔离的整个价值在于「两个 Worker 的流量从不同公网 IP 出去」,
- * 而这件事只能由我们自己的请求实测回显的 IP 来证明。
+ * 回显结果只描述该目标命中的路由。IP 回显服务与 OpenCode Zen 可能命中不同
+ * 规则；它不能单独证明发往 Zen 的请求使用了相同出口或已完成出口隔离。
  *
- * 出口隔离的判定必须按实测 IP 分组,不能按代理 id:两个不同代理可能
- * NAT 到同一个公网 IP,那种情况下「已隔离」是假的。
+ * 回显结果按实测 IP 分组,不能按代理 id:两个不同代理可能 NAT 到同一个公网 IP。
+ * 这只是回显目标的共用/独立情况，Zen 实际出口仍需核对上游连接。
  */
 
 /**
  * IP 回显服务。
  *
  * 多个候选并依次回退:单一服务挂掉或被墙会让整个探测功能失效,
- * 而这个功能是出口隔离的唯一验证手段。
+ * 而这个功能是回显目标出口的验证手段，不能代替对 Zen 上游连接的核对。
  *
  * 只取 IP,不取地理位置等附加信息 —— 少一个字段就少一处解析分歧。
  */
@@ -202,10 +202,10 @@ async function fetchThrough(url: string, dispatcher: Dispatcher, timeoutMs: numb
 /**
  * 出口隔离分组。
  *
- * **按实测 `egressIp` 分组,不按代理 id。**
+ * **按回显目标实测 `egressIp` 分组,不按代理 id。**
  * 旧实现按 proxyId 判断是否共用出口,从不比较实测 IP —— 两个不同代理
- * NAT 到同一公网 IP 时会被报成「已隔离」,而隔离恰恰是这个项目存在的理由,
- * 这个判断错了整个功能就是假的。
+ * NAT 到同一公网 IP 时会被报成「已隔离」。该报告仅描述回显目标，
+ * 不能单独证明发往 Zen 的请求也使用独立出口。
  *
  * 未探测出 IP 的记录单列为「未知」,**不算作已隔离** ——
  * 「还不知道」和「确认不同」是两件事,混在一起会给出虚假的安全感。
@@ -217,12 +217,13 @@ export type IsolationGroup = {
 };
 
 export type IsolationReport = {
-  /** 每个 IP 一组;组内多于一个 Worker 即为共用出口。 */
+  /** 每个回显 IP 一组；组内多于一个 Worker 即为该目标共用出口。 */
   groups: IsolationGroup[];
   /** 尚未探测出 IP 的 Worker。 */
   unknownWorkerIds: string[];
   /** 存在共用出口的组。 */
   sharedGroups: IsolationGroup[];
+  /** 回显 IP 已知且互不共用，不表示 Zen 实际出口已验证。 */
   isolated: boolean;
 };
 

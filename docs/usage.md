@@ -24,8 +24,8 @@ npm run doctor
 npm run doctor -- --deep
 ```
 
-`doctor` 默认只读；`--deep` 会真实探测在用出口，桥接探测期间会切换 Clash
-selector。`npm run setup -- --dry-run` 只显示导入结果，`npm run setup` 才写入
+`doctor` 默认只读；`--deep` 会真实探测 IP 回显目标，桥接探测期间会切换 Clash
+selector。回显结果不代表 Zen 实际连接的出口。`npm run setup -- --dry-run` 只显示导入结果，`npm run setup` 才写入
 配置。setup 支持 `--api <http://127.0.0.1:端口>` 与 `--secret <值>`；API 地址
 必须是本机 HTTP 回环地址。
 
@@ -42,7 +42,7 @@ service 脚本和 Vite 代理使用同一解析逻辑。数据目录可用 `ZG_D
 
 - Worker 新增、编辑、删除；编辑时留空凭证表示保留旧值，清空必须显式操作。
 - 模型免费后缀、显式免费名单、目录交集开关的编辑。
-- 代理分页、批量探测、按实测公网 IP 分组的隔离视图。
+- 代理分页、批量探测、按 IP 回显目标的实测公网 IP 分组的视图。
 - 订阅刷新、探测进度、统计和运行期 Worker 状态查看。
 
 代理和 Clash 内核的增删改仍通过 `data/config.json` 完成，保存后重启网关。后台
@@ -51,32 +51,64 @@ service 脚本和 Vite 代理使用同一解析逻辑。数据目录可用 `ZG_D
 
 ## 客户端接入
 
-先运行 `npm run status` 取得服务实际端口。覆盖 OpenCode 内置 provider：
+先运行 `npm run status` 取得服务实际端口。OpenCode 2 需要为每个内置模型写入
+网关地址和 SDK package：
 
-```jsonc
+```json
 {
-  "$schema": "https://opencode.ai/config.json",
-  "provider": {
+  "providers": {
     "opencode": {
-      "options": {
+      "package": "aisdk:@ai-sdk/openai-compatible",
+      "settings": {
         "baseURL": "http://127.0.0.1:<实际端口>/v1",
-        "apiKey": "<data/config.json 中 gateway.relayToken 的值>"
+        "apiKey": "<把 data/config.json 中 gateway.relayToken 的值填入>"
+      },
+      "models": {
+        "muse-spark-1.3-contributor-free": {
+          "package": "aisdk:@ai-sdk/openai",
+          "settings": {
+            "baseURL": "http://127.0.0.1:<实际端口>/v1",
+            "apiKey": "<把 data/config.json 中 gateway.relayToken 的值填入>"
+          }
+        },
+        "big-pickle": {
+          "package": "aisdk:@ai-sdk/openai-compatible",
+          "settings": {
+            "baseURL": "http://127.0.0.1:<实际端口>/v1",
+            "apiKey": "<把 data/config.json 中 gateway.relayToken 的值填入>"
+          }
+        },
+        "space-bunny-free": {
+          "package": "aisdk:@ai-sdk/openai-compatible",
+          "settings": {
+            "baseURL": "http://127.0.0.1:<实际端口>/v1",
+            "apiKey": "<把 data/config.json 中 gateway.relayToken 的值填入>"
+          }
+        },
+        "mimo-v2.6-flash-free": {
+          "package": "aisdk:@ai-sdk/openai-compatible",
+          "settings": {
+            "baseURL": "http://127.0.0.1:<实际端口>/v1",
+            "apiKey": "<把 data/config.json 中 gateway.relayToken 的值填入>"
+          }
+        }
       }
     }
   }
 }
 ```
 
-后台网关页的复制按钮复制同样的结构，但 token 是占位符，仍需填入真实值。不要
-写 `models` 块；内置 provider 的模型表会随上游目录变化。用真实 OpenCode CLI
-验证：
+后台网关页的复制按钮复制同样的结构，但 token 是占位符，仍需填入真实值。新增模型
+时也要按协议选择 SDK 并添加逐模型 `settings`。用真实 OpenCode CLI 验证：
 
 ```bash
-opencode run --model opencode/mimo-v2.6-flash-free "Reply with exactly: OK"
+opencode run --model opencode/space-bunny-free "Reply with exactly: OK"
 ```
 
-停止服务后重复命令应连接失败，重启后恢复，借此确认客户端确实经过本网关。手工
-curl 的请求形态与真实 CLI 不同，不能把某个探针的结果推广到所有客户端。
+当前免费模型的真实 CLI 验收范围是 Chat Completions 和 Responses；Messages 的
+网关协议链路已完成，但当前没有可验的免费 Zen 模型。停止服务后重复命令应连接
+失败，重启后恢复，借此确认客户端确实经过本网关。手工 curl 的请求形态与真实
+CLI 不同，不能把某个探针的结果推广到所有客户端。
 
 ## 配置文件
 
@@ -192,8 +224,9 @@ rule 模式下可能不参与选路，在 global 模式下则会影响本机其�
 当前内核时保持粘滞，否则按 priority 选择。转发路径不会逐请求探活或自动切换。
 批量探测会锁定一个内核，避免两批任务同时改动 Clash 的全局 selector。
 
-`egressIp` 只能由探测写回。它按实测公网 IP 分组，`null` 是“尚未测量”，不代表
-已经与其它出口隔离。
+`egressIp` 只能由探测写回。它按 IP 回显目标的实测公网 IP 分组，`null` 是“尚未测量”，
+不代表该目标已与其它出口独立；探测目标与 Zen 可能命中不同规则，真实上游出口需在请求
+期间核对 Clash `/connections`。
 
 ## 订阅和批量探测
 
@@ -202,7 +235,7 @@ rule 模式下可能不参与选路，在 global 模式下则会影响本机其�
 刷新不会重复添加；用户改过的 `enabled` 与已测 `egressIp` 会保留。订阅 URL 是
 凭证，界面、API 和错误消息都会脱敏。
 
-代理池的批量探测分为本地筛选和真实出口探测两段，进度由服务端保存。任意时刻
+代理池的批量探测分为本地筛选和 IP 回显目标探测两段，进度由服务端保存。任意时刻
 只能有一批；进程被强制终止后遗留任务会标为 interrupted。探测完成后即使结果写回
 配置失败，任务仍会结束；日志会记录写回错误，需要修复存储问题后重新探测。
 

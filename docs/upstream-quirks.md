@@ -101,6 +101,30 @@ key 的目录槽位。不能由少量样本推断完整目录按某个单一维�
 绑定。这样重试链从第一个候选切换到另一个 Worker 时，后续请求仍跟随真正签发
 推理状态的 Worker。
 
+## 真实 OpenCode CLI 与多出口
+
+**观察日期**：2026-09-26。
+**客户端**：OpenCode CLI v2.0.12，使用 `opencode run --standalone --format json`。
+**范围**：3 个未绑定到当前 Worker 的临时 Clash 出口、3 把已配置认证 key 和一个
+不发送 key 的匿名 Worker、4 个免费模型，共 48 次经网关请求；随后对
+`space-bunny-free` 的 12 个身份/出口组合各重复 1 次，共 24 次。测试没有输出 key、
+出口名称或公网 IP；每次请求都在 Clash `/connections` 中核对到 `opencode.ai`、所选
+临时出口链路且不是 `DIRECT`。
+
+结果按上游响应分类：
+
+- `space-bunny-free` 的 Chat Completions：12 个组合首轮全部返回 `OK`，重复轮次
+  24 次也全部返回 `OK`。
+- `mimo-v2.6-flash-free` 与 `big-pickle`：12 个组合均返回 403，错误为 Zen 免费层
+  限制；这只描述本次账号、出口和日期的样本。
+- `muse-spark-1.3-contributor-free` 的 Responses：12 个组合均返回 403，认证和匿名
+  Worker 都未通过本次上游权限检查。当前没有可用于 Messages 真实验收的免费模型。
+
+这组结果说明网关能够在多个真实命中的出口上转发，并保持认证与匿名 Worker 的
+凭证选择；它不证明被上游拒绝的模型在其他账号、地区或日期一定不可用。当前真实
+成功样本是 Chat Completions；Responses 的路由和本地协议行为已覆盖，但还没有通过
+真实 Zen 免费模型验收。Messages 仍只有本地协议级验证，等待上游提供可验模型。
+
 ## 重新测量的边界
 
 `discover:upstream` 使用 Node 的网络栈和它自己的环境变量，不能证明服务进程的

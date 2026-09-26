@@ -128,7 +128,7 @@ export const WorkerViewSchema = z.object({
 });
 export type WorkerView = z.infer<typeof WorkerViewSchema>;
 
-/** 出口隔离分组。**按实测 IP 分组，不按代理 id** —— 见 `probe.ts`。 */
+/** 回显目标的出口分组，按实测 IP 而非代理 id；不代表 Zen 实际出口。 */
 export const IsolationGroupViewSchema = z.object({
   egressIp: z.string(),
   workerIds: z.array(z.string()),
@@ -137,7 +137,7 @@ export const IsolationGroupViewSchema = z.object({
 
 export const IsolationViewSchema = z.object({
   groups: z.array(IsolationGroupViewSchema),
-  /** 尚未探测出 IP 的 Worker。**不算作已隔离** —— 「还不知道」≠「确认不同」。 */
+  /** 尚未探测出回显 IP 的 Worker，不能判断该目标是否使用独立出口。 */
   unknownWorkerIds: z.array(z.string()),
   /** 存在共用出口的组。非空即隔离失败。 */
   sharedGroups: z.array(IsolationGroupViewSchema),
@@ -575,7 +575,7 @@ export type ProbeReport = z.infer<typeof ProbeReportSchema>;
 export const ProxyListSchema = z.object({
   proxies: z.array(ProxyViewSchema),
   clash: OverviewSchema.shape.clash,
-  /** 出口隔离报告 —— 与 Overview 同一份逻辑，按实测 IP 分组。 */
+  /** 回显出口报告，与 Overview 同一份逻辑；不证明 Zen 实际出口隔离。 */
   isolation: IsolationViewSchema,
   /** 订阅列表（Phase 10）—— 代理池页要能看到"这些节点从哪来"。 */
   subscriptions: z.array(SubscriptionViewSchema),

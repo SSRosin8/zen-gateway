@@ -2,7 +2,8 @@
 
 zen-gateway 是一个运行在本机的 OpenCode Zen 网关。它接收 OpenAI 兼容的
 Chat Completions、Responses，以及 Anthropic Messages 请求，只放行配置为免费
-模型的请求，并按 Worker 选择独立的直连或 Clash 出口。
+模型的请求，并按 Worker 选择配置的直连或 Clash 出口；后台的公网 IP 探测只反映
+IP 回显目标，Zen 实际出口需在请求期间核对上游连接。
 
 这是单用户工具：上游固定为 Zen，管理面只监听本机回环地址，不提供多租户或
 对外服务。请求体按原始字节转发，网关只解析路由、模型和流式事件所需的字段。
@@ -32,43 +33,29 @@ npm run doctor
 
 `setup` 会写入配置，但运行中的服务不会自动加载这些变更；第一次使用建议先运行
 `--dry-run`，写入后执行 `npm run restart`。`doctor` 默认只读；
-`npm run doctor -- --deep` 会真实探测正在使用的出口，并在桥接模式下切换
-Clash selector。
+`npm run doctor -- --deep` 会真实探测 IP 回显目标的出口，并在桥接模式下切换
+Clash selector；它不单独证明 Zen 实际请求的出口。
 
 ## 配置 OpenCode
 
 网关实际端口由 `ZG_PORT`、`data/config.json` 的 `gateway.port`、默认值 9876
-依次决定。先运行 `npm run status` 查看当前端口，再把下面片段中的端口和 Relay
-Token 换成实际值：
+依次决定。先运行 `npm run status` 查看当前端口，再按
+[`docs/usage.md`](docs/usage.md) 的 OpenCode 2 配置示例替换端口和 Relay Token。
+每个模型都要保留自己的 `settings.baseURL`、`settings.apiKey` 和 SDK package，
+否则 OpenCode 内置模型设置可能覆盖网关地址。后台网关页的复制按钮提供同一格式，
+其中 Relay Token 仍是占位符。
 
-```jsonc
-{
-  "$schema": "https://opencode.ai/config.json",
-  "provider": {
-    "opencode": {
-      "options": {
-        "baseURL": "http://127.0.0.1:<网关端口>/v1",
-        "apiKey": "<data/config.json 中 gateway.relayToken 的值>"
-      }
-    }
-  }
-}
-```
-
-把配置放在项目的 `opencode.json` 或用户配置目录中。不要额外写 `models` 块，
-让 OpenCode 使用内置模型表；模型可用性由网关的 Zen 目录和免费规则决定。
-后台网关页的复制按钮也提供这个片段，其中 Relay Token 仍是占位符，需填入
-配置文件中的真实值。
-
-用真实 OpenCode CLI 验证完整链路：
+用真实 OpenCode CLI 验证当前可用的 Chat Completions 模型：
 
 ```bash
-opencode run --model opencode/mimo-v2.6-flash-free "Reply with exactly: OK"
+opencode run --model opencode/space-bunny-free "Reply with exactly: OK"
 ```
 
-手工 curl 与真实客户端的请求头和请求体可能不同，某一种请求得到的 403 或 500
-不能推广为所有客户端的结论。停止网关后重复同一条 CLI 命令应连接失败，重启后
-恢复，这可以确认请求确实经过网关。
+当前 Zen 免费模型的真实 CLI 验收以 Chat Completions 和 Responses 为范围；
+Messages 路由已完成网关级实现，但当前没有可验的免费上游模型。手工 curl 与真实
+客户端的请求头和请求体可能不同，某一种请求得到的 403 或 500 不能推广为所有
+客户端的结论。停止网关后重复同一条 CLI 命令应连接失败，重启后恢复，这可以
+确认请求确实经过网关。
 
 ## 主要能力
 
@@ -78,8 +65,8 @@ opencode run --model opencode/mimo-v2.6-flash-free "Reply with exactly: OK"
   `enforceCatalog` 开启时再与在架目录求交集。
 - Worker 会话粘滞、故障冷却和有限重试。Responses 的 `previous_response_id` 与
   成功响应的 `response.id` 都参与绑定。
-- 每个 Worker 绑定一个直连代理、Clash 桥接代理或本机直连出口；批量探测按实测
-  公网 IP 判断出口是否真正隔离。
+- 每个 Worker 绑定一个直连代理、Clash 桥接代理或本机直连出口；批量探测按 IP
+  回显目标的实测公网 IP 分组，真实 Zen 出口需核对上游连接。
 - 管理后台提供概览、网关、代理池、Worker、模型、用量六页，以及批量探测和
   订阅刷新。
 
