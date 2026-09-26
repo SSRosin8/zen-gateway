@@ -33,7 +33,6 @@ export type BridgeEndpoint = {
 export type EgressTarget =
   /** 直连:自带 dispatcher。 */
   | { mode: "direct"; proxy: Proxy }
-  /**
   /** 经本地 Clash 混合端口,节点由 selector 决定;`nodeName` 必须参与 dispatcher 身份。 */
   | { mode: "bridge"; proxy: Proxy; bridge: BridgeEndpoint; nodeName: string }
   /** 不走代理,用本机网络出口。 */
@@ -55,7 +54,6 @@ export function isDirectCapable(type: string): boolean {
   return SOCKS_TYPES.has(t) || HTTP_TYPES.has(t);
 }
 
-/**
 /**
  * dispatcher 池。缓存键包含所有影响连接行为的字段,否则改端口或口令后仍复用旧 dispatcher。
  *

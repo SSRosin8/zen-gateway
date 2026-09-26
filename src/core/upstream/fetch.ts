@@ -131,7 +131,6 @@ export async function fetchUpstream(
 }
 
 /**
-/**
  * 请求级拦截器:连接就绪、请求开始写出(`onRequestStart`)时通知。
  * 用 Proxy 只替换这一个回调:fetch 会在 handler 的 `this` 上挂状态,手写转发对象会丢掉它们。
  */

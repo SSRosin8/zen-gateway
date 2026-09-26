@@ -56,7 +56,11 @@ const IPV4 = /(?<![\d.])(\d{1,3}(?:\.\d{1,3}){3})(?![\d.])(\/\d{1,2})?/g;
  * 通用放行的精确值：公共 DNS 与约定俗成的示例地址。新增前先考虑能否改用
  * 文档保留段 192.0.2.0/24、198.51.100.0/24、203.0.113.0/24。
  */
-const ALLOWED_IPV4 = new Set(["0.0.0.0", "255.255.255.255", "1.1.1.1", "8.8.8.8", "1.2.3.4", "10.0.0.1", "10.1.2.3"]);
+// 测试与文档里固定使用的示例值；新增示例从这里登记，不按目录整段放行私网地址。
+const ALLOWED_IPV4 = new Set([
+  "0.0.0.0", "255.255.255.255", "1.1.1.1", "8.8.8.8", "1.2.3.4",
+  "10.0.0.1", "10.1.2.3", "10.9.8.7", "10.20.30.40", "192.168.1.1",
+]);
 /** 按文件放行的边界值：地址分类器的测试需要紧贴回环段两侧的真实地址。 */
 const ALLOWED_IPV4_BY_FILE = new Map([["tests/unit/middleware.test.ts", new Set(["126.255.255.255", "128.0.0.1"])]]);
 
@@ -80,8 +84,8 @@ export function ipv4Finding(path, line) {
     const ip = m[1];
     const o = octets(ip);
     if (o === null || isDocumentationOrLoopback(o) || ALLOWED_IPV4.has(ip)) continue;
-    // 私网段只在 CIDR 规则示例（`10.0.0.0/8`）或测试 fixture 里放行。
-    if (isPrivate(o) && (m[2] !== undefined || path.startsWith("tests/"))) continue;
+    // 私网段只在 CIDR 规则示例（`10.0.0.0/8`）里放行；具体私网地址要先登记为示例值。
+    if (isPrivate(o) && m[2] !== undefined) continue;
     if (ALLOWED_IPV4_BY_FILE.get(path)?.has(ip)) continue;
     return true;
   }
@@ -121,10 +125,6 @@ export const SELF_FILES = new Set(["scripts/check-sensitive-files.mjs", "tests/u
 export function forbiddenPath(path) {
   const normalized = path.replaceAll("\\", "/");
   return FORBIDDEN_PATHS.some((pattern) => pattern.test(normalized));
-}
-
-export function secretPattern(line) {
-  return lineFinding("fixture.ts", line) !== null;
 }
 
 export function inspectPaths(paths) {

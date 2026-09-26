@@ -1,7 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
   buildUpstreamHeaders,
-  collectHeaders,
   HeaderValidationError,
   isSafeHeaderName,
   isSafeHeaderValue,
@@ -294,15 +293,6 @@ describe("网关掌握的头不可被客户端覆盖", () => {
 
   it("协议面的非法头值同样被拒", () => {
     expect(() => build({}, { extra: { "x-bad": "a\r\nb" } })).toThrow(HeaderValidationError);
-  });
-});
-
-describe("collectHeaders", () => {
-  it("头名统一小写", () => {
-    const hs = new Headers();
-    hs.set("Content-Type", "application/json");
-    hs.set("X-Custom", "v");
-    expect(collectHeaders(hs)).toEqual({ "content-type": "application/json", "x-custom": "v" });
   });
 });
 

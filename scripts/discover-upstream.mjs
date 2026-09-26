@@ -14,6 +14,14 @@
  */
 
 import { redactText, redactUrl, safeErrorMessage } from "../src/shared/redact.ts";
+import { checkArgs } from "./lib/args.mjs";
+
+// 在发出任何请求之前校验：`--help` 或拼错的参数不能变成一次真实的上游探测。
+checkArgs({
+  command: "npm run discover:upstream",
+  summary: "上游协议重验：逐条核对闸门顺序与错误形状，行为变化时退出 1。需要网络。",
+  flags: [],
+});
 
 const BASE = process.env.ZG_DISCOVER_BASE ?? "https://opencode.ai/zen/v1";
 const KEY = process.env.ZG_DISCOVER_KEY ?? "";

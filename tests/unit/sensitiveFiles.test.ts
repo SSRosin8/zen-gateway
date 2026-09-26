@@ -102,6 +102,8 @@ describe("本地敏感文件关卡", () => {
     expectClean("203.0.113.9 198.51.100.1 192.0.2.10 127.0.0.1 0.0.0.0");
     expectClean("IPCIDR,10.0.0.0/8,DIRECT and 172.16.0.0/12", "docs/usage.md");
     expectClean(j("dnsA: ['10.", "20.30.40']"), "tests/integration/doctor.test.ts");
+    // 测试目录不整段放行：未登记的私网地址同样要报。
+    expectHit(j("host: '10.", "44.55.66'"), "非保留 IPv4 地址", "tests/integration/any.test.ts");
     // 解析器负例（越界、前导零）不是地址。
     expectClean("'256.1.1.1' '010.1.1.1' '1.2.3.04'");
     // 按文件放行只对那个文件生效。

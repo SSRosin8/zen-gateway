@@ -165,11 +165,3 @@ export function buildUpstreamHeaders(input: BuildUpstreamHeadersInput): Record<s
   return out;
 }
 
-/** 从 Headers 收集小写名的普通对象;重复头由 Headers 合并为逗号分隔。 */
-export function collectHeaders(headers: Headers): Record<string, string> {
-  const out: Record<string, string> = {};
-  headers.forEach((value, name) => {
-    out[name.toLowerCase()] = value;
-  });
-  return out;
-}
