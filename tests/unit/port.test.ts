@@ -177,6 +177,7 @@ describe("三处调用点都从 resolvePort 取值", () => {
      */
     const mod = (await import("../../vite.config.ts")) as {
       default: { server?: { proxy?: Record<string, { target: string }> } };
+      createViteConfig: () => { server?: { proxy?: Record<string, { target: string }> } };
     };
     const proxy = mod.default.server?.proxy;
     expect(proxy).toBeDefined();
@@ -184,6 +185,32 @@ describe("三处调用点都从 resolvePort 取值", () => {
     const expected = `http://127.0.0.1:${resolvePort(PROJECT)}`;
     expect(proxy!["/health"]!.target).toBe(expected);
     expect(proxy!["/api"]!.target).toBe(expected);
+  });
+
+  it("Vite 代理在设置 ZG_DATA_DIR 时读取该目录的配置端口", async () => {
+    const dataRoot = await mkdtemp(join(tmpdir(), "zg-vite-data-"));
+    const dataDir = join(dataRoot, "data");
+    await mkdir(dataDir, { recursive: true, mode: 0o700 });
+    await writeFile(
+      join(dataDir, "config.json"),
+      JSON.stringify({ version: 1, gateway: { port: 24680 } }),
+      { mode: 0o600 },
+    );
+
+    const previous = process.env.ZG_DATA_DIR;
+    try {
+      process.env.ZG_DATA_DIR = dataDir;
+      const mod = (await import("../../vite.config.ts")) as {
+        createViteConfig: () => { server?: { proxy?: Record<string, { target: string }> } };
+      };
+      const proxy = mod.createViteConfig().server?.proxy;
+      expect(proxy?.["/health"]?.target).toBe("http://127.0.0.1:24680");
+      expect(proxy?.["/api"]?.target).toBe("http://127.0.0.1:24680");
+    } finally {
+      if (previous === undefined) delete process.env.ZG_DATA_DIR;
+      else process.env.ZG_DATA_DIR = previous;
+      await rm(dataRoot, { recursive: true, force: true });
+    }
   });
 });
 

@@ -59,6 +59,7 @@ export function ModelsPage({
     return true;
   });
 
+  const listedCount = data.models.filter((m) => m.listed).length;
   const freeCount = data.models.filter((m) => m.free).length;
 
   const columns: ReadonlyArray<Column<ModelView>> = [
@@ -126,7 +127,7 @@ export function ModelsPage({
     <div className="space-y-4">
       <Panel title="免费判定">
         <div className="grid grid-cols-2 gap-6 sm:grid-cols-4">
-          <Metric label="在架模型" value={String(data.models.length)} hint="上游目录总数" />
+          <Metric label="在架模型" value={String(listedCount)} hint="上游目录总数" />
           <Metric label="可用" value={String(freeCount)} hint="通过免费判定" />
           <Metric
             label="已下架"

@@ -8,17 +8,16 @@
  * ## 安全边界:只扫 localhost 的固定白名单
  *
  * **绝不扫 LAN,绝不扫端口段。** 这是规划里明确列出的安全约束,理由不止是
- * 礼貌:一个会扫网段的工具在公司网络上跑就是一次未授权的端口扫描,
+ * 礼貌:一个会扫网段的工具在不受控网络上运行就是一次未授权的端口扫描,
  * 而它带来的便利(自动发现别人机器上的 Clash)本项目根本不需要 ——
  * 本网关只用本机的 Clash 做桥接。
  *
- * 白名单取自各发行版的**实际默认值**(实测本机 Clash Verge 是 9097,
- * 0dcloud 的 mihomo 是 9090)。探不到就让用户手填,而不是靠扫描猜。
+ * 白名单只包含少量常见的本机 Controller 端口。探不到就让用户手填，而不是靠扫描猜。
  *
  * ## 为什么必须从 Controller 的 `/configs` 读 `mixed-port`
  *
- * 实测:本机混合端口**不是**文档默认的 `7890`,且 `port`/`socks-port` 可能
- * 都为 0。实测值随内核而变 —— 0dcloud 是 `17891`,Clash Verge 是 `7897`。
+ * 混合端口不是稳定的文档默认值，且 `port`/`socks-port` 可能都为 0；端口随
+ * 内核配置变化，必须从 Controller 读取。
  * **正因为它会变**,硬编码任何一个值(包括这里提到的这几个)都会让桥接
  * 静默连到一个没人监听的端口:所有桥接代理传输失败,而控制面明明是通的。
  * 那是个极难自查的故障,所以端口只能问内核。
@@ -65,7 +64,7 @@ const ROOT_ARG = process.env.ZG_DATA_DIR ? undefined : ROOT;
  */
 checkArgs({
   command: "npm run setup",
-  summary: "zen-gateway 自动配置：探测本机 Clash Controller → 导入节点 → 建 Worker。",
+  summary: "zen-gateway 自动配置：探测本机 Clash Controller → 导入出口（不创建 Worker）。",
   flags: [
     { flag: "--dry-run", help: "只报会做什么，不写盘" },
     { flag: "--api", takesValue: true, help: "显式指定 Controller 地址（跳过端口探测）" },
@@ -78,8 +77,7 @@ const DRY_RUN = process.argv.includes("--dry-run");
 /**
  * 候选 Controller 端口 —— **固定白名单,仅 127.0.0.1**。
  *
- * 9090 是 Clash/mihomo 的文档默认值;9097 是 Clash Verge 实测值;
- * 其余几个是常见发行版的默认。列表刻意短:探不到就让用户用 `--api` 手填,
+ * 9090 是常见默认值，其余是少量候选。列表刻意短：探不到就让用户用 `--api` 手填，
  * 那比把列表扩成一个端口段要好 —— 见文件头的安全边界。
  */
 const CANDIDATE_PORTS = [9090, 9097, 9091, 9093, 6170];
@@ -227,21 +225,10 @@ async function readController(ctrl) {
       const p = body?.["mixed-port"];
       if (typeof p === "number" && p > 0) mixedPort = p;
       /*
-       * `mixed-port` 为 0 时退回 socks/http 端口。
-       *
-       * 实测有内核把三者都配上而只用其中一个,也有 `port`/`socks-port` 都为 0
-       * 的情形。顺序:mixed > socks > http —— 混合端口同时收 HTTP 与 SOCKS,
-       * 是最省事的那个,而 dispatcher 两种都支持。
+       * `socks-port` 与 `port` 不能作为替代：桥接 dispatcher 明确使用 HTTP
+       * CONNECT，而把 SOCKS 端口写成混合端口会让 setup 报成功、所有转发再失败。
+       * 没有真正的 mixed-port 时交给调用方拒绝配置，要求用户在 Clash 中开启它。
        */
-      if (mixedPort === null) {
-        for (const key of ["socks-port", "port"]) {
-          const v = body?.[key];
-          if (typeof v === "number" && v > 0) {
-            mixedPort = v;
-            break;
-          }
-        }
-      }
     }
   } catch {
     /* 下面会按 null 处理 */
@@ -430,7 +417,7 @@ async function main() {
   let config;
   let created;
   try {
-    const loaded = await loadConfig(ROOT_ARG);
+    const loaded = await loadConfig(ROOT_ARG, { readOnly: DRY_RUN });
     config = loaded.config;
     created = loaded.created;
   } catch (err) {
@@ -473,9 +460,8 @@ async function main() {
       line("fail", `发现 ${needAuth.length} 个 Controller,但都需要 secret`);
       detail(needAuth.map((r) => r.apiBase).join(", "));
       nextStep(
-        `从 Clash 的配置文件里取 secret,然后:\n` +
-          `  node scripts/setup.mjs --api ${needAuth[0].apiBase} --secret '<secret>'\n` +
-          `Clash Verge 的配置通常在 ~/.local/share/io.github.clash-verge-rev.clash-verge-rev/config.yaml`,
+          `从 Clash 的配置或管理界面取得 secret,然后:\n` +
+          `  node scripts/setup.mjs --api ${needAuth[0].apiBase} --secret '<secret>'`,
       );
     } else {
       line("fail", "没有找到本机的 Clash Controller");
@@ -512,7 +498,7 @@ async function main() {
        * 桥接静默连到没人监听的端口,而那是本项目最难自查的故障之一。
        */
       line("fail", `${ctrl.apiBase}:无法从 /configs 读出可用的代理端口`);
-      detail("mixed-port / socks-port / port 都为 0 或缺失 —— 请在 Clash 里开启混合端口。");
+      detail("未读到有效的 mixed-port —— 桥接需要 HTTP 混合端口；socks-port / port 不能替代，请在 Clash 中开启 mixed-port。");
       continue;
     }
 
@@ -573,7 +559,7 @@ async function main() {
      * 内核 id 从端口推导,稳定且可读。
      *
      * 重跑 setup 要落到同一个 id —— 否则每次新增一个内核条目,而代理仍引用
-     * 旧的那个。`IdSchema` 允许 `.` 与 `-`,所以 `bridge-127.0.0.1-9097` 合法。
+     * 旧的那个。`IdSchema` 允许 `.` 与 `-`，所以按地址生成的 bridge id 合法。
      */
     const bridgeId = `bridge-${url.hostname}-${url.port}`;
     const existing = next.clash.bridges.find((b) => b.id === bridgeId);
@@ -597,7 +583,7 @@ async function main() {
        * `name` / `priority` / `enabled`。
        *
        * `enabled` 尤其不能动:用户可能刻意停用了一个内核(本机就有一个
-       * 0dcloud 的条目因控制面进不去而被停用),而 setup 把它重新启用等于
+       * 不可达的条目可能因控制面鉴权失败而被停用，而 setup 把它重新启用等于
        * 撤销用户的决定。
        */
       existing.apiBase = plan.ctrl.apiBase;
@@ -661,7 +647,7 @@ async function main() {
      * `activeBridgeId` 指过去,`pickBridge` 在 manual 模式下只在**已启用**的
      * 内核里找（`pool.ts`）→ 返回 null → 每个桥接代理都失败,
      * 而 setup 打的是 ✓ 并说「出口已配好」。
-     * 本机正是这个形态:0dcloud 那个内核因为控制面进不去而被停用。
+     * 不可达的内核可能因控制面鉴权失败而被停用。
      */
     if (next.clash.activeBridgeId === null) {
       const candidate = next.clash.bridges.find((b) => b.id === bridgeId);

@@ -328,7 +328,22 @@ export function modelViews(config: Config, snapshot: CatalogSnapshot | null): Mo
   if (snapshot === null) return [];
 
   const view = { ids: snapshot.ids };
-  return snapshot.entries.map((entry): ModelView => {
+  /*
+   * 管理页需要同时回答两个问题：当前目录里有哪些模型，以及配置里记着的免费
+   * 模型是否已经从目录消失。只遍历 `snapshot.entries` 会让第二类模型在生产
+   * 响应中完全消失，`retired` 分支因此只能在单测 fixture 里存在。
+   *
+   * 这些额外 id 只来自用户配置（显式免费名单与协议面覆写），不从历史数据库
+   * 猜测模型，避免把已删除配置重新显示出来。条目缺失时只保留 id，协议面仍由
+   * `surfacesFor` 从当前配置推导。
+   */
+  const entries = new Map(snapshot.entries.map((entry) => [entry.id, entry] as const));
+  for (const id of config.models.extraFreeIds) entries.set(id, entries.get(id) ?? { id });
+  for (const id of Object.keys(config.models.surfaceOverrides)) {
+    entries.set(id, entries.get(id) ?? { id });
+  }
+
+  return [...entries.values()].map((entry): ModelView => {
     const verdict = judgeFree(entry.id, config.models, view);
     return {
       id: entry.id,

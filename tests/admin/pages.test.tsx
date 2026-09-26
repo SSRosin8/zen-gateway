@@ -286,6 +286,14 @@ describe("模型页", () => {
     expect(screen.getAllByText("chat").length).toBeGreaterThan(0);
   });
 
+  it("在架数量只统计 listed 条目，不把配置中的下架项算进去", () => {
+    render(
+      <ModelsPage data={modelList()} view={parseHash("#models")} navigate={noop} />,
+    );
+    const listedLabel = screen.getByText("在架模型");
+    expect(listedLabel.parentElement?.textContent).toContain("3");
+  });
+
   it("说明那条不对称（下架能自动剔除，新免费模型不能自动发现）", () => {
     render(<ModelsPage data={modelList()} view={parseHash("#models")} navigate={noop} />);
     expect(screen.getByText(/无法自动发现/)).toBeInTheDocument();

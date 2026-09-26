@@ -521,6 +521,10 @@ describe("setup 不动用户自己的东西", () => {
 
   it("--dry-run 完全不写盘", async () => {
     const before = await writeConfig();
+    await chmod(configFile(), 0o644);
+    await chmod(dataDir, 0o755);
+    const beforeFileStat = await stat(configFile());
+    const beforeDirStat = await stat(dataDir);
     await startFakeClash({});
 
     await run(SETUP, ["--api", fakeApi(), "--dry-run"]);
@@ -528,6 +532,10 @@ describe("setup 不动用户自己的东西", () => {
     const after = JSON.parse(await readFile(configFile(), "utf8")) as Config;
     expect(after).toEqual(before);
     await expect(readFile(`${configFile()}.bak`, "utf8")).rejects.toThrow(/ENOENT/);
+    expect((await stat(configFile())).mode & 0o777).toBe(0o644);
+    expect((await stat(dataDir)).mode & 0o777).toBe(0o755);
+    expect((await stat(configFile())).mtimeMs).toBe(beforeFileStat.mtimeMs);
+    expect((await stat(dataDir)).mtimeMs).toBe(beforeDirStat.mtimeMs);
   });
 });
 
@@ -552,14 +560,15 @@ describe("setup 从 Controller 读端口,不硬编码", () => {
     for (const proxy of after.proxies) expect(proxy.port).toBe(24680);
   });
 
-  it("mixed-port 为 0 时退回 socks-port", async () => {
+  it("mixed-port 为 0 时拒绝把 socks-port 冒充 HTTP 混合端口", async () => {
     await writeConfig();
     await startFakeClash({ mixedPort: null, socksPort: 13579 });
 
-    await run(SETUP, ["--api", fakeApi()]);
+    const result = await run(SETUP, ["--api", fakeApi()]);
+    expect(result.code).toBe(1);
+    expect(result.stdout).toContain("无法从 /configs 读出可用的代理端口");
     const after = JSON.parse(await readFile(configFile(), "utf8")) as Config;
-
-    expect(after.clash.bridges[0]!.localProxyPort).toBe(13579);
+    expect(after.clash.bridges).toHaveLength(0);
   });
 
   it("三个端口都为 0 时**拒绝配置**,而不是猜一个默认值", async () => {
