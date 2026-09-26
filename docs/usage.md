@@ -98,6 +98,15 @@ opencode run --model opencode/space-bunny-free "Reply with exactly: OK"
 失败，重启后恢复，借此确认客户端确实经过本网关。手工 curl 的请求形态与真实
 CLI 不同，不能把某个探针的结果推广到所有客户端。
 
+OpenCode 2.0.12 的隔离实测确认，`providers.opencode.settings` 会覆盖
+`baseURL`/`apiKey`，但只对客户端自身模型目录中已存在的模型发起请求。CLI 报
+`Model unavailable` 表示客户端目录没有该模型，不是网关没有接管 Base URL。验收匿名
+Worker 时为每次测试使用新的会话和隔离的 `PWD`、`OPENCODE_CONFIG`、
+`XDG_CONFIG_HOME`、`XDG_DATA_HOME`、`XDG_STATE_HOME`；否则旧的认证会话亲和会优先于
+`anonymous_first`。模型目录首次获取失败按契约返回 `502 upstream_unreachable`；若日志
+包含 `unable to get local issuer certificate`，请在启动服务前设置服务进程的
+`NODE_EXTRA_CA_CERTS`。
+
 ## 配置文件
 
 首次启动创建 `data/config.json`，权限为 0600。配置必须包含 `version`、`gateway`
