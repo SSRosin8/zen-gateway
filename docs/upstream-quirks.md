@@ -104,26 +104,32 @@ key 的目录槽位。不能由少量样本推断完整目录按某个单一维�
 ## 真实 OpenCode CLI 与多出口
 
 **观察日期**：2026-09-26。
-**客户端**：OpenCode CLI v2.0.12，使用 `opencode run --standalone --format json`。
+**客户端**：OpenCode CLI v2.0.12，使用原生 `opencode run --standalone --format json`，
+保留本机 OpenCode 的认证和运行时上下文；网关配置为每模型的 `settings.baseURL`、
+Relay Token 和 SDK package。
 **范围**：3 个未绑定到当前 Worker 的临时 Clash 出口、3 把已配置认证 key 和一个
-不发送 key 的匿名 Worker、4 个免费模型，共 48 次经网关请求；随后对
-`space-bunny-free` 的 12 个身份/出口组合各重复 1 次，共 24 次。测试没有输出 key、
-出口名称或公网 IP；每次请求都在 Clash `/connections` 中核对到 `opencode.ai`、所选
-临时出口链路且不是 `DIRECT`。
+临时构造的不发送 key 的匿名 Worker、4 个免费模型，共 48 次经网关请求。测试没有
+输出 key、出口名称或公网 IP；每次请求都在 Clash `/connections` 中核对到
+`opencode.ai`、所选临时出口链路且不是 `DIRECT`。
 
 结果按上游响应分类：
 
-- `space-bunny-free` 的 Chat Completions：12 个组合首轮全部返回 `OK`，重复轮次
-  24 次也全部返回 `OK`。
-- `mimo-v2.6-flash-free` 与 `big-pickle`：12 个组合均返回 403，错误为 Zen 免费层
-  限制；这只描述本次账号、出口和日期的样本。
-- `muse-spark-1.3-contributor-free` 的 Responses：12 个组合均返回 403，认证和匿名
-  Worker 都未通过本次上游权限检查。当前没有可用于 Messages 真实验收的免费模型。
+- `mimo-v2.6-flash-free`、`big-pickle`、`space-bunny-free` 的 Chat Completions：
+  36 个组合全部返回 `OK`。
+- `muse-spark-1.3-contributor-free` 的 Responses：12 个组合全部返回 `OK`。
+  这说明本次临时出口和当前上游策略允许该样本；其他出口仍可能受地域限制。
+- 当前没有可用于 Messages 真实验收的免费模型。
+
+用户在默认 OpenCode 会话中观察到 Muse Spark 受地域限制，而经网关的本轮出口样本
+可以成功；两者并不矛盾，地域限制属于出口和上游策略的组合结果，不能把一次拒绝推广
+到所有出口。
 
 这组结果说明网关能够在多个真实命中的出口上转发，并保持认证与匿名 Worker 的
-凭证选择；它不证明被上游拒绝的模型在其他账号、地区或日期一定不可用。当前真实
-成功样本是 Chat Completions；Responses 的路由和本地协议行为已覆盖，但还没有通过
-真实 Zen 免费模型验收。Messages 仍只有本地协议级验证，等待上游提供可验模型。
+凭证选择。用户默认 OpenCode 会话以及网关日志也分别观察到 MiMo、Big Pickle 的
+成功用量；Muse 是否成功与出口地域有关。此前把 `XDG_CONFIG_HOME`、`XDG_DATA_HOME`
+等目录全部替换为空目录的临时矩阵曾得到 403，但那种运行环境失去了本机 OpenCode
+上下文，不能作为上游可用性的结论，已从验收结果中剔除。Messages 仍只有本地协议级
+验证，等待上游提供可验模型。
 
 ## 重新测量的边界
 
