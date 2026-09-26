@@ -206,12 +206,14 @@ describe("docs/usage.md 的配置示例", () => {
 const DOC_ROOT = fileURLToPath(new URL("../..", import.meta.url));
 
 function markdownFiles(): string[] {
-  const out = ["README.md", "AGENTS.md", "CLAUDE.md"];
+  const out = ["README.md", "AGENTS.md", "CLAUDE.md", "CONTRIBUTING.md", "SECURITY.md"];
   for (const f of readdirSync(join(DOC_ROOT, "docs"))) if (f.endsWith(".md")) out.push(`docs/${f}`);
   const skills = join(DOC_ROOT, ".claude/skills");
   for (const d of readdirSync(skills, { withFileTypes: true })) {
-    if (d.isDirectory() && existsSync(join(skills, d.name, "SKILL.md"))) {
-      out.push(`.claude/skills/${d.name}/SKILL.md`);
+    if (!d.isDirectory()) continue;
+    // SKILL.md 与 reference.md 都要查：细节挪进 reference.md 后链接也在那里。
+    for (const f of readdirSync(join(skills, d.name))) {
+      if (f.endsWith(".md")) out.push(`.claude/skills/${d.name}/${f}`);
     }
   }
   return out;
@@ -277,8 +279,8 @@ describe("文档相对链接与锚点", () => {
 
   it("每个相对链接的文件和锚点都存在", () => {
     const files = markdownFiles();
-    // 输入集下界：3 个根文档 + 至少 4 份 docs + 4 个 skill。
-    expect(files.length).toBeGreaterThanOrEqual(11);
+    // 输入集下界：5 个根文档 + 至少 4 份 docs + 3 个 SKILL.md + 2 个 reference.md。
+    expect(files.length).toBeGreaterThanOrEqual(14);
 
     const links = files.flatMap((f) => relativeLinks(f, readFileSync(join(DOC_ROOT, f), "utf8")));
     const broken: string[] = [];

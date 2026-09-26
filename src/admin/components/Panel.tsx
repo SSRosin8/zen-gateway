@@ -19,7 +19,7 @@ export function Panel({
   return (
     <section className="min-w-0 rounded-lg border border-border-strong bg-surface">
       <header className="flex flex-wrap items-center justify-between gap-3 border-b border-border-strong px-4 py-3 sm:px-5">
-        <h2 className="text-base font-medium">{title}</h2>
+        <h2 className="text-heading-16 font-medium">{title}</h2>
         {action}
       </header>
       <div className="px-4 py-4 sm:px-5">{children}</div>
@@ -51,14 +51,14 @@ export function Metric({
     tone === "error" ? "text-error" : tone === "warn" ? "text-warn" : "text-text";
   return (
     <div>
-      <div className="text-text-muted">{label}</div>
+      <div className="text-label-14 text-text-muted">{label}</div>
       <div
-        className={`mt-1 font-serif text-3xl leading-none ${valueClass}`}
+        className={`mt-1 font-serif text-display-30 ${valueClass}`}
         style={{ fontVariantNumeric: "tabular-nums" }}
       >
         {value}
       </div>
-      {hint !== undefined && <div className="mt-1 text-text-muted">{hint}</div>}
+      {hint !== undefined && <div className="mt-1 text-label-13 text-text-muted">{hint}</div>}
     </div>
   );
 }
@@ -77,6 +77,8 @@ export function Metric({
  * 「探测中…」。`disabled:opacity-60` 会同时淡化底色与文字，文字对比度从 5.90
  * 掉到 2.51（浅色）/ 2.91（深色）。所以底色换成 `border-strong`，文字保持
  * `text`（11.80 / 7.94），「不可点」由 `cursor-not-allowed` 与变淡的底色表达。
+ *
+ * 悬停/按下只挂在 `enabled:` 上：禁用按钮不该对指针有反馈。
  */
 export function PrimaryButton({
   onClick,
@@ -95,7 +97,7 @@ export function PrimaryButton({
       onClick={onClick}
       disabled={disabled}
       /* 触摸目标 ≥44px。 */
-      className="min-h-[44px] rounded-sm bg-accent-fill px-4 font-medium text-on-accent-fill disabled:cursor-not-allowed disabled:bg-border-strong disabled:text-text"
+      className="min-h-[44px] rounded-sm bg-accent-fill px-4 font-medium text-on-accent-fill transition-colors enabled:hover:bg-accent-fill-hover enabled:active:bg-accent-fill-hover disabled:cursor-not-allowed disabled:bg-border-strong disabled:text-text"
     >
       {children}
     </button>
@@ -109,12 +111,16 @@ export function PrimaryButton({
  * （「删除」「确认删除」）表达，不只靠颜色。禁用态同样换实色：边框降到
  * `border`、文字降到 `text-muted`，两者在 surface/bg 上仍 ≥4.5（见
  * `tests/design/contrast.test.ts` 的禁用态断言）。
+ *
+ * `compact` 只用于表格行内（行高 36px 装不下 44px 按钮）：高 32px，仍高于
+ * WCAG 2.2 AA 2.5.8 的 24px 下限。独立控件一律保持 44px。
  */
 export function SecondaryButton({
   onClick,
   disabled,
   type = "button",
   danger = false,
+  compact = false,
   buttonRef,
   children,
 }: {
@@ -122,6 +128,7 @@ export function SecondaryButton({
   disabled?: boolean;
   type?: "button" | "submit";
   danger?: boolean;
+  compact?: boolean;
   buttonRef?: React.Ref<HTMLButtonElement>;
   children: ReactNode;
 }) {
@@ -131,9 +138,9 @@ export function SecondaryButton({
       type={type}
       onClick={onClick}
       disabled={disabled}
-      className={`min-h-[44px] rounded-sm border px-3 disabled:cursor-not-allowed disabled:border-border disabled:text-text-muted ${
-        danger ? "border-error text-error" : "border-border-strong"
-      }`}
+      className={`rounded-sm border transition-colors enabled:hover:bg-surface-hover enabled:active:bg-surface-active disabled:cursor-not-allowed disabled:border-border disabled:text-text-muted ${
+        compact ? "min-h-8 px-2.5" : "min-h-[44px] px-3"
+      } ${danger ? "border-error text-error" : "border-border-strong"}`}
     >
       {children}
     </button>
@@ -192,6 +199,28 @@ export function RowMark({ tone }: { tone: "success" | "warn" | "error" | "neutra
  */
 export function Mono({ children }: { children: ReactNode }) {
   return <span className="font-mono">{children}</span>;
+}
+
+/**
+ * 单行截断。被截掉的部分必须能找回：`title` 给指针用户悬停看全文；
+ * 文本节点本身完整留在 DOM 里，屏幕阅读器读的就是全文，所以不另加 aria-label。
+ */
+export function Truncate({ text, maxWidth, className = "" }: { text: string; maxWidth: string; className?: string }) {
+  return (
+    <span className={`inline-block truncate align-bottom ${className}`} style={{ maxWidth }} title={text}>
+      {text}
+    </span>
+  );
+}
+
+/**
+ * 骨架块 —— 首次加载时占住最终布局的位置，避免数据到达时整页跳动。
+ *
+ * 实色 `surface-accent`，没有扫光动画；只有一次延迟淡入（`zg-skeleton`，见 index.css），
+ * 本机请求通常几十毫秒就回来，延迟让它们根本不出现骨架。
+ */
+export function Skeleton({ className }: { className: string }) {
+  return <span aria-hidden="true" className={`zg-skeleton block rounded-xs bg-surface-accent ${className}`} />;
 }
 
 /**

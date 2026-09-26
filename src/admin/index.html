@@ -4,6 +4,8 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>zen-gateway</title>
+    <!-- 网关不伺服静态资源；空图标避免浏览器每次请求 /favicon.ico 得到 404。 -->
+    <link rel="icon" href="data:," />
     <!-- 首屏前解析配色，避免 React 挂载前先闪一帧浅色。键名与判定须与 lib/theme.ts 一致。 -->
     <script>
       (function () {

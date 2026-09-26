@@ -337,7 +337,7 @@ describe("schema 的 CHECK 是结构约束,不是约定", () => {
    * 两张表都 `CHECK(length=64 AND NOT GLOB '*[^0-9a-f]*')`，把「只存 sha256
    * 摘要」从注释变成结构约束。这里验它真的拦得住 —— 否则那句注释是假的。
    *
-   * 写入失败会被 `#safe` 吞掉，所以断言的是「库里没有这一行」加
+   * 写入失败会被 `WriteFailures.guard` 吞掉，所以断言的是「库里没有这一行」加
    * 「writeFailures 计了数」，而不是 expect(...).toThrow()。
    */
   it("原始文本进不去,且失败被计数", () => {

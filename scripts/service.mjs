@@ -1,43 +1,24 @@
 #!/usr/bin/env node
 /**
- * 单命令启停。
- *
- * 核心问题是**进程身份**:光凭 PID 文件里的数字不能证明那个进程是我们的服务。
- * PID 会被系统复用,于是「崩溃留下 PID 文件 → 系统把该 PID 分给别的进程 →
- * 用户 npm stop」这条路径会杀掉一个无关进程。所以任何发信号之前都必须先验明身份,
- * 两条独立途径:
- *
- *   1. /health 回报的 pid 与状态文件一致 —— 服务健康时的强证明
- *      (能应答我们端口的进程,就是占着这个端口的进程)
- *   2. /proc/<pid>/cmdline 含我们的入口路径 —— 服务卡死不应答时的兜底
- *
- * 两条都不成立就拒绝发信号,并说明原因。宁可让用户手工处理,
- * 也不能替他杀一个不知道是什么的进程。
- *
- * 并发启动用排他锁文件(O_EXCL)防住:两个 npm start 同时跑,
- * 没有锁的话会双双 spawn,一个抢到端口另一个 EADDRINUSE 退出,
- * 而后写者会把**已死**的 PID 留在状态文件里,活着的那个成为孤儿进程。
+ * 单命令启停。核心问题是进程身份：PID 会被系统复用，发信号之前必须先验明身份
+ * （判定见 `lib/instance.mjs`），认不准就拒绝，也不替用户杀不认识的进程。
+ * 并发启动用排他锁文件（O_EXCL）防住，否则两个 start 会双双 spawn，
+ * 状态文件里留下已死的 PID，活着的那个成为孤儿。
  */
 
 import { spawn } from "node:child_process";
 import { existsSync, openSync } from "node:fs";
-import { chmod, mkdir, open, readFile, readlink, rm, stat, writeFile } from "node:fs/promises";
+import { chmod, mkdir, open, readFile, rm, stat, writeFile } from "node:fs/promises";
 import { fileURLToPath } from "node:url";
-import { dirname, join, resolve } from "node:path";
+import { dirname, join } from "node:path";
 import { resolvePort } from "../src/store/port.ts";
-import { createInstance, dataDirOf } from "./lib/instance.mjs";
+import { DIR_MODE, FILE_MODE } from "../src/store/paths.ts";
+import { createInstance, dataDirOf, pidRunsScript } from "./lib/instance.mjs";
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
 
-/**
- * data/ 的位置可被 ZG_DATA_DIR 覆盖。
- *
- * 这不是纯为测试开的后门:误杀无关进程、restart 谎报成功、误删活实例的状态
- * 文件、并发双启动留下孤儿,这几类缺陷都需要常驻回归测试,就必须能把状态文件
- * 与端口一起隔离,否则测试之间、以及测试与用户真实实例之间会互相踩。
- */
+/** data/ 可被 ZG_DATA_DIR 覆盖，让回归测试能把状态文件与端口一起隔离。 */
 const DATA_DIR = dataDirOf(ROOT);
-const STATE_FILE = join(DATA_DIR, "zen-gateway.state.json");
 const LOCK_FILE = join(DATA_DIR, "zen-gateway.lock");
 const LOG_FILE = join(DATA_DIR, "zen-gateway.log");
 const ENTRY = join(ROOT, "dist", "server", "server", "index.js");
@@ -45,33 +26,13 @@ const ENTRY = join(ROOT, "dist", "server", "server", "index.js");
 const SCRIPT = fileURLToPath(import.meta.url);
 
 /**
- * 端口解析复用 `src/store/port.ts`,**不在本文件重写一份**。
+ * 端口从 `resolvePort()` 取，与服务端、`vite.config.ts` 共用一份解析（纪律 #4）。
  *
- * 不能在这里放一份「必须与 src/server/index.ts 完全一致」的手写副本 ——
- * "靠注释维持一致"的两份实现一旦脱节(服务端读配置的 port、本脚本仍只认
- * ZG_PORT),健康等待就会探错端口。本文件、服务端、`vite.config.ts` 三份并行
- * 手写的解析逻辑,脱节方向必然是"有一处被漏掉"。所以三处都从
- * `resolvePort()` 取值,加一处调用点不会再多一份需要同步的副本。
+ * 传 root 必须与 DATA_DIR 的算法对应，否则会读到另一份 config.json：
+ *   - `ZG_DATA_DIR` 已设 → 传 `undefined`（`paths.ts` 里显式 root 优先于环境变量）
+ *   - 未设 → 传 `ROOT`，不能依赖 cwd（脚本可能从任意目录执行）
  *
- * 引入成本实测 29ms(其中 17ms 是 Node 对 TS 的 strip-only 开销,与 zod 无关 ——
- * `resolvePort` 刻意只依赖 `paths.ts`,不碰 `config.ts`,因为那会拖进整个 schema,
- * 把一个常用 CLI 的启动时间翻倍)。
- *
- * **传 root 的方式必须与上面 DATA_DIR 的算法完全对应**,否则两者会指向不同的
- * config.json,于是本脚本探的端口与服务端监听的端口不一致 —— 正是上面那类
- * 脱节。对应关系:
- *   - `ZG_DATA_DIR` 已设 → 传 `undefined`,让 `paths.ts` 自己去认那个环境变量
- *     (它的约定是「显式 root 优先于 ZG_DATA_DIR」,传了 ROOT 反而会把它盖掉)
- *   - 未设 → 传 `ROOT`,与 `join(ROOT, "data")` 一致。**不能依赖 cwd**:
- *     用户可能从任意目录执行 `node /path/to/zen-gateway/scripts/service.mjs`,
- *     而 `paths.ts` 不传 root 时回落到 `cwd/data`。
- *
- * 非法 `ZG_PORT` 时 `resolvePort` 抛错,这里必须接住:在模块顶层任由它抛会打出
- * 一整段栈,而那段栈**带着安装的绝对路径**(命令分发泄漏路径是同一类问题)。
- *
- * 退出码是 **1**,已被 `service.test.ts` 钉住。
- * (一处已知不一致:未知命令退出 2「用法错误」,而非法 ZG_PORT 退出 1,
- * 两者其实同类。要统一的话该单独做,并同步那条既有断言。)
+ * 非法 `ZG_PORT` 时接住异常并退出 1，避免顶层栈泄漏安装路径。
  */
 let PORT;
 try {
@@ -80,37 +41,19 @@ try {
   console.error(err instanceof Error ? err.message : String(err));
   process.exit(1);
 }
-const BASE = `http://127.0.0.1:${PORT}`;
 
-/**
- * 身份判定从 `lib/instance.mjs` 取,**本文件不再自己写一份**。
- *
- * `doctor.mjs` 要回答同一个问题(端口上那个进程是不是我们的),而两份手写的
- * 判断必然分叉 —— 分叉的后果是 `doctor` 说「服务正常」而本脚本说「无法确认
- * 身份,未发送信号」,两句互相矛盾的话都出自本项目。端口解析的三处并行手写
- * 是同一种坑,所以在第二个消费者出现时就收口,而不是等它分叉之后。
- */
+/** 身份判定与 `doctor.mjs` 共用 `lib/instance.mjs`，避免两者结论矛盾。 */
 const instance = createInstance({ dataDir: DATA_DIR, port: PORT, entry: ENTRY });
 const { readState, pidAlive, probeHealth, inspect } = instance;
+const { stateFile: STATE_FILE, base: BASE } = instance;
 
 const HEALTH_TIMEOUT_MS = 20_000;
 const HEALTH_INTERVAL_MS = 250;
 const STOP_TIMEOUT_MS = 10_000;
 
-/** data/ 与其中的文件都可能含凭证,一律只对属主开放。 */
-const FILE_MODE = 0o600;
-const DIR_MODE = 0o700;
-
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
-/* ------------------------------------------------------------------ *
- * 基础设施
- * ------------------------------------------------------------------ */
-
-/**
- * mkdir 的 mode 只在**创建时**生效。已存在且权限松的 data/ 不会被纠正,
- * 于是日志与状态文件所在目录可能是 755,其他本地用户能列出并读取。
- */
+/** mkdir 的 mode 只在创建时生效，已存在且权限松的 data/ 要额外纠正。 */
 async function ensureDataDir() {
   await mkdir(DATA_DIR, { recursive: true, mode: DIR_MODE });
   try {
@@ -121,10 +64,6 @@ async function ensureDataDir() {
   }
 }
 
-/* ------------------------------------------------------------------ *
- * 锁
- * ------------------------------------------------------------------ */
-
 async function writeState(pid) {
   await writeFile(
     STATE_FILE,
@@ -134,51 +73,11 @@ async function writeState(pid) {
 }
 
 /**
- * 锁持有者的 cmdline 是否指向本脚本。
- *
- * 必须按路径解析后比较,不能直接字符串相等:`npm start` 执行的是
- * `node scripts/service.mjs`,cmdline 里是**相对路径**,而 `SCRIPT` 是绝对路径。
- * 直接比较会把一个真正并发的 start 判成「PID 被复用」并抢掉它的锁 ——
- * 恰好重新引入这把锁要防止的双 spawn。
- *
- * 相对路径要相对**持有者的 cwd**解析,所以先读 /proc/<pid>/cwd;
- * 读不到就退回本进程的 cwd(同一个 npm 脚本通常同 cwd)。
- */
-async function cmdlinePointsAtScript(pid) {
-  let cmdline;
-  try {
-    cmdline = await readFile(`/proc/${pid}/cmdline`, "utf8");
-  } catch {
-    return null; // 无法判断
-  }
-
-  let cwd = process.cwd();
-  try {
-    cwd = await readlink(`/proc/${pid}/cwd`);
-  } catch {
-    /* 退回本进程 cwd */
-  }
-
-  return cmdline
-    .split("\0")
-    .filter(Boolean)
-    .some((arg) => arg === SCRIPT || resolve(cwd, arg) === SCRIPT);
-}
-
-/**
- * 判断锁的持有者状态。
- *
- * 不能只看「锁文件有多旧」:若写成
- * `stale = 持有者已死 || 年龄 > 60s`,一把**活着的**锁只要超过 60s 就会被
- * 抢占 —— 慢磁盘或高负载下两次相隔 61s 的 start 会双双 spawn,正是这把锁
- * 要防止的事。mtime 也从不刷新,所以「年龄」根本不代表持有者是否还在工作。
- *
- * 改为按持有者身份判断,与停止服务时同一套思路:
- *   - 内容不可解析 → 崩溃在写入中途,可抢占
- *   - 进程已死 → 可抢占
- *   - 进程存活但 cmdline 不是本脚本 → PID 被复用,可抢占
- *   - 进程存活且确是本脚本 → 真的有并发 start,拒绝(不看年龄)
- *   - 无法判断(读不到 /proc) → 保守拒绝,并给出恢复提示
+ * 判断锁的持有者状态。按持有者身份而不是锁文件年龄判断 ——
+ * mtime 从不刷新，按年龄抢占会让慢启动时的两个 start 双双 spawn。
+ *   - 内容不可解析 / 进程已死 / cmdline 不是本脚本（PID 复用） → 可抢占
+ *   - 进程存活且确是本脚本 → 并发 start，拒绝
+ *   - 读不到 /proc → 保守拒绝，并给出恢复提示
  */
 async function lockHolder() {
   let raw;
@@ -193,7 +92,7 @@ async function lockHolder() {
   if (pid === process.pid) return { state: "live", pid }; // 自己的锁,不该抢
   if (!pidAlive(pid)) return { state: "dead", pid };
 
-  const isOurs = await cmdlinePointsAtScript(pid);
+  const isOurs = await pidRunsScript(pid, [SCRIPT]);
   if (isOurs === null) return { state: "unknown", pid };
   return isOurs ? { state: "live", pid } : { state: "reused", pid };
 }
@@ -208,11 +107,7 @@ async function acquireLock() {
       return { ok: true };
     } catch (err) {
       if (err?.code !== "EEXIST") {
-        /*
-         * 不是「已存在」而是别的错误,例如锁路径被建成了目录(EISDIR)。
-         * 不能直接 rethrow:那会抛出未捕获异常,堆栈里带安装路径,退出码 1
-         * 而不是有意义的失败。这里给一句明确的话。
-         */
+        // 非 EEXIST（如锁路径是目录）：给一句明确的话，不 rethrow 出带安装路径的栈。
         return { ok: false, reason: `无法创建锁文件(${err?.code ?? "未知错误"}):${LOCK_FILE}` };
       }
 
@@ -234,12 +129,8 @@ async function acquireLock() {
         await rm(LOCK_FILE, { force: true });
       } catch (err) {
         /*
-         * 锁路径存在但删不掉,最典型的是它是个**目录**:
-         * open 得到 EEXIST → readFile 得到 EISDIR(被当成「锁已消失」)
-         * → rm 抛 ERR_FS_EISDIR 且无人接住 → 未捕获异常 + 堆栈里带安装路径。
-         *
-         * 刻意不做递归删除:那个目录不是我们建的,recursive 删一个来历不明的
-         * 目录是不可逆的破坏性操作。报清楚,让用户自己处理。
+         * 锁路径删不掉，典型是它是个目录（readFile 得 EISDIR 被当成「锁已消失」）。
+         * 刻意不递归删除来历不明的目录，报清楚让用户处理。
          */
         return {
           ok: false,
@@ -255,32 +146,11 @@ async function acquireLock() {
 
 const releaseLock = () => rm(LOCK_FILE, { force: true });
 
-/* ------------------------------------------------------------------ *
- * 打开浏览器
- * ------------------------------------------------------------------ */
-
 /**
- * 在默认浏览器里打开管理后台。
- *
- * ## 为什么只在**显式要求**时才打开
- *
- * `npm start` 常在脚本、ssh 会话、CI 式的串联里被调用,而那些环境里
- * 弹一个浏览器是骚扰(ssh 下更会失败或挂住)。所以默认不开,
- * 由 `npm start -- --open` 与 `npm run open` 显式触发。
- *
- * ## 为什么不用 `open`/`opener` 这类包
- *
- * 一个调 `xdg-open` 的依赖不值得 —— 为几行代码能做完的事新增依赖只会扩大供应链面。
- *
- * ## 安全:命令与参数分开传,URL 绝不进 shell
- *
- * 用 `spawn(cmd, [url])` 且**不带 `shell: true`**。URL 里含
- * `gateway.port`(配置可控的数字)和固定路径,但即便如此也不做字符串拼接 ——
- * 一个 `; rm -rf` 形态的值在 shell 模式下会被执行,而这里根本不给它机会。
- * 这与 `clash/controller.ts` 拒绝纯点段是同一条思路:在边界上就不可能。
- *
- * 失败**不影响启动的退出码**:服务已经起来了,浏览器打不开只是不便。
- * 但要打一行 —— 静默失败会让用户以为命令没生效。
+ * 在默认浏览器里打开管理后台。只在显式 `--open` / `npm run open` 时调用 ——
+ * 脚本、ssh 环境里弹浏览器是骚扰。不引 `open` 之类的包，避免扩大供应链面。
+ * 命令与参数分开传、不带 `shell: true`，URL 绝不进 shell。
+ * 失败不影响退出码（服务已起来），但要打一行提示。
  */
 function openBrowser(url) {
   const command =
@@ -300,26 +170,10 @@ function openBrowser(url) {
 }
 
 /**
- * 管理后台的 URL。
- *
- * ## 这里必须指向 **dev server**,而不是网关端口
- *
- * 实测:网关**不**伺服 `dist/admin`(`GET /` 返回 404),只有 `/health`、
- * `/v1/*`、`/api/*` 三组路由。管理后台跑在
- * Vite dev server(`npm run dev`,固定 5173)上,由 vite 代理把
- * `/health` 与 `/api` 转回网关。
- *
- * 所以 `--open` 打开 5173 而不是网关端口 —— 指向后者会得到一个 404 页面,
- * 那比不打开更让人困惑。这条与 `vite.config.ts` 的 `strictPort: true`
- * 配套:端口固定,不会漂。
- *
- * 若让网关自己伺服静态产物,这里要跟着改成网关端口。
+ * 管理后台 URL 指向 Vite dev server（固定 5173，`strictPort: true`）而不是网关端口：
+ * 网关不伺服 `dist/admin`，`GET /` 是 404。若网关改为伺服静态产物，这里要跟着改。
  */
 const ADMIN_URL = "http://127.0.0.1:5173";
-
-/* ------------------------------------------------------------------ *
- * 命令
- * ------------------------------------------------------------------ */
 
 async function start() {
   await ensureDataDir();
@@ -345,11 +199,7 @@ async function start() {
       return 1;
     }
 
-    /*
-     * 本服务的实例存活但不健康。
-     * 此时绝不能再 spawn:新进程会因 EADDRINUSE 立刻死掉,
-     * 而清理逻辑会把**原实例**的状态文件一起删掉,把它变成孤儿。
-     */
+    // 本服务存活但不健康时绝不再 spawn：新进程会 EADDRINUSE 退出，清理逻辑会删掉原实例的状态文件。
     if (st.identity === "ours" && !st.healthy) {
       console.error(`本服务实例(pid ${st.state.pid})存活但健康检查未通过。`);
       console.error(`先 npm stop,或查看日志:${LOG_FILE}`);
@@ -363,14 +213,8 @@ async function start() {
     }
 
     /*
-     * 状态文件指向一个存活但**确认不是**本服务的进程(PID 已被系统复用)。
-     *
-     * 这里刻意继续启动,与 stop 的谨慎是**有意的不对称**:
-     * stop 要发 SIGTERM,是不可逆的破坏性操作,认不准身份就必须拒绝;
-     * start 只需要端口空闲,而那条陈旧记录对我们毫无价值 —— 拒绝启动
-     * 只会逼用户手工删文件,却挡不住任何危险。
-     *
-     * 端口若真被别人占着,上面的 foreignOnPort 分支已经拦下了。
+     * 状态文件指向确认不是本服务的进程（PID 已复用）：继续启动。与 stop 有意不对称 ——
+     * stop 发 SIGTERM 不可逆必须认准身份，start 只需端口空闲（foreignOnPort 已在上面拦下）。
      */
     if (st.alive && st.identity === "foreign") {
       console.log(`状态文件中的 pid ${st.state.pid} 已属于其他进程,忽略该陈旧记录。`);
@@ -448,10 +292,7 @@ async function stop() {
     return 0;
   }
 
-  /*
-   * 存活但两条身份途径都没给出肯定答案 —— 拒绝发信号。
-   * 这正是 PID 复用会踩的坑:状态文件里的数字可能已经属于别人的进程。
-   */
+  // 存活但两条身份途径都没给出肯定答案 —— 拒绝发信号（PID 可能已被复用）。
   if (st.identity !== "ours") {
     console.error(`无法确认 pid ${st.state.pid} 是本服务(端口无应答且 cmdline 不匹配),未发送信号。`);
     console.error(`请手工确认:ps -p ${st.state.pid} -o pid,cmd`);
@@ -501,11 +342,8 @@ async function status() {
 async function restart() {
   const code = await stop();
   /*
-   * stop 失败就不能继续。
-   *
-   * 不能丢弃 stop 的返回码:遇到一个不响应 SIGTERM 的进程时,
-   * stop 正确地失败了,而随后的 start 会看到「存活且健康」便打印
-   * 「已在运行」并返回 0 —— 用户以为部署了新版本,实际跑的还是旧进程。
+   * stop 失败就中止：否则 start 看到旧进程「存活且健康」会打印「已在运行」并返回 0，
+   * 用户以为新版本已生效。
    */
   if (code !== 0) {
     console.error("stop 未成功,已中止 restart(避免误以为新版本已生效)。");
@@ -514,13 +352,7 @@ async function restart() {
   return start();
 }
 
-/**
- * 只打开浏览器,不启动服务。
- *
- * 服务没在跑时**报错而不静默打开** —— 打开一个连不上后端的页面会让用户
- * 去排查前端,而真实原因是服务没起。这与 `models.ts` 那条「502 而非空列表」
- * 同一个理由:不要给出一个指向错误方向的症状。
- */
+/** 只打开浏览器。服务没在跑时报错而不静默打开，否则用户会去排查前端。 */
 async function open_() {
   const st = await inspect();
   if (!(st.identity === "ours" && st.healthy)) {
@@ -530,17 +362,9 @@ async function open_() {
   return openBrowser(ADMIN_URL) ? 0 : 1;
 }
 
-/* ------------------------------------------------------------------ *
- * 分发
- * ------------------------------------------------------------------ */
-
 /*
- * 用 Map 而不是对象字面量。
- *
- * 对象字面量会让 actions[cmd] 命中 Object.prototype 上的成员:
- * `service.mjs hasOwnProperty` 能越过「未知命令」的检查,
- * 调用继承来的方法后抛出未捕获 TypeError,堆栈里带着安装的绝对路径,
- * 且退出码是 1 而不是「用法错误」的 2。
+ * 用 Map 而不是对象字面量：`actions[cmd]` 会命中 Object.prototype 成员，
+ * `service.mjs hasOwnProperty` 就能越过「未知命令」检查并抛出带路径的栈。
  */
 const ACTIONS = new Map([
   ["start", start],
@@ -550,15 +374,7 @@ const ACTIONS = new Map([
   ["open", open_],
 ]);
 
-/**
- * `--open` 从参数里摘掉,剩下的第一个才是命令。
- *
- * 顺序不敏感:`start --open` 与 `--open start` 都成立 —— 用户不该记住旗标
- * 该放哪。`npm start -- --open` 传进来的正是后者之外的形态。
- *
- * **摘掉之后再取命令**,否则 `--open` 会被当成命令名而得到「未知命令」——
- * 那是最容易犯的那个错。
- */
+/** 先摘掉 `--open` 再取第一个位置参数作命令，`start --open` 与 `--open start` 都成立。 */
 const argv = process.argv.slice(2);
 const WANT_OPEN = argv.includes("--open");
 const positional = argv.filter((a) => !a.startsWith("--"));

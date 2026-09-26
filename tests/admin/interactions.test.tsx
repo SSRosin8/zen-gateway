@@ -137,7 +137,8 @@ describe("表格在窄屏内部横向滚动", () => {
       for (const table of tables) {
         const region = table.closest('[role="region"]');
         expect(region, `${name} 页有表格不在滚动区域内`).not.toBeNull();
-        expect(region!.className).toContain("overflow-x-auto");
+        // overflow-auto 覆盖横向（窄屏）与纵向（sticky 表头的滚动祖先）。
+        expect(region!.className).toMatch(/\boverflow-(x-)?auto\b/);
         expect(region).toHaveAccessibleName();
       }
       unmount();

@@ -6,12 +6,9 @@ import type { ProtocolSurface } from "../../core/protocols/types.ts";
 import { judgeFree } from "../../core/models/free.ts";
 import { ModelCatalog, catalogIdentityOf, slotOf } from "../../core/models/catalog.ts";
 import { createUsageCollector, describeUsage, type TokenUsage } from "../../core/models/usage.ts";
-import { redactText } from "../../shared/redact.ts";
+import { redactText, safeErrorMessage } from "../../shared/redact.ts";
 import { BodyTooLargeError, readBoundedBody } from "../boundedBody.ts";
-/*
- * 拒绝原因的联合类型从 `store/db/stats.ts` 取，不在这里另定义一份 ——
- * 两份并行的字符串联合脱节方向必然是漏一个（纪律 #4）。
- */
+// 拒绝原因联合类型取自 stats.ts，不另定义一份（纪律 #4）。
 import type { RejectionReason } from "../../store/db/stats.ts";
 import { buildUpstreamHeaders } from "../../core/upstream/headers.ts";
 import { upstreamUrl } from "../../core/upstream/url.ts";
@@ -20,83 +17,49 @@ import { runRetryChain, type AttemptTarget } from "../../core/upstream/retry.ts"
 import { pipeUpstreamResponse } from "../../core/upstream/pipe.ts";
 import { createOverlapScanner } from "../../core/upstream/tap.ts";
 import { describeNoWorker, sessionHashFrom } from "../../core/routing/select.ts";
-import { digestOf } from "../../core/routing/affinity.ts";
 import type { Scheduler } from "../../core/routing/scheduler.ts";
 import {
   containsStaleReasoning,
+  digestOf,
   extractBlobHashes,
   STALE_PATTERN_WINDOW,
 } from "../../core/routing/affinity.ts";
 import {
   errorBodyFromException,
   gatewayError,
-  logMessageFor,
   statusForGatewayError,
   typeForFailureKind,
 } from "../middleware/errorMap.ts";
 
 /**
- * 转发面路由。
+ * 转发面路由。处理顺序：
+ *   1. 读原始请求体字节（只读一次） 2. 解析副本用于判定 3. 免费判定
+ *   4. 流式能力校验 5. 选 Worker 6. 重试链（只看 status+headers） 7. 流式透传
  *
- * ## 处理顺序,以及为什么是这个顺序
- *
- *   1. 读**原始请求体字节**(只读一次)
- *   2. 解析一份**副本**用于判定(模型、是否流式)
- *   3. 免费判定 —— 不通过则在**请求出去之前**拒绝
- *   4. 流式能力校验(面声明 `streaming: "none"` 时拒绝流式请求)
- *   5. 选 Worker
- *   6. 重试链(只看 status+headers,body 不消费)
- *   7. 流式透传(唯一写字节的地方)
- *
- * 第 1 与第 2 步分开是「原样透传」的要求:转发出去的必须是客户端发来的原始
- * 字节。实测 `JSON.parse` → `stringify` 往返**不是无损的**
- * (`{"n":1.0}` → `{"n":1}`),而这个网关的存在意义就是让 OpenCode 像直连
- * 上游一样工作 —— 我们不该引入任何客户端察觉得到的差异。
- *
- * 第 3、4 步都必须在第 6 步之前:它们判定的都是**请求本身**的问题,
- * 在本机就能定论,不该花一次上游调用去换一个我们已经知道的答案。
- * 第 3 步尤其如此 —— 放行一个付费模型的代价是真金白银,一旦发出去无法收回。
+ * 1、2 分开：转发的必须是客户端原始字节，`JSON.parse`→`stringify` 不无损。
+ * 3、4 在 6 之前：请求本身的问题本机即可定论；放行付费模型的代价无法收回。
  */
 
 export type RelayDeps = {
-  /** 读当前配置。做成函数以便配置热更新后立即生效。 */
+  /** 读当前配置；做成函数以便热更新立即生效。 */
   readonly configOf: () => Config;
   readonly registry: ProtocolRegistry;
-  /** 上游依赖(dispatcher 池、锁、Controller)。 */
   readonly upstreamOf: (config: Config) => UpstreamDeps;
-  /**
-   * 调度器。**进程内唯一** —— 两个调度器意味着两份冷却状态,
-   * 于是「这个 Worker 在冷却」取决于请求碰巧走到哪一份。
-   */
+  /** 进程内唯一：两个调度器意味着两份冷却状态。 */
   readonly scheduler: Scheduler;
-  /**
-   * 在架目录缓存。与 `/v1/models` **共用同一个** —— 见 `app.ts`。
-   *
-   * 转发路径只读已缓存的那份,**绝不 await 一次目录拉取**:那会给每个转发
-   * 请求加上第二个网络依赖,而目录只是个放行判定的辅助。
-   */
+  /** 与 `/v1/models` 共用的在架目录；转发路径只读缓存，绝不 await 拉取。 */
   readonly catalog: ModelCatalog;
-  /** 注入以便测试。 */
   readonly newId?: () => string;
   /** 注入以便测试断言确切的冷却与 TTL 边界。 */
   readonly clock?: () => number;
   readonly log?: (message: string) => void;
-  /**
-   * 统计写入。不传则不记 —— 统计是诊断设施，
-   * 不传它的测试（大多数）测的是转发行为本身，不该为此各建一个库。
-   *
-   * 实现侧**不得抛异常**：写统计失败绝不能让一个本来会成功的转发失败。
-   * 见 `StatsStore` 的类注释。
-   */
+  /** 统计写入；不传则不记。实现不得抛异常，见 `StatsStore`。 */
   readonly stats?: StatsSink;
 };
 
 /**
- * 转发路径需要的统计写入面。
- *
- * 只声明这两个方法而不直接依赖 `StatsStore`：`src/core/` 与 `src/server/routes/`
- * 不该认识 SQLite（`store/` 才是持久化层），而窄接口也让测试能塞一个
- * 记录调用的假实现，断言「记了什么」而不是「库里有什么」。
+ * 转发路径需要的统计写入面。用窄接口而不依赖 `StatsStore`：
+ * routes 不该认识 SQLite，测试也能塞记录调用的假实现。
  */
 export type StatsSink = {
   recordAttempt(row: {
@@ -115,7 +78,7 @@ export type StatsSink = {
     workerId: string;
     at: number;
     usage: TokenUsage | null;
-    /** **我们自己**没解析完整（而不是上游没报）。见 `StatsStore.UsageRow`。 */
+    /** 我们自己没解析完整（而不是上游没报）。见 `StatsStore.UsageRow`。 */
     dropped?: boolean;
   }): void;
   /** 网关自己拒掉一次请求（从未到达上游）。 */
@@ -127,18 +90,13 @@ export type StatsSink = {
   }): void;
 };
 
-export type { RejectionReason };
-
 /** 客户端请求体上限。转发面对多模态保持宽松,但不能无界。 */
 const MAX_RELAY_BODY_BYTES = 64 * 1024 * 1024;
 export const MAX_RESPONSE_ID_BYTES = 128 * 1024;
 
 /**
- * 非流式体超出扫描预算时,只认顶层对象的**第一个成员**是 `"id"` 的形态。
- *
- * 截断的 JSON 无法整体解析,而这里不另写 JSON 解析器(纪律 #5):第一个成员
- * 必然在顶层,字符串字面量本身仍交给 `JSON.parse` 解码。Responses 的非流式体
- * 以 `id` 开头,所以大体积响应(长输出)也能续链;id 不在开头时放弃。
+ * 非流式体超出扫描预算时，只认顶层第一个成员是 `"id"` 的形态。
+ * 不另写 JSON 解析器（纪律 #5），字符串字面量仍交给 `JSON.parse` 解码。
  */
 const LEADING_ID = /^\s*\{\s*"id"\s*:\s*("(?:[^"\\\u0000-\u001f]|\\.)*")/;
 
@@ -176,11 +134,7 @@ export function createResponseIdCollector(parse: (payload: unknown) => string | 
           truncated = true;
         }
       }
-      /*
-       * 预算按**行**计:一条超长的 delta 行只丢它自己,同一块里其后的
-       * `response.completed` 行照常解析。超限时若整块丢弃,恰好会丢掉
-       * 跟在长行后面的那条带 id 的事件。
-       */
+      // 预算按行计：超长 delta 行只丢它自己，其后带 id 的 completed 行照常解析。
       let start = 0;
       for (;;) {
         const at = text.indexOf("\n", start);
@@ -217,11 +171,7 @@ export function createResponseIdCollector(parse: (payload: unknown) => string | 
 export function createRelayRoutes(deps: RelayDeps): Hono {
   const app = new Hono();
 
-  /*
-   * 路由从注册表动态挂载 —— 这正是「新增一个面不动路由装配」的兑现。
-   * 若这里出现 `app.post("/v1/chat/completions", ...)` 这样的字面量,
-   * 注册表就失去了意义。
-   */
+  // 路由从注册表动态挂载，不写路径字面量（纪律 #4）。
   for (const path of deps.registry.paths()) {
     app.post(path, async (c) => {
       const surface = deps.registry.byPath(path);
@@ -236,34 +186,19 @@ export function createRelayRoutes(deps: RelayDeps): Hono {
   return app;
 }
 
-type HonoContext = Context;
-
 async function handleRelay(
-  c: HonoContext,
+  c: Context,
   surface: ProtocolSurface,
   deps: RelayDeps,
 ): Promise<Response> {
   const config = deps.configOf();
 
-  /*
-   * 取当前时刻。**声明在函数开头**，因为第 1 步的拒绝记账就要用它 ——
-   * 三个动作各用它实际发生的那一刻，理由见下文 `planNow` 处的表。
-   */
+  // 每个动作各自取它实际发生的时刻，见下文 `planNow`。
   const nowOf = (): number => deps.clock?.() ?? Date.now();
 
   /*
-   * 网关拒绝的记账（需求里的第六项统计）。
-   *
-   * 六条在打上游**之前**就返回的路径若不记录 —— 「我有多少请求
-   * 被网关自己挡了」无法回答，而 `not_free` 与 `retired` 的处置完全不同
-   * （前者改模型名、后者删 `extraFreeIds` 条目），哪种发生得多也不可观测。
-   *
-   * 刻意**不写进 `upstream_attempts`**：那张表的语义是「上游尝试」，
-   * 把没发生的尝试写进去会让「这个 Worker 转发过什么」包含它没参与的请求。
-   *
-   * `model` 可能还没解析出来（体读失败/非法 JSON），传 null 由
-   * `normalizeRejectionModel` 收口 —— 它同时防住「客户端可控字符串进主键」
-   * 这个写放大原语（这张表没有免费闸门那道保护）。
+   * 网关拒绝记账。刻意不写进 `upstream_attempts`：那张表只记真实上游尝试。
+   * `model` 可为 null，由 `normalizeRejectionModel` 收口并限制客户端字符串进主键。
    */
   const reject = (reason: RejectionReason, model: string | null): void => {
     deps.stats?.recordRejection({ reason, protocol: surface.id, model, at: nowOf() });
@@ -272,20 +207,14 @@ async function handleRelay(
   /* ---- 1. 读原始字节(只读一次) ---- */
   let raw: Uint8Array;
   try {
-    /*
-     * **有界读取**，不是 `arrayBuffer()` 然后量长度。
-     *
-     * 后者下整个体已经进了内存，上限只限制转发而不限制占用 ——
-     * 64 MiB 的闸门下发 200 MiB，网关会照旧读入 200 MiB。
-     * 理由与实现见 `server/boundedBody.ts`。
-     */
+    // 有界读取：`arrayBuffer()` 后再量长度时整个体已进内存。见 `boundedBody.ts`。
     raw = await readBoundedBody(c.req.raw, MAX_RELAY_BODY_BYTES);
   } catch (err) {
     if (err instanceof BodyTooLargeError) {
       reject("body_too_large", null);
       return c.json(gatewayError("invalid_request", "请求体超过上限"), 413);
     }
-    deps.log?.(`读取请求体失败: ${logMessageFor(err)}`);
+    deps.log?.(`读取请求体失败: ${safeErrorMessage(err)}`);
     reject("body_unreadable", null);
     return c.json(gatewayError("invalid_request", "无法读取请求体"), 400);
   }
@@ -313,118 +242,46 @@ async function handleRelay(
       400,
     );
   }
+  // 客户端可控，进日志、错误消息与统计前统一脱敏截断。
+  const displayModel = redactText(model, 128);
 
   /* ---- 3. 免费判定(在请求出去之前) ---- */
 
   /*
-   * 目录交集 —— **只读缓存,绝不发请求**。
+   * 目录交集只读缓存，绝不发请求：目录由启动预热与 `/v1/models` 维护，
+   * 在转发路径上刷新会把每个请求变成两次上游调用，且拉取失败时不收敛。
    *
-   * ## 槽位必须与写入方同源推导,不能硬写字面量
-   *
-   * 不能硬写 `cached("keyed")`,理由看似是"转发候选链里每个 Worker 都有 key,
-   * 所以身份恒为带 key"。**那个推理是错的**,而且错在时序上:免费判定是
-   * **第 3 步**,选 Worker 是**第 5 步** —— 第 3 步执行时候选链还不存在,
-   * 所以"候选链里都有 key"在这一刻不是可用前提。
-   *
-   * 后果是纪律 #4 的原形态:读侧硬写 `keyed`,而写侧(下面 `retired` 那支)
-   * 用 `catalogIdentityOf(config)` **推导**。所有 Worker 都停用或都缺 key 时
-   * 推导出的是 `keyless` —— 于是刷新把新目录填进 keyless 槽,而读侧永远看
-   * keyed 槽,「判出下架就刷一次」这个自纠正机制**结构上失效**。
-   * 用户按 403 的指引去刷 `/v1/models`,看到模型确实在架,却仍然被拒。
-   *
-   * 所以两侧同源:身份与槽位都由 `catalogIdentityOf` 单点决定,分叉写不出来。
-   *
-   * ## 一个槽位的目录用于**所有** Worker,依据是免费子集一致
-   *
-   * 实测(三个付费账号,多次稳定):整份目录**按账号不同**
-   * (两个账号 41 个模型、一个 79 个),但**免费子集三个账号完全一致**
-   * (各 9 个,逐 id 相同)。交集要的恰好是那个一致的子集,所以这里不需要
-   * 知道最终路由到哪个 Worker。
-   *
-   * 不能写成"目录按带 key／免 key 区分,不按账号个体" —— 第三个账号就推翻了它,
-   * 推理详见 `catalog.ts` 文件头。这条注释只声称被测量支持的那个更弱的性质。
-   *
-   * 若免费子集哪天也按账号分化,两侧后果不对称:缓存里**多**一个 →
-   * 上游 400 `bad_request`,不重试不归咎,自限;缓存里**少**一个 →
-   * 误拒可用模型,所以下面 `retired` 那支会触发一次刷新。
-   *
-   * ## 为什么转发路径不在这里刷目录
-   *
-   * 我第一版在每个转发请求上调 `refreshIfStale`,想让"繁忙的网关自然保持
-   * 目录新鲜"。那是**错的耦合**,而集成测试立刻查出来了:一次客户端请求
-   * 变成两次上游请求(POST 转发 + GET 目录)。更糟的是它不收敛 ——
-   * 拉取失败不填缓存,于是下个请求发现仍然过期又发一次,稳态下永久 ×2,
-   * 而这个放大恰好发生在上游已经不稳的时候。
-   *
-   * 目录该由**它自己的**路径维护:启动预热 + `/v1/models` 被访问时。
-   * OpenCode 本来就会拉模型列表,所以那条路径有真实流量。
-   *
-   * 拿不到目录时退回"只看后缀与名单"(见 `judgeFree` 里"目录缺失时放行"
-   * 那节 —— 拒绝的代价是全面不可用,而放行的代价只是由上游拒绝,不产生费用)。
+   * 读槽与下面 `retired` 分支的写槽都由同一个 `catalogIdentity` 决定（纪律 #4）：
+   * 此时尚未选 Worker，硬写 keyed 会在全员缺 key 时让刷新写进另一个槽。
+   * 一个槽位的目录用于所有 Worker，依据是免费子集跨账号一致（见 `catalog.ts`）。
+   * 拿不到目录时退回只看后缀与名单，见 `judgeFree`。
    */
   const catalogIdentity = catalogIdentityOf(config);
   const verdict = judgeFree(model, config.models, deps.catalog.cached(slotOf(catalogIdentity)));
   if (!verdict.free) {
     /*
-     * 消息里带上模型 id。
-     *
-     * 这与「校验消息不回显用户数据」不冲突:模型 id 是客户端自己刚发来的、
-     * 且是公开目录里的标识,不是凭证也不是他人数据。而没有它这条错误就无法自查
-     * —— 用户看到「模型不允许」却不知道是哪个模型被拒。
-     *
-     * 两种拒绝分开措辞。`retired` 的含义是:模型的**免费依据
-     * 成立**(后缀或名单命中)但它**已不在上游在架目录**里。若放行这类请求,
-     * 上游会返回 400 `Model is unavailable.`,用户看到的是上游措辞,
-     * 完全指不到"这个 id 已经下架了,把它从 extraFreeIds 里删掉"。
+     * 消息带上模型 id（客户端自己发的公开标识），否则无法自查。
+     * `retired`：免费依据成立但已不在在架目录，单独措辞以指向 extraFreeIds。
      */
     if (verdict.reason === "retired") {
       /*
-       * **唯一**在转发路径上刷目录的地方,而且只在过期时刷一次。
-       *
-       * 理由很窄:一份过期目录唯一能造成的实际伤害就是这一个 ——
-       * 上游**新上架**了这个模型而我们手里的旧目录里没有,于是拒掉一个
-       * 本可用的请求。其余情形下旧目录只是"可能多放行一个已下架的",
-       * 而那由上游拒绝,代价可见且不花钱。
-       *
-       * 不怕被刷:刷成功后目录就是新鲜的,同一个模型的后续请求不会再触发
-       * (`isFresh` 为真);刷失败则有失败退避压着。两条都在 catalog.ts 里。
-       *
-       * **复用上面那个 `catalogIdentity`**,而不是再调一次 `catalogIdentityOf`。
-       * 再调一次在今天是等价的(配置在一次请求内不变),但那等于让"读哪个槽"
-       * 与"写哪个槽"各自独立求值一次 —— 而这两者必须是同一个值,
-       * 否则就回到了刚修掉的那个分叉。用同一个变量让它们**不可能**不同。
+       * 转发路径上唯一刷目录的地方，只在过期时刷：旧目录唯一的实际伤害是
+       * 误拒新上架的模型。刷新成功后即新鲜，失败有退避（见 catalog.ts）。
        */
       deps.catalog.refreshIfStale(catalogIdentity, config, deps.upstreamOf);
     }
-    const displayModel = redactText(model, 128);
     const message =
       verdict.reason === "retired"
         ? `模型 ${displayModel} 已不在上游在架目录中(它符合免费约定,但上游已下架)。可刷新 /v1/models 确认,并从配置的 models.extraFreeIds 中移除`
         : `模型 ${displayModel} 不在免费集内。本网关只放行免费模型;可在配置的 models.extraFreeIds 中调整`;
-    /*
-     * `not_free` 与 `retired` **分开计数**：处置完全不同 ——
-     * 前者是用户配错了模型名，后者要去 `extraFreeIds` 里删一个已下架的 id。
-     * 哪种发生得多，是决定"该改文档还是该改配置"的那个数字。
-     */
+    // `not_free` 与 `retired` 分开计数：前者改模型名，后者删 extraFreeIds 条目。
     reject(verdict.reason === "retired" ? "retired" : "not_free", model);
     return c.json(gatewayError("model_not_allowed", message), 403);
   }
 
   /*
-   * 放行了,但**有没有经过在架核验**要如实报出来。
-   *
-   * `judgeFree` 刻意为此造了 `suffix_unverified`/`extra_unverified` 两个 reason,
-   * 文件头也写明理由是"让诊断能看出这次没做交集" —— 没有读者的话,它就是
-   * 声明了、被文档说明、却没有一处读它的字段,藏在一个看起来被用到的联合类型分支里。
-   * 这里就是它的读者。
-   *
-   * 用诊断头而不是日志:一个离线环境里**每个请求**都会是 unverified,
-   * 打日志等于每条请求刷一行。而头是按需查看的,与 `x-zen-gateway-route`
-   * 同一个风格,`docs/usage.md` 的诊断头表格里也有位置放它。
-   *
-   * 没有它时,用户遇到上游 400 `Model is unavailable` 无法区分两件事:
-   * 「目录说它在架,但上游拒了」与「我们压根没拿到目录」—— 而后者要去查
-   * 出口/网络,前者要去查上游。
+   * 放行但未经在架核验时用诊断头报出（离线时每个请求都会是，日志会刷屏）。
+   * 用于区分「目录说在架但上游拒了」与「压根没拿到目录」。
    */
   const freeHeaders =
     verdict.reason === "suffix_unverified" || verdict.reason === "extra_unverified"
@@ -435,17 +292,8 @@ async function handleRelay(
   const streaming = surface.wantsStream(parsed);
 
   /*
-   * 面声明的流式能力必须真的被执行,否则 `streaming` 只是一个注释。
-   *
-   * `ProtocolSurface.streaming` 被声明、被文档说明「`"none"`
-   * 为 jev 这类非流式面预留」;没有这条校验,它就是一个**声明了却不设防
-   * 的能力位**:新增一个 `streaming: "none"` 的面后,客户端发
-   * `stream: true` 会被照常加上 `Accept: text/event-stream` 并走流式泵,
-   * 而上游那个面根本不产生 SSE —— 症状是挂住或拿到一段解析不了的响应。
-   *
-   * 只拦不含歧义的那个方向:`"none"` 面收到流式请求 → 400。
-   * `"sse"` 面收到非流式请求**不拦** —— Anthropic Messages 这类面两者都支持,
-   * 把「只声明了 sse」当成「必须流式」会拦掉合法请求。
+   * 执行面声明的流式能力：`"none"` 面收到流式请求 → 400，否则会挂住或拿到无法解析的响应。
+   * `"sse"` 面收到非流式请求不拦：Messages 这类面两者都支持。
    */
   if (surface.streaming === "none" && streaming) {
     reject("stream_unsupported", model);
@@ -461,47 +309,18 @@ async function handleRelay(
   const clientHeaders = c.req.header();
 
   /*
-   * 时钟取值点:**每个需要时刻的动作各自取一次**,不共用一个。
-   *
-   * 不能只取一次 `now` 并让整条链共用:
-   * 一次尝试可以耗 60-300 秒(headers/body 超时),于是冷却从**请求开始**
-   * 时刻起算,算出来的到期时刻早已成为过去。
-   *
-   * ```
-   * 请求耗时 2515ms (headersTimeout=2000, 名义冷却=1000ms)
-   * 失败后立刻查: ready=true 剩余冷却=0ms lastFailure=timeout
-   * ```
-   *
-   * 更糟的是算术推论:`bodyTimeoutMs` 默认 300000 > `transportMaxMs` 上限
-   * 120000,所以 **body 空闲超时的 Worker 永远不会进入冷却**,失败多少次都不会。
-   * 而 `timeout` 恰好是「上游卡住」这种最需要把 Worker 踢出候选的故障。
-   *
-   * 三个动作各有正确的时刻,它们本来就该分开。规则很简单:
-   * **每个动作用它实际发生的那一刻**。
-   *
-   * | 动作 | 时刻 | 为什么 |
-   * |---|---|---|
-   * | 选 Worker + 落会话绑定 | `planNow` | 同一次请求内的判定要一致 |
-   * | 冷却记账 | 每次尝试**失败时** | 冷却是「从现在起别再打它」 |
-   * | 改绑实际承接者 | 链**结束时** | 那一刻才知道是谁承接的 |
-   * | 指纹学习 | 流**结束时** | TTL 滑动、度量闲置,而签发到流结束才完成 |
-   *
-   * 我原先写在 `scheduler.ts` 的注释说「亲和绑定与冷却必须看同一个 now」——
-   * 那句只对第一行成立,被我错误地推广到了整条链。
+   * 时钟不共用：一次尝试可耗时数分钟，冷却若从请求开始起算，到期时刻早已过去
+   * （body 空闲超时的 Worker 将永不进入冷却）。每个动作用它实际发生的时刻：
+   * 选 Worker 与落绑定用 `planNow`；冷却在每次尝试失败时；改绑在链结束时；
+   * 指纹学习在流结束时。
    */
   const planNow = nowOf();
 
   /* ---- 5. 选 Worker(调度状态机) ---- */
 
   /*
-   * 亲和的两条依据。
-   *
-   * `sessionHashFrom` 优先用体内的会话指针(Responses 面的
-   * `previous_response_id`),没有才用 `x-opencode-session` 头。
-   *
-   * 注意这里读的是**客户端发来的**头:`headers.ts` 在客户端没发时会合成一个,
-   * 但那个每请求都不同,对亲和没有帮助 —— 那种情况下粘滞自然失效,
-   * 而这是正确的(我们确实无法判断这是不是同一条会话)。
+   * 亲和依据：体内会话指针优先，其次是客户端发来的 `x-opencode-session`。
+   * 只读客户端原始头：`headers.ts` 合成的值每请求不同，对亲和无用。
    */
   const sessionHash = sessionHashFrom({
     bodyKey: surface.sessionKeyFrom(parsed),
@@ -512,11 +331,7 @@ async function handleRelay(
   const plan = deps.scheduler.plan({ config, now: planNow, sessionHash, blobHashes });
   const targets: readonly AttemptTarget[] = plan.targets;
   if (targets.length === 0) {
-    /*
-     * 这条是六种拒绝里**最需要计数**的：它意味着全池冷却或全员不可用，
-     * 而那正是 `x-zen-gateway-route` 想诊断的东西 —— 但头只有发起请求的
-     * 那个客户端看得到，事后完全查不到。
-     */
+    // 全池冷却或全员不可用；route 头只有发起方看得到，计数才能事后查。
     reject("no_worker", model);
     return c.json(
       gatewayError("no_worker_available", describeNoWorker(config)),
@@ -526,15 +341,7 @@ async function handleRelay(
 
   /* ---- 6. 重试链 ---- */
 
-  /*
-   * 一条客户端请求一个 `requestId`,它的每次上游尝试共用它。
-   *
-   * 这正是统计里最容易搞错的那条语义:**请求数 ≠ 尝试数**。
-   * 一条 `w1 限流 → w2 成功` 的链是一个请求、两次尝试,而两个数字
-   * 都要能查到(`requestCounts()` 用 `DISTINCT request_id` 数前者)。
-   *
-   * 复用 `deps.newId`(测试注入的那个),不另起一个随机源。
-   */
+  // 一条客户端请求一个 requestId，其所有尝试共用：请求数 ≠ 尝试数。
   const requestId = (deps.newId ?? randomUUID)();
   let attemptIndex = 0;
 
@@ -553,38 +360,15 @@ async function handleRelay(
         config.models.enforceCatalog &&
         verdict.reason !== "suffix_unverified" &&
         verdict.reason !== "extra_unverified",
-      /*
-       * 冷却记账。逐次回调,而不是等链结束一次性记 ——
-       * 链中每一次尝试都是一个独立的事实:`w1 限流 → w2 传输失败 → w3 成功`
-       * 这条链里三个 Worker 的处置完全不同,只记最后一个会让前两个的故障
-       * 消失,于是下一条请求又把它们重试一遍。
-       *
-       * `nowOf()` 在回调里**现取**,不用 `planNow`:这个回调在该次尝试
-       * 结束时同步触发,所以此刻就是失败发生的时刻。见上面 `nowOf` 的说明。
-       */
-      /*
-       * 把注入的时钟传下去 —— 否则 `AttemptRecord.latencyMs` 恒用 `Date.now()`,
-       * 于是它**结构上不可被测试固定**:把 `latencyMs` 写死 0
-       * 之后集成测试仍会全绿,因为没有任何断言能预期一个真实 IO 的耗时。
-       *
-       * 传下去之后注入常量时钟会让耗时恒为 0（那是**正确**的:两次读同一个
-       * 时钟），所以要钉住"耗时真的被测量"需要一个**递进**的时钟，
-       * 见 `statsRecording.test.ts` 的对应用例。
-       */
+      // 传下注入的时钟，否则 `latencyMs` 恒用 `Date.now()`，测试无法固定。
       ...(deps.clock !== undefined ? { clock: deps.clock } : {}),
+      // 逐次记账：链中每次尝试都是独立事实；`nowOf()` 现取即失败时刻。
       onAttempt: (record) => {
         const at = nowOf();
         deps.scheduler.record(record, config, at);
         /*
-         * 统计与调度**分开记**,顺序上调度在前。
-         *
-         * 调度记账影响正确性(冷却),统计只是诊断 —— 与 `onDone` 里
-         * 「不变量相关的动作排在诊断动作之前」同一条规则。`StatsSink` 的
-         * 实现已保证不抛,但顺序仍按这条规则摆:它不依赖实现的承诺。
-         *
-         * `attemptIndex` 从 0 起,与 `result.attempts` 的下标一致 ——
-         * 用一个自增闭包而不是读 `attempts.length`:那个数组在 retry.ts 里,
-         * 这里拿不到,而两处各数一遍正是纪律 #4 的形态。
+         * 调度记账（影响冷却）排在统计（诊断）之前，不依赖 sink 不抛的承诺。
+         * `attemptIndex` 用自增闭包，与 `result.attempts` 下标一致。
          */
         deps.stats?.recordAttempt({
           requestId,
@@ -592,7 +376,7 @@ async function handleRelay(
           workerId: record.workerId,
           protocol: surface.id,
           // model 是客户端可控字符串 —— 进库也要限长,理由同进日志。
-          model: redactText(model, 128),
+          model: displayModel,
           status: record.status,
           failureKind: record.failure,
           latencyMs: record.latencyMs,
@@ -609,41 +393,21 @@ async function handleRelay(
         }),
     });
   } catch (err) {
-    /*
-     * 客户端已断开:重试链因取消而抛出,不是网关故障。不记"转发失败"、不造 500 ——
-     * 那会把每次用户按停止都记成一次错误。已发生的尝试已经在 `onAttempt` 里记过账。
-     */
+    // 客户端已断开：不是网关故障，不记转发失败、不造 500；已发生的尝试已记账。
     if (c.req.raw.signal.aborted) {
       return new Response(null, { status: 499 });
     }
     // buildHeaders 抛的 HeaderValidationError 会走到这里 —— 那是 400。
     const mapped = errorBodyFromException(err);
-    deps.log?.(`转发失败: ${logMessageFor(err)}`);
+    deps.log?.(`转发失败: ${safeErrorMessage(err)}`);
     return c.json(mapped.body, mapped.status as 400 | 500);
   }
 
   /* ---- 7. 透传 ---- */
 
   /*
-   * 透传包一层兜底。
-   *
-   * `pipeUpstreamResponse` 对畸形头与畸形 statusText 都已容错,理论上不抛;
-   * 但这里是**上游已经成功之后**的位置,一旦抛异常后果特别糟:客户端拿到裸 500
-   * (不是我们的 JSON 错误形状)、上游那次请求已真实计入额度、
-   * 而且 `deps.log` 完全不被调用 —— 异常绕过所有日志路径,故障现场什么都不留。
-   *
-   * ## body 的释放责任在 pipe,不在这里
-   *
-   * 这层兜底**不能**承诺"无论如何 body 都被处置":
-   * 加了 tap 之后那个承诺**结构上不可能成立** ——
-   * `tapReadable` 内部 `getReader()` 锁住了流,于是这里的
-   * `upstream.body?.cancel()` 会异步拒绝 `Invalid state: ReadableStream is
-   * locked`,并被 `.catch()` 静默吞掉。实测后果:连接泄漏到 `bodyTimeout`
-   * (5 分钟)、`onDone` 一次都不触发(不变量 #3 整条漏掉)。
-   *
-   * 所以 `pipe.ts` 在自己的失败路径上释放它锁住的流(见那里的
-   * `releaseOnFailure`)—— **谁锁的谁负责**。这里只保留日志与错误形状:
-   * 那两件事仍然只有这一层能做。
+   * 透传兜底：上游已成功，此处抛出会给客户端裸 500 且不留日志。
+   * body 由锁住它的 `pipe.ts` 在失败路径释放（`releaseOnFailure`），这里只负责日志与错误形状。
    */
   const pipeOrFail = (
     upstream: NonNullable<typeof result.response>,
@@ -652,27 +416,12 @@ async function handleRelay(
     workerId: string | null,
   ): Response => {
     /*
-     * 不变量 #3 的结算钩子。
-     *
-     * 扫描器**跨块**工作:要匹配的拒绝消息可能正好被切在两个 SSE 块之间,
-     * 逐块独立匹配会漏 —— 而漏掉的症状取决于上游的分块位置,时有时无。
-     *
-     * 这不违反不变量 #1:这里不做任何重试决定,回调只在流彻底结束之后
-     * 更新亲和映射,那时响应早已完整发给客户端。
+     * 不变量 #3 的结算钩子。扫描器跨块工作：拒绝消息可能被切在两个 SSE 块之间。
+     * 回调只在流结束后更新亲和，不做重试决定（不变量 #1）。
      */
     const scanner = createOverlapScanner(STALE_PATTERN_WINDOW, containsStaleReasoning);
     const responseIds = createResponseIdCollector(surface.responseIdFrom ?? (() => null));
-    /*
-     * 用量收集 —— `ProtocolSurface.parseUsage` 的**生产调用点**。
-     *
-     * `parseUsage` 若只有接口与实现而没有调用点,就是一个声明了却不设防的
-     * 能力位:三个面各写一份解析,而它们是否接对了没有任何东西会发现。
-     *
-     * 这里是它的唯一真实读者,于是"面接错了信封"会在集成测试里表现出来。
-     * 结果既写日志也经 `deps.stats` 入库(见 `onDone`)—— 这是**真的调用**,
-     * 不是占位:接错面、改坏字段归一化、把跨事件合并去掉,都会让数字变错并被
-     * 测试抓住。
-     */
+    // `ProtocolSurface.parseUsage` 的唯一生产调用点；结果写日志并入库。
     const usage = createUsageCollector((payload) => surface.parseUsage(payload));
     try {
       return pipeUpstreamResponse(upstream, extra, {
@@ -683,19 +432,8 @@ async function handleRelay(
         },
         onDone: (error) => {
           /*
-           * ## 结算**先于**日志,而这个顺序是承重的
-           *
-           * 整个 `onDone` 被 `tap.ts` 的 `try { tap.onDone(error) } catch {}`
-           * 包着(那个 catch 是对的:结算失败不该让一个已成功的响应炸掉)。
-           * 但它的副作用是:回调里**任何**一句抛出,后面的全部不执行,而且静默。
-           *
-           * 日志若排在结算前面,`deps.log` 一旦抛(磁盘满、自定义
-           * logger 出错、换成写 DB 的实现),不变量 #3 的结算
-           * **一次都不会执行** —— 客户端完全正常拿到全部字节,只是亲和学习
-           * 与解绑静默消失。症状是"对话隔一会儿报一次错"。
-           *
-           * 规则写成一句耐久的话:**`onDone` 里不变量相关的动作排在诊断动作
-           * 之前**。这比"别让 log 抛"耐久 —— 后者是对调用方的期望,前者是结构。
+           * 结算先于日志，顺序承重：`tap.ts` 吞掉 onDone 的异常，其后语句静默跳过。
+           * 规则：onDone 里不变量相关的动作排在诊断动作之前。
            */
           deps.scheduler.settleStream({
             workerId,
@@ -722,92 +460,40 @@ async function handleRelay(
           }
 
           /*
-           * 用量日志 —— 诊断动作,所以排在结算**之后**(见上面的顺序说明)。
-           *
-           * 只在拿到用量时打 —— 免费模型的响应**未必**带 usage,
-           * 而每个请求打一行"用量: 无"只会淹没日志。
-           *
-           * `model` 是**客户端可控的任意字符串**,所以必须过 `redactText`。
-           * 不过的话有两个后果,都静默:
-           *
-           * 1. **日志行注入**。model 里放一个 `\n` 就能伪造一条形态与真实记录
-           *    无法区分的用量行(实测:落盘变成 3 行,其中一行完全冒充合法记录)。
-           * 2. **无界放大**。2 MB 的 model → 2 MB 的单行日志,而
-           *    `data/zen-gateway.log` 是 append-only 且无轮转。
-           *
-           * `readModelField` 只保证"非空且无首尾空白",既不限长也不管控制字符 ——
-           * 它的职责是取字段,不是净化日志。走 `redactText` 而不是手写
-           * `slice` + 换行剥离:那两件事它已经同时解掉了,而按纪律 #4,
-           * "进日志前要怎么处理"这条知识必须只有一处定义。
-           *
-           * 128 字符对模型 id 足够宽(最长的在架 id 是 31 字符)。
+           * 用量日志：只在拿到用量时打。model 是客户端可控字符串，
+           * 必须过 `redactText` 防日志行注入与无界放大（纪律 #4：净化只有一处定义）。
            */
           const totals = usage.usage();
-          const label = `${surface.id}/${redactText(model, 128)}`;
+          const label = `${surface.id}/${displayModel}`;
           if (totals !== null) {
             deps.log?.(`用量 ${label}: ${describeUsage(totals)}`);
           }
-          /*
-           * **我们自己丢过内容**要如实报出来,而不是让它看起来像"上游没报用量"。
-           *
-           * 两者的处置完全不同:上游没报不用改代码,而我们丢了说明界定错了
-           * (例如 `MAX_LINE_LENGTH` 过小会把 Responses 面一条合法的 600 KB
-           * `response.completed` 整条弃掉,且结果取决于上游的分块位置)。
-           * 任何常量都可能被越过,所以**越过时可观测**比把常量调大更耐久。
-           */
+          // 我们自己丢了内容要如实报出，不能看起来像「上游没报用量」。
           if (usage.dropped()) {
             deps.log?.(`用量 ${label}: 响应过大,本次未能完整解析用量(不影响转发)`);
           }
 
           /*
-           * 用量入库。
-           *
-           * **`totals === null` 也要记** —— 那一行进 `requests_without_usage`。
-           * 少记它会让「usage 覆盖率」的分母漏掉这次请求,于是覆盖率虚高:
-           * 一个「上游从不报用量」的模型会显示成 100% 覆盖。需求里的
-           * 「缺失的 usage 如实显示为缺失,不估算」正是这个意思 ——
-           * 而"如实"的前提是分母得数上它。
-           *
-           * `workerId` 为 null 时不记:那是失败路径(见 pipeOrFail 的参数说明),
-           * 没有承接者,记进任何 Worker 名下都是错的。用量归属必须是**实际
-           * 承接者**,不是候选链首位。
+           * 用量入库：`totals === null` 也要记，否则覆盖率分母漏掉这次请求。
+           * `workerId` 为 null 是失败路径，没有承接者，不记。
            */
           if (workerId !== null) {
             deps.stats?.recordUsage({
               // 与日志同一份限长处理 —— 两处都不能让客户端字符串无界进去。
-              model: redactText(model, 128),
+              model: displayModel,
               workerId,
               at: nowOf(),
               usage: totals,
-              /*
-               * **我们自己丢了**要与「上游没报」分开记。
-               *
-               * `createUsageCollector.dropped()` 的文档写明这两者必须分开
-               * （否则"覆盖率会把我们自己丢的计成上游没报的"）；只看 `totals`
-               * 会把 `.dropped()` 的唯一读者留在一行日志上。
-               * 与「不记 without 会让覆盖率虚高」严格对称，而处置方向相反：
-               * 这一侧非 0 说明**我们的界定常量**要看（改代码），
-               * 那一侧是上游的性质（不用改）。
-               *
-               * 两个入口：一条 >1 MiB 的 `data:` 行被整条弃掉，
-               * 以及**上游中途断流**（更常见）。
-               */
+              // 我们自己丢了（界定常量或上游断流）与「上游没报」分开记。
               dropped: usage.dropped(),
             });
           }
         },
       });
     } catch (err) {
-      /*
-       * 兜底释放 —— 只对**未被 tap 包装**的 body 有效。
-       *
-       * 传了 tap 时流已被 `tapReadable` 锁住,这句会异步拒绝并被吞掉;
-       * 那种情况由 `pipe.ts` 自己释放(见上面的说明)。保留这句是为了覆盖
-       * 「pipe 在锁流**之前**就抛」的路径(例如将来某处在构造 Headers 时抛),
-       * 那时 body 还没被锁,而这里是唯一能释放它的地方。
-       */
+      // 兜底释放只对 pipe 锁流之前就抛的路径有效；已被 tap 锁住时由 pipe.ts 释放。
       void upstream.body?.cancel().catch(() => {});
-      deps.log?.(`响应透传失败(上游已成功): ${logMessageFor(err)}`);
+      deps.log?.(`响应透传失败(上游已成功): ${safeErrorMessage(err)}`);
       return c.json(
         gatewayError("internal_error", "网关无法转发上游响应,详见服务端日志"),
         500,
@@ -817,16 +503,8 @@ async function handleRelay(
 
   if (result.ok) {
     /*
-     * 会话改绑到**实际**承接的 Worker。
-     *
-     * `plan` 绑的是候选链首位,而重试链可能往后走:一条
-     * 「w1 拿到 429 → w2 成功」的链里签发推理块的是 w2。不改绑的话,
-     * 等 w1 冷却结束下一轮就回到它,而客户端回放的是 w2 签发的推理块 ——
-     * 上游必拒。症状是「对话隔一会儿报一次错」,且只在限流之后出现。
-     *
-     * 放在这里而不是流末尾的结算里:会话身份在链 settled 的这一刻就已确定,
-     * 而 `settleStream` 只在客户端**真的读完响应**时触发 —— 放那里的话
-     * 一次提前断开就会让绑定停在错误的 Worker 上。
+     * 会话改绑到实际承接者：重试链可能越过首位，推理块由后者签发。
+     * 在链 settled 时改绑而非流末尾：客户端提前断开时 settleStream 不触发。
      */
     deps.scheduler.rebind(sessionHash, result.workerId, nowOf());
 
@@ -837,14 +515,7 @@ async function handleRelay(
         "x-zen-gateway-worker": result.workerId,
         // 为什么是它 —— 粘滞/指纹提示/策略/全员冷却。排查"为什么换了 Worker"用。
         "x-zen-gateway-route": plan.reason,
-        /*
-         * 成功前试了几个 Worker。**成功路径也要给** ——
-         * 与 `route`、`free` 一样,诊断头不能只在一半路径可用:文档写着
-         * "前三个头在成功与失败时都有"。
-         *
-         * 成功前重试过 2 个 Worker 恰恰是**该被看见**的信号:多账号轮换下
-         * 它意味着前面那些进了冷却,而响应本身完全正常、日志也不会提。
-         */
+        // 诊断头在成功与失败路径都给；成功前的重试次数同样是该被看见的信号。
         "x-zen-gateway-attempts": String(result.attempts.length),
         ...freeHeaders,
       },
@@ -853,24 +524,9 @@ async function handleRelay(
   }
 
   /*
-   * 失败但**拿到了上游响应** —— 原样透传。
-   *
-   * 客户端应当看到上游真实的错误负载(429 的 retry-after 说明、
-   * 400 的字段级报错),而不是网关的转述。这也是唯一能让用户看到
-   * 上游真实拒绝原因(例如 FreeTierError)的路径。
-   *
-   * 这条路径**也要结算**:上游对"回放了别人的推理块"的拒绝正是一个 400,
-   * 而不结算会让下一轮回到同一个必败 Worker。状态码非 2xx,所以只会
-   * 解绑与遗忘,不会学习 —— 因此 workerId 传 null(见 `settleStream` 的说明)。
-   *
-   * ## 诊断头在失败时**更**需要
-   *
-   * `x-zen-gateway-route` 若只在成功路径设置,文档教用户的"全员冷却时看
-   * route 头"就不可能成立(全员冷却且上游失败时走的正是这条路径)。它是
-   * 主要的调度状态观察手段,不能在用户最需要它的时候缺席。
-   *
-   * `worker` 头也补上:失败时"是哪个账号失败的"是首要问题。取最后一次
-   * 尝试的 Worker —— 那是产出这个响应的那个。
+   * 失败但拿到了上游响应：原样透传真实错误负载。
+   * 这条路径也要结算（回放他人推理块的拒绝正是 400）；非 2xx 只解绑不学习，workerId 传 null。
+   * 诊断头在失败时更需要；worker 取最后一次尝试。
    */
   if (result.response !== null) {
     const lastWorkerId = result.attempts.at(-1)?.workerId;
@@ -880,14 +536,6 @@ async function handleRelay(
         "x-zen-gateway-attempts": String(result.attempts.length),
         "x-zen-gateway-route": plan.reason,
         ...(lastWorkerId !== undefined ? { "x-zen-gateway-worker": lastWorkerId } : {}),
-        /*
-         * `x-zen-gateway-free` 在失败路径上**比成功路径更需要**。
-         *
-         * 它要回答的问题恰好是一个失败:上游返回 400 `Model is unavailable` 时,
-         * 是"目录说它在架但上游拒了"还是"我们压根没拿到目录"?只在成功路径设置
-         * 它,等于在唯一需要它的时候缺席 —— 与上面 `x-zen-gateway-route`
-         * 是同一个道理。
-         */
         ...freeHeaders,
       },
       null,
@@ -895,12 +543,8 @@ async function handleRelay(
   }
 
   /*
-   * 连响应头都没拿到:网关自造错误。
-   *
-   * 出口配置失败要单独报 `egress_unavailable`(503),不能跟着 `bad_request`
-   * 走 400。「代理已停用」「Clash 没开」都是**本机配置**问题,客户端的请求
-   * 完全合法 —— 报 400「请求无效」会让用户去检查请求体,而真实原因在配置里。
-   * 更糟的是 OpenCode 这类客户端把 4xx 当作自己的错,不会重试。
+   * 连响应头都没拿到：网关自造错误。出口配置失败报 `egress_unavailable`（503），
+   * 不跟 400：那是本机配置问题，且客户端不会重试 4xx。
    */
   const type = result.egressSetup ? "egress_unavailable" : typeForFailureKind(result.kind);
   deps.log?.(`转发失败(${result.egressSetup ? "出口配置" : result.kind}): ${result.reason}`);

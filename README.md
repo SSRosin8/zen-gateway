@@ -98,3 +98,8 @@ npm run validate
 - [`docs/architecture.md`](docs/architecture.md)：模块边界和请求流程。
 - [`docs/upstream-quirks.md`](docs/upstream-quirks.md)：带日期和请求范围的上游观察。
 - [`AGENTS.md`](AGENTS.md)：开发约定与验证关卡。
+- [`CONTRIBUTING.md`](CONTRIBUTING.md)：贡献流程；安全问题按 [`SECURITY.md`](SECURITY.md) 私下报告。
+
+## 许可证
+
+[MIT](LICENSE)。

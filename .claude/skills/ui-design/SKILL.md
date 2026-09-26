@@ -1,178 +1,90 @@
 ---
 name: ui-design
-description: 修改管理后台页面、组件、样式、设计 token、颜色、表格、布局或无障碍行为时使用。涵盖已验证的对比度规则、实色禁用态、图标与文字共同表达状态、分页与视图状态、凭证展示边界，以及加载、离线、错误等状态的区分。适用于 src/admin 下的界面工作。
+description: 修改 zen-gateway 管理后台（src/admin 下的页面、组件、样式、设计 token、颜色、字号、表格、密度、布局、悬停反馈、加载骨架或无障碍行为）时使用。给出由测试强制的对比度与禁用态规则、字号阶梯、密度算术、组件选用、反馈位置和状态区分。
+paths:
+  - "src/admin/**"
 ---
 
-# zen-gateway 管理后台的设计约束
+# 管理后台设计约束
 
-一个本机单用户的诊断工具。观感取 Anthropic 的克制与透气，但**所有颜色值
-都是实测重算过的**，不是品牌原值。
+本机单用户诊断工具：克制、密度适中、状态说清楚。实测数字与外部依据见 [reference.md](reference.md)。
 
-## 改颜色之前：那两条规则由构建期断言强制
+## 硬规则（测试强制，改前先跑 `tests/design/contrast.test.ts`）
 
-`tests/design/contrast.test.ts` 在 `npm run validate` 里跑：
+- 每个前景 token × 每个表面 token ≥ 4.5:1，浅色深色都算；表面含 `surface-hover` / `surface-active`。新 token 必须归类进测试。
+- 层次只靠表面色调 + 1px 边框，不用 box-shadow。
+- 禁用态换实色（`disabled:bg-border-strong` 等），不用 `disabled:opacity-*`（源码扫描会拦）。
+- `accent-fill` 只做填充，唯一前景是 `on-accent-fill`；不做整行或大面积背景。
+- 状态用 `StatusIndicator`（图标 + 文字，空值会抛），行状态用 `RowMark` 左边框，不用背景色块。
+- 每个视图最多一个 `PrimaryButton`；行内编辑打开时，页头按钮退为描边。
+- 视图状态（页面、标签、搜索、筛选、页码）进 hash URL，筛选组件受控。
+- JSX 里不写 markdown，强调用 `Strong`。
 
-1. **任何前景 token × 任何表面 token ≥ 4.5:1**，浅色与深色两套都算。
-   Anthropic 官方品牌色里**有四个在米白底上不及格**（success 3.49 /
-   accent 2.96 / info 2.78 / mid-gray 2.11）—— 所以 `tokens.css` 里的值是替代值。
-2. **层次只靠「表面色调 + 1px 边框」，禁用 box-shadow**。因此边框必须真的
-   可见：原 `--zg-border` 在 `--zg-surface` 上只有 **1.077**，
-   所以另设 `--zg-border-strong`（1.345）。
+## 字号与字体
 
-改 token 时**跑一遍那个测试**，别凭眼睛。加新 token 也要加进那个笛卡尔积。
+- 阶梯（`tokens.css` 的 `@theme`）：`text-label-12/13/14` 单行、`text-copy-14` 多行说明（行高 1.7）、`text-heading-16` 面板标题、`text-heading-20`、`text-display-30` 指标与 wordmark。不写 `text-lg` / `text-3xl` 这类裸字号。
+- 字重只用 400 / 500 / 600。`p` 默认行高 1.7；表格、标签、按钮 20px 行高。
+- 中文字体栈：Inter → PingFang SC → Microsoft YaHei → 自托管 Noto Sans SC。衬线只用于纯拉丁（数字、wordmark）。
 
-### 三个已经踩过的陷阱
+## 颜色与主题
 
-- **`accent-fill` 只能做填充。** 它唯一合格的前景是 `on-accent-fill`（5.90），
-  其余压上去全部不及格（`text-muted` 2.22、`accent-fg` 1.92）。
-  所以它只能用在"只承载主文案的紧凑元素"上，**绝不能做整行背景** ——
-  行内的时间/延迟/备注会不可读。当前用于主按钮与进度条填充。
-- **行状态用 3px 左边框实色，不用背景色块。** 实测 warn 在必要的 25% alpha
-  下相对 `surface-accent` 只有 **1.41**（浅）/ 1.76（深）—— 肉眼与无状态行
-  几乎无差别，等于没画。实色左边框（`RowMark`）是 5.29 / 7.96。
-- **禁用态换实色，不降透明度。** `disabled:opacity-*` 会把底色与文字一起
-  淡化：实测主按钮文字对比度从 5.90 掉到 **2.51**，而禁用态恰好是这些按钮
-  最要紧的时刻（文案是「进行中…」「探测中…」，正是用户想读的那句）。
-  既有的对比度关卡**看不见这个** —— 禁用态是合成出来的颜色，参与运算的
-  两个 token 都没变。所以另有一节断言 + 一条"不准再用 opacity"的源码扫描。
+- 所有颜色来自 `tokens.css` 的 `--zg-*` 字面量十六进制；`@theme` 只用 `var(--zg-*)`。
+- 深色主题由 `<html data-theme>` 控制；`index.html` 首屏脚本与 `theme.ts` 的 `resolveTheme` 必须同步（`theme.test.tsx` 比对）。
+- 悬停 `surface-hover`，按下 `surface-active`，主按钮悬停 `accent-fill-hover`；过渡只动颜色，时长走 `--default-transition-duration`（120ms），减弱动效时全局归零。
 
-## 深色主题
+## 密度与布局
 
-默认跟随系统 `prefers-color-scheme`，页头的「配色」下拉框可选跟随系统 / 浅色 /
-深色，偏好存在 localStorage（`THEME_KEY`），生效在 `<html data-theme>`。
-逻辑在 `theme.ts`。
+- 表格行高 36px（`--spacing-row`，`ROW_HEIGHT`），正文 14px，`PAGE_SIZE = 16`；三者一起改。
+- 独立控件（按钮、输入框、筛选片、导航、标签）最小 44px；表格行内按钮用 `SecondaryButton compact`（32px，≥24px）。
+- 单元格内容单行（`whitespace-nowrap`）；需要第二个信息就加列或同行排。
+- 页面宽 `max-w-5xl`：1280 宽下所有表格无横向溢出，加宽没有收益。
 
-`index.html` 不写死 `data-theme`，而是用一段首屏前执行的内联脚本解析偏好，
-避免 React 挂载前先闪一帧浅色。那段脚本不能 import `theme.ts`，于是判定存了
-两份；`theme.test.tsx` 执行它并与 `resolveTheme` 在全部输入组合上比对。
-改键名或判定时两边一起改。
+## 组件索引
 
-## 颜色不能是唯一的信息通道
+- `Panel`：页面内的一块内容，标题 + 可选操作；`Metric`：面板顶部 2–4 个关键数字。
+- `PrimaryButton` / `SecondaryButton`（`danger`、`compact`）：唯一主操作 / 其余操作。
+- `FilterChip`：互斥筛选或时间范围（`aria-pressed`）。
+- `DataTable`：分页 + 行内展开；`SimpleTable`：不分页小表；`TableFilters`：搜索 + 状态筛选。
+- `TableSkeleton` / `Skeleton`：首次加载占位。
+- `Truncate`：任何需要截断的文字（自动带 `title`）。
+- `Mono`：id、IP、端口、指纹、模型名；`Strong`：句内强调。状态与反馈组件见下文。
 
-六个语义色里 `accent-fg` ↔ `error` 只差约 **14°** 色相，二色性下四个状态会
-塌缩到 ≤1.28 的可分辨度（三色性下 1.01，即完全不可分）。
+## 表格规则
 
-所以 `StatusIndicator` 在**类型与运行期都强制**图标 + 文字标签 ——
-空 label 会抛。那不是防御性代码，是这条约束的落点。保存结果、探测失败、
-断连横幅都通过它表达，不单独用红色文字。
+- 全部包在 `TableScroll` 里：横向在内部滚，纵向限高，表头 `sticky top-0` 实色底 + 下边框。
+- 表格用 `border-separate` + 单元格边框（collapse 下吸顶表头的边框不跟着走）。
+- 数字列 `numeric`（右对齐、等宽数字）；行悬停变 `surface-hover`，行不是点击目标；页码夹回范围；出口隔离视图不分页。
+- 空单元格写词（「未引用」「无响应」「本机直连」「未探测」）；「—」只用于指标或比值「还没有数据」。
 
-## 按钮与操作
+## 反馈选用
 
-- **每个视图最多一个主操作**（`PrimaryButton`，accent-fill 底）。其余操作一律
-  `SecondaryButton`（描边）：取消、编辑、翻页、每行的订阅刷新、向导里的跳转。
-  筛选与时间范围用 `FilterChip`（`aria-pressed`）。
-- **破坏性或改动全局状态的操作先确认**：`ConfirmDialog` 用原生 `<dialog>` 的
-  `showModal()`，焦点默认落在「取消」，破坏性确认按钮用 error 描边
-  （`SecondaryButton` 的 `danger`）。当前用于删除 Worker（key 无法从后台找回）
-  和开始批量探测（会切换 Clash 分组）。jsdom 没有 `showModal`，
-  `tests/admin/setup.ts` 里补了最小实现。
+- 不用 toast。表单结果用 `FormStatus`，紧贴触发它的按钮；行内编辑的失败留在编辑器里。
+- 页面级（与网关断连）用 `StaleBanner`；对话框内的错误留在对话框。
+- 自明的状态变化（切标签、展开、筛选）不提示成功；复制等无可见结果的操作才短暂改按钮文字。
+- 破坏性或改全局状态的操作先 `ConfirmDialog`，焦点落在「取消」。
 
-## 表单结果
+## 状态分开报
 
-保存结果用 `FormStatus`：成功与失败是不同色调 + 图标 + 文字；外层
-`aria-live="polite"` 常驻，错误额外 `role="alert"`。能在前端判断的规则
-（例如 `maxAttempts` 为 1-10 的整数）提交前校验并说明规则，不把明知会被拒的
-请求发出去。
+- 首次加载 `loading`（骨架 + 「检测中」）、`offline`（`npm start`）、`error`（响应异常）各自一种界面，不合并。
+- 「还不知道」不显示成成功（`poolHealth` 的 `empty`）；拿不到数据时不替 Worker 池下结论。
+- 首次成功后的失败保留页面与未保存表单，只加 `StaleBanner`。
+- 写完一串 early return，逐条确认被拦下的输入是否仍需要说明原因。
 
-打开行内编辑表单时把焦点移到第一个字段。
+## 交互与可访问性
 
-## 密度：44px 与 12 行是一套算术
+- 导航与标签是真实 `<a href="#...">`（导航 `aria-current`，标签 tablist / `aria-selected` / `aria-controls`）。
+- 截断必须可找回：用 `Truncate`，不要裸写 `truncate` 类（测试扫描）。
+- 骨架 `aria-hidden`，加载文字给读屏；打开行内表单时焦点移到第一个字段；焦点环 2px `accent-fg`。
 
-- 行高 **44px**（`--spacing-row`），同时满足触摸目标 ≥44px
-- 正文 **14px**（`--text-base`）
-- 直接后果是**一屏约 12 行**，所以 `PAGE_SIZE = 12`
+## 文案
 
-改页长时这三个数要一起算。
+写给用户能据此行动的事实，不写实现。时间用 `formatLocalTime`（完整 ISO 放 `title`），时长用 `humanMs`。
 
-**出口隔离视图刻意不分页** —— 那个任务本身就是「一眼看全、找出共用出口的
-节点」，分页会破坏它的意义。
+## 凭证展示
 
-## 表格
+- 已保存凭证只显示 `{present, fingerprint}`；订阅 URL 只显示 `redactUrl` 结果。
+- 新 key 在密码框输入，保存后清空；复制的客户端配置用 Relay Token 占位符。
 
-分页表用 `DataTable`，不分页的小表用 `SimpleTable`，两者共用表体：行高、
-`RowMark`、数字列右对齐一致。所有表格都包在 `TableScroll`
-（`overflow-x-auto`、带名称的可聚焦 region）里：390px 宽度下在面板内部横向
-滚动，不把整页撑宽。
+## 不引入的依赖
 
-行内编辑用 `DataTable` 的 `expandedRowKey` + `renderExpanded`：在该行正下方插入
-一行跨全部列的内容，编辑区紧贴被编辑的那一行；新增表单放在表格上方。
-
-## URL 承载导航和列表筛选状态
-
-页面、标签、搜索词、筛选、页码全部编码进 hash
-（`#proxy?tab=isolation&q=hk&page=2`）。所以筛选组件是**受控**的，
-自己不留状态 —— 留一份会与 URL 分叉，症状是「刷新后搜索词还在输入框里
-但列表没过滤」。
-
-主导航与代理池标签是真实的 `<a href="#...">`，中键与新标签页打开可用；
-导航用 `aria-current`，标签用 tablist/tab/`aria-selected`/`aria-controls`。
-
-用量页的时间范围、编辑器展开状态和未提交的表单留在页面内存中，刷新后重置。
-
-**用 hash 而不是 History API**：网关**不伺服静态产物**（实测 `GET /` 返回
-404），`pushState` 在 Vite 的 SPA fallback 下能工作而在别处不能 ——
-同一份前端在两种部署下行为不同，且差异只在用户刷新时暴露。
-
-**页码必须夹回范围内**。那是常态而不是边角：用户在第 3 页输入搜索词，
-结果只剩 5 行。不夹的话显示一个空表，而用户不知道是"没有匹配"还是"翻过头了"。
-
-## 写文案时
-
-**不要写 markdown。** JSX 不渲染它，`**强调**` 会带着字面星号显示给用户。
-这类问题通常集中在出口、上游通道和 CLI 验收等高风险警告上；最需要被看清的
-句子显示得最糟。用 `<Strong>` 组件。
-
-既有测试用 `/不要写/`、`/GLOBAL/` 这类正则，**正好落在星号之间**，
-所以对它完全不敏感。现在有一条按整页扫描的断言。
-
-**写给用户，不写实现。** 不出现 SQL、事件循环、「我们自己丢了」这类内部措辞；
-说用户能据此行动的事实（例如「网关未完整解析」「选全部时会慢一些」）。
-时间按本地时区显示（`formatLocalTime`），完整 ISO 放 `title`；时长用
-`humanMs`（到「天/小时」两级）。
-
-## 状态必须分开报
-
-`loading` / `offline`（网关没跑）/ `error`（响应不对）—— 它们的下一步完全
-不同（等、`npm start`、`npm run build`）。合成一句「加载失败」会让用户猜。
-
-同理：
-- **「还不知道」绝不显示成成功**。空池时 `ready === total` 得到 `0 === 0`
-  为真 —— 所以 `poolHealth` 有 `empty` 第三态。
-- **拿不到数据时不替 Worker 池说话**。首次加载在途或失败时，只显示服务状态；
-  显示「尚未配置 Worker」会让一个装好的系统看起来要重装。
-- **首次成功之后的失败不卸载页面**。`useOverview` / `useEndpoint` 保留上次数据
-  并给出 `stale`，App 顶部显示「与网关的连接中断，显示的是 N 秒前的数据」
-  （`StaleBanner`，`role="status"`），页面和未保存的表单都保留。
-- **early return 会挡住最常见的输入**。`proxyStatus` 先判 `!enabled` 就
-  return「已停用」，而 `resolveProxy` 对"已停用"返回的**正是**一个失败 ——
-  于是最常见的那条不可解析路径永远显示不出原因。写完一串
-  `if (...) return` 之后逐条问「被它拦下的那些输入，后面哪些分支本来也
-  该对它们说话？」
-
-## 首启向导
-
-没有可用 Worker（`pool.total === 0`）时出现，不可关闭，配好即消失。只在概览、
-Worker、网关页完整显示，其他页面显示一行 `WizardNotice` 链接到概览。
-Worker 在 Worker 页创建（向导按钮跳过去并打开新增表单），不需要编辑配置或
-重启；`npm run setup` 只导入出口代理与 Clash 内核，不创建 Worker。
-
-## 已保存凭证不回显
-
-前端**拿不到已保存的原值**：API 只给 `{present, fingerprint}`（sha256 前 8 位）。
-订阅 URL 只给 `redactUrl` 后的展示串。用指纹而不是长度 —— 等长的两个 key
-长度相同，于是「我改了没生效」在界面上不可见。
-
-用户在密码输入框中提供新 key 是写入流程的一部分，保存后清空表单。
-认证 Worker 必须有 key，所以不提供单独的「清空 key」；要去掉 key 就改为匿名
-Worker，表单会说明已保存的 key 将被删除。
-客户端配置复制的是带 Relay Token 占位符的片段，不能声称已复制完整可用凭证。
-
-## 不引入的东西
-
-- **不用表格库**：这里需要的是"过滤 + 排序 + 切片"三个数组操作，每张表 4-7 列、
-  几十行。引入它会让一个 30 行的需求变成一套列定义概念。
-- **不用对话框/弹出层组件库**：原生 `<dialog>` 已提供模态、焦点圈定与 Esc。
-- **不用 react-router**：当前路由由 hash 读写与变化订阅实现。
-- **不用 react-query/swr**：当前数据加载与批测轮询由 `api.ts` 实现，轮询间隔
-  从 `shared/batchProbe.ts` 推导；是否新增框架依据实际复杂度，不依据请求数量。
-- **不做 i18n**：只维护中文。
+不引入表格库、对话框或弹层库、react-router、react-query / swr、i18n、toast 库、动画库。

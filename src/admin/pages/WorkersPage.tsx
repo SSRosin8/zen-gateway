@@ -7,6 +7,7 @@ import {
   PrimaryButton,
   SecondaryButton,
   Strong,
+  Truncate,
   errorMessage,
   type FormMessage,
 } from "../components/Panel.tsx";
@@ -49,7 +50,13 @@ export function WorkersPage({
 }) {
   const [editor, setEditor] = useState<"new" | string | null>(createRequest > 0 ? "new" : null);
   const [saving, setSaving] = useState(false);
-  const [message, setMessage] = useState<FormMessage>(null);
+  /*
+   * 结果显示在触发它的操作旁边：编辑器里的保存失败显示在编辑器的保存按钮旁
+   * （表单还开着，用户要在那里改）；成功会收起编辑器，结果与删除结果一起显示在列表上方。
+   * `scope` 是编辑器的键（"new" 或 Worker id）或 "list"。
+   */
+  const [feedback, setFeedback] = useState<{ scope: string; message: FormMessage }>({ scope: "list", message: null });
+  const setMessage = (message: FormMessage, scope = "list") => setFeedback({ scope, message });
   const [pendingDelete, setPendingDelete] = useState<string | null>(null);
 
   useEffect(() => {
@@ -59,7 +66,7 @@ export function WorkersPage({
     }
   }, [createRequest]);
 
-  const save = async (patch: ConfigPatch, success: string) => {
+  const save = async (patch: ConfigPatch, success: string, scope: string) => {
     setSaving(true);
     setMessage(null);
     try {
@@ -68,7 +75,7 @@ export function WorkersPage({
       setMessage({ tone: "success", text: success });
       refresh?.();
     } catch (err) {
-      setMessage(errorMessage(err));
+      setMessage(errorMessage(err), scope);
     } finally {
       setSaving(false);
     }
@@ -115,17 +122,16 @@ export function WorkersPage({
     {
       key: "egress",
       header: "出口",
+      /* 出口 IP 与绑定的代理 id 同一行：行高 36px 只容得下单行。 */
       render: (w) => (
-        <span>
+        <span className="inline-flex items-baseline gap-2">
           {w.egressIp === null ? (
             <span className="text-text-muted">{w.proxyId === null ? "本机直连" : "未探测"}</span>
           ) : (
             <Mono>{w.egressIp}</Mono>
           )}
           {w.proxyId !== null && (
-            <span className="block truncate text-text-muted" style={{ maxWidth: "16rem" }}>
-              {w.proxyId}
-            </span>
+            <Truncate text={w.proxyId} maxWidth="12rem" className="text-label-13 text-text-muted" />
           )}
         </span>
       ),
@@ -165,6 +171,7 @@ export function WorkersPage({
       render: (w) => (
         <span className="flex gap-2">
           <SecondaryButton
+            compact
             onClick={() => {
               setMessage(null);
               setEditor(editor === w.id ? null : w.id);
@@ -172,7 +179,7 @@ export function WorkersPage({
           >
             {editor === w.id ? "收起" : "编辑"}
           </SecondaryButton>
-          <SecondaryButton danger disabled={saving} onClick={() => setPendingDelete(w.id)}>
+          <SecondaryButton compact danger disabled={saving} onClick={() => setPendingDelete(w.id)}>
             删除
           </SecondaryButton>
         </span>
@@ -185,14 +192,26 @@ export function WorkersPage({
       <Panel
         title={`Worker（${filtered.length}/${data.workers.length}）`}
         action={
-          <PrimaryButton
-            onClick={() => {
-              setMessage(null);
-              setEditor(editor === "new" ? null : "new");
-            }}
-          >
-            {editor === "new" ? "收起" : "新增 Worker"}
-          </PrimaryButton>
+          /* 编辑器打开时它的「保存」是本视图唯一的主操作，这里退为描边按钮。 */
+          editor === null ? (
+            <PrimaryButton
+              onClick={() => {
+                setMessage(null);
+                setEditor("new");
+              }}
+            >
+              新增 Worker
+            </PrimaryButton>
+          ) : (
+            <SecondaryButton
+              onClick={() => {
+                setMessage(null);
+                setEditor(editor === "new" ? null : "new");
+              }}
+            >
+              {editor === "new" ? "收起" : "新增 Worker"}
+            </SecondaryButton>
+          )
         }
       >
         {editor === "new" && (
@@ -202,12 +221,13 @@ export function WorkersPage({
               saving={saving}
               proxies={proxies}
               onCancel={() => setEditor(null)}
-              onSave={(patch) => save(patch, "已新增")}
+              message={feedback.scope === "new" ? feedback.message : null}
+              onSave={(patch) => save(patch, "已新增", "new")}
             />
           </div>
         )}
         <div className="mb-3">
-          <FormStatus message={message} />
+          <FormStatus message={feedback.scope === "list" ? feedback.message : null} />
         </div>
         <TableFilters
           q={view.q}
@@ -238,13 +258,14 @@ export function WorkersPage({
               saving={saving}
               proxies={proxies}
               onCancel={() => setEditor(null)}
-              onSave={(patch) => save(patch, "已保存")}
+              message={feedback.scope === w.id ? feedback.message : null}
+              onSave={(patch) => save(patch, "已保存", w.id)}
             />
           )}
           empty={
             data.workers.length === 0 ? (
               <>
-                <p className="font-serif text-lg">还没有配置 Worker</p>
+                <p className="text-heading-16 font-medium">还没有配置 Worker</p>
                 <p className="mt-1 text-text-muted">
                   点「新增 Worker」创建一个，保存后立即生效。匿名 Worker 不需要 key；
                   认证 Worker 填你自己的 Zen API key。绑定不同出口才有隔离意义。
@@ -266,7 +287,7 @@ export function WorkersPage({
         onConfirm={() => {
           const id = pendingDelete;
           setPendingDelete(null);
-          if (id !== null) void save({ workers: { delete: [id] } }, "已删除");
+          if (id !== null) void save({ workers: { delete: [id] } }, "已删除", "list");
         }}
       >
         <p>
@@ -371,6 +392,7 @@ function WorkerEditor({
   worker,
   saving,
   proxies,
+  message,
   onCancel,
   onSave,
 }: {
@@ -378,6 +400,8 @@ function WorkerEditor({
   worker?: WorkerView;
   saving: boolean;
   proxies: FetchState<ProxyList> | undefined;
+  /** 本编辑器的保存失败；成功时编辑器已收起，不会收到。 */
+  message: FormMessage;
   onCancel: () => void;
   onSave: (patch: ConfigPatch) => Promise<void>;
 }) {
@@ -514,11 +538,12 @@ function WorkerEditor({
           />
         </p>
       )}
-      <div className="flex gap-2 sm:col-span-2">
+      <div className="flex flex-wrap items-center gap-2 sm:col-span-2">
         <PrimaryButton type="submit" disabled={saving}>
           {saving ? "保存中…" : "保存"}
         </PrimaryButton>
         <SecondaryButton onClick={onCancel}>取消</SecondaryButton>
+        <FormStatus message={message} />
       </div>
     </form>
   );

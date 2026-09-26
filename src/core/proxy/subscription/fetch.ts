@@ -1,47 +1,16 @@
 /**
- * 订阅拉取 —— 多 UA 协商。
+ * 订阅拉取与多 UA 协商。机场按 `User-Agent` 分发不同格式(YAML、base64 列表、HTML/403),
+ * 固定一个 UA 会让部分订阅永久「解不出节点」,所以依次尝试取最好结果。
+ * 单次超时 15 秒、总预算 40 秒,拿到结构化格式且有节点即停;UA 按命中率排序。
  *
- * 解析在 `parse.ts`（纯函数）；这里只负责"把文本拿回来"，并处理一件
- * 只在真实网络上才存在的麻烦：**同一个 URL 会因 `User-Agent` 不同而返回
- * 不同格式**。机场普遍按 UA 分发：给 `clash` 返 YAML，给 `v2rayN` 返
- * base64 链接列表，给未知 UA 可能返一个 HTML 页面或直接 403。
- *
- * ## 为什么要"协商"而不是固定一个 UA
- *
- * 固定 `clash` 的话，只支持 v2ray 格式的订阅会永久失败，而错误信息是
- * "解不出节点" —— 用户无从知道换个 UA 就好了。所以依次尝试，取最好的结果。
- *
- * ## 顺序与提前退出：这是一个超时预算问题
- *
- * 朴素的做法是试 8 个 UA、每个超时 45 秒 —— **最坏情况 6 分钟**，而它是被
- * HTTP 请求同步等待的。本实现三处不同：
- *
- * 1. **单次超时 15 秒**，且有**总预算 40 秒**。超预算就停，返回已有的最好结果
- *    （而不是继续试完）。一个订阅拉不动时，用户要的是"快点告诉我失败了"。
- * 2. **命中即停**：拿到结构化格式（Clash/SIP008）且节点数 ≥1 就不再试 ——
- *    那已经是最好的形态，继续试只是浪费时间。
- * 3. **UA 列表按命中率排序**，`clash` 系在前。
- *
- * ## 安全
- *
- * - 订阅 URL 自带 token。所有错误消息里的 URL 必须过 `redactUrl`，
- *   且**绝不把响应体放进错误** —— 体里每一行都可能是凭证。
- * - 响应体有硬上限（8 MiB），边读边计数。只看 `content-length` 不够：
- *   那个头可以撒谎，也可以不给。
- * - **不跟随跨协议降级**：`https` → `http` 的重定向会让带 token 的 URL
- *   明文重发。`redirect: "follow"` 无法表达这个约束，所以手动跟随。
+ * 安全:错误里的 URL 过 `redactUrl`,绝不放响应体;响应体 8 MiB 硬上限边读边计数;
+ * 手动跟随重定向,拒绝 https → http 降级(订阅 URL 含 token)。
  */
 
 import { redactUrl, safeErrorMessage } from "../../../shared/redact.ts";
 import { parseSubscription, type ParseResult } from "./parse.ts";
 
-/**
- * 候选 UA，按实测命中率排序。
- *
- * 前三个覆盖绝大多数机场的 Clash 分发；`v2rayN` 拿 base64 列表；
- * 最后放本项目自己的 UA —— 它几乎不会命中特殊分发，但如果订阅方
- * 只认"未知客户端"（有些自建的会返回通用格式），它是最后的兜底。
- */
+/** 候选 UA,按命中率排序;最后是本项目自己的 UA 作兜底。 */
 export const SUBSCRIPTION_USER_AGENTS = [
   "clash",
   "ClashMeta/1.18.0",
@@ -50,24 +19,20 @@ export const SUBSCRIPTION_USER_AGENTS = [
   "zen-gateway/0.1",
 ] as const;
 
-/** 响应体上限。一个 79 节点的订阅约 60 KB，8 MiB 是四个数量级的余量。 */
+/** 响应体上限。 */
 export const MAX_SUBSCRIPTION_BYTES = 8 * 1024 * 1024;
 
 /** 单次请求超时。 */
 const PER_ATTEMPT_TIMEOUT_MS = 15_000;
 
-/** 整个协商过程的总预算 —— 见文件头。 */
+/** 整个协商过程的总预算。 */
 const TOTAL_BUDGET_MS = 40_000;
 
 /** 手动跟随重定向的上限。 */
 const MAX_REDIRECTS = 5;
 
 /**
- * 失败分类。
- *
- * 只存**分类**不存原文（`Subscription.lastErrorKind` 的 schema 就是这么定的）
- * —— 上游的错误正文可能回显 URL 里的 token。四类的下一步完全不同，
- * 这正是分类存在的理由。
+ * 失败分类。只存分类不存原文(上游错误正文可能回显 URL 里的 token)。
  */
 export type FetchFailureKind =
   /** 网络层失败（DNS、连接、TLS）。 */
@@ -84,7 +49,7 @@ export type FetchFailureKind =
 export type FetchOk = {
   readonly ok: true;
   readonly result: ParseResult;
-  /** 最终采用的是哪个 UA —— 写进日志，方便下次排查"为什么格式变了"。 */
+  /** 最终采用的 UA,写进日志便于排查格式变化。 */
   readonly userAgent: string;
   readonly bytes: number;
 };
@@ -92,7 +57,7 @@ export type FetchOk = {
 export type FetchErr = {
   readonly ok: false;
   readonly kind: FetchFailureKind;
-  /** 已脱敏的可读原因。**不含**响应体，URL 已过 redactUrl。 */
+  /** 已脱敏的可读原因,不含响应体。 */
   readonly reason: string;
 };
 
@@ -106,7 +71,7 @@ export type FetchDeps = {
   readonly userAgent?: string;
 };
 
-/** 读体，边读边计数 —— `content-length` 可以撒谎或缺席。 */
+/** 读体并边读边计数:`content-length` 可以撒谎或缺席。 */
 async function readBounded(res: Response): Promise<{ text: string; bytes: number }> {
   const declared = Number(res.headers.get("content-length"));
   if (Number.isFinite(declared) && declared > MAX_SUBSCRIPTION_BYTES) {
@@ -147,12 +112,7 @@ class SubscriptionTooLarge extends Error {
   }
 }
 
-/**
- * 一次请求（含手动跟随重定向）。
- *
- * 手动跟随是为了守住"不降级到 http"这一条：订阅 URL 自带 token，
- * 一次 https→http 的重定向会让它明文出现在网络上。
- */
+/** 一次请求,手动跟随重定向以拒绝降级到 http。 */
 async function attempt(
   url: string,
   userAgent: string,
@@ -179,7 +139,6 @@ async function attempt(
       }
       const next = new URL(location, current);
       if (new URL(current).protocol === "https:" && next.protocol !== "https:") {
-        // 订阅 URL 是凭证 —— 绝不跟着降级到明文。
         throw new Error("重定向要求从 https 降级到 http，已拒绝（订阅 URL 含 token）");
       }
       current = next.href;
@@ -212,11 +171,8 @@ function better(a: ParseResult, b: ParseResult | null): boolean {
 }
 
 /**
- * 拉取并解析一个订阅。
- *
- * **不抛错** —— 返回 `FetchOutcome`。订阅拉取失败是**预期内**的常态
- * （机场挂了、token 过期、网络不通），把它做成异常会让每个调用点都要
- * try/catch，而那种代码里最容易漏掉脱敏。
+ * 拉取并解析一个订阅。不抛错,返回 `FetchOutcome`:失败是常态,做成异常会让每个调用点
+ * 都要 try/catch,最容易漏掉脱敏。
  */
 export async function fetchSubscription(url: string, deps: FetchDeps = {}): Promise<FetchOutcome> {
   const fetchImpl = deps.fetchImpl ?? globalThis.fetch;
@@ -230,7 +186,7 @@ export async function fetchSubscription(url: string, deps: FetchDeps = {}): Prom
   let anyResponse = false;
 
   for (const userAgent of agents) {
-    // 总预算 —— 见文件头。超了就用手上已有的最好结果。
+    // 超出总预算就用手上已有的最好结果。
     if (now() - startedAt >= TOTAL_BUDGET_MS) {
       if (best === null) {
         lastKind = "timeout";
@@ -247,13 +203,12 @@ export async function fetchSubscription(url: string, deps: FetchDeps = {}): Prom
       const parsed = parseSubscription(text);
       if (better(parsed, best?.result ?? null)) best = { result: parsed, userAgent, bytes };
 
-      // 命中即停：结构化格式且有节点，已经是最好的形态。
       if (parsed.nodes.length > 0 && parsed.format !== "uri-list") break;
     } catch (err) {
       if (err instanceof SubscriptionTooLarge) {
         lastKind = "too_large";
         lastReason = `订阅响应超过 ${MAX_SUBSCRIPTION_BYTES} 字节上限`;
-        // 体积超限不是 UA 的问题，换 UA 也一样 —— 直接停。
+        // 换 UA 也一样,直接停。
         break;
       }
       if (err instanceof HttpError) {
@@ -265,7 +220,7 @@ export async function fetchSubscription(url: string, deps: FetchDeps = {}): Prom
         lastReason = `拉取 ${redactUrl(url)} 超时（${PER_ATTEMPT_TIMEOUT_MS}ms）`;
       } else {
         lastKind = "unreachable";
-        // safeErrorMessage 会跟 cause 链并逐层脱敏 —— undici 把真实原因藏在 cause 里。
+        // safeErrorMessage 跟 cause 链逐层脱敏:undici 把真实原因藏在 cause 里。
         lastReason = `拉取 ${redactUrl(url)} 失败：${safeErrorMessage(err)}`;
       }
     } finally {
@@ -277,12 +232,7 @@ export async function fetchSubscription(url: string, deps: FetchDeps = {}): Prom
     return { ok: true, result: best.result, userAgent: best.userAgent, bytes: best.bytes };
   }
 
-  /*
-   * 拉到了但解不出 —— 与"拉不到"必须分开报。
-   *
-   * 前者的下一步是"看看订阅是不是换格式了/token 过期返回了一个 HTML 页面"，
-   * 后者是"检查网络与 URL"。合成一句"订阅失败"会让用户从头猜。
-   */
+  // 拉到了但解不出与拉不到必须分开报:下一步排查方向不同。
   if (anyResponse && best !== null) {
     return {
       ok: false,

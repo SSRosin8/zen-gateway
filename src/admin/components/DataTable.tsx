@@ -1,13 +1,13 @@
 import { Fragment, type ReactNode } from "react";
-import { Mono, RowMark, SecondaryButton } from "./Panel.tsx";
+import { Mono, RowMark, SecondaryButton, Skeleton } from "./Panel.tsx";
 
 /**
  * 表格 —— 分页 + 搜索 + 状态筛选，以及不分页的 `SimpleTable`。
  *
  * ## 分页是必需项
  *
- * 密度选宽松（行高 44px、正文 14px），直接后果是**一屏约 12 行**，而代理池
- * 可能有几十个节点。所以默认页长与「一屏 12 行」的算术对齐。
+ * 紧凑密度（行高 36px、正文 14px）：1280×800 视口扣掉页头、导航、筛选与面板头后，
+ * 表格区约 600px，放得下 16 行 + 表头，所以 `PAGE_SIZE` 取 16。代理池可能有几十个节点。
  *
  * ## 为什么不用表格库
  *
@@ -23,8 +23,11 @@ import { Mono, RowMark, SecondaryButton } from "./Panel.tsx";
  * 而不是把整页撑宽（那会让导航和其他面板一起出现横向滚动条）。
  */
 
-/** 默认页长。与「一屏 12 行」的算术对齐 —— 见文件头。 */
-export const PAGE_SIZE = 12;
+/** 默认页长。与「行高 36px → 一屏约 16 行」的算术对齐 —— 见文件头。 */
+export const PAGE_SIZE = 16;
+
+/** 表格行高（px）。与 tokens.css 的 `--spacing-row` 一致。 */
+export const ROW_HEIGHT = 36;
 
 export type Column<T> = {
   readonly key: string;
@@ -36,10 +39,16 @@ export type Column<T> = {
 
 type Tone = "success" | "warn" | "error" | "neutral";
 
-/** 表格的横向滚动容器。`tabIndex` 让只用键盘的用户也能聚焦后用方向键滚动。 */
+/**
+ * 表格的滚动容器。`tabIndex` 让只用键盘的用户也能聚焦后用方向键滚动。
+ *
+ * 横向溢出让这个 div 成为滚动容器，表头的 `sticky top-0` 只能相对它生效，贴不到
+ * 视口上。所以纵向也限高（视口高减 8rem，至少 20rem）：16 行 × 36px + 表头 ≈ 612px，
+ * 800px 高的视口下不触发内部滚动；展开编辑表单或在矮屏上才滚，那时表头仍在。
+ */
 export function TableScroll({ label, children }: { label: string; children: ReactNode }) {
   return (
-    <div className="overflow-x-auto" role="region" aria-label={label} tabIndex={0}>
+    <div className="max-h-[max(20rem,calc(100vh-8rem))] overflow-auto" role="region" aria-label={label} tabIndex={0}>
       {children}
     </div>
   );
@@ -76,13 +85,17 @@ function TableBody<T>({
 }) {
   return (
     <TableScroll label={label}>
-      <table className="w-full min-w-max border-collapse text-left">
+      {/* border-separate + 单元格边框：border-collapse 下 sticky 表头的边框会留在原地
+          不随单元格移动，而 tr 的边框只在 collapse 模式下绘制。 */}
+      <table className="w-full min-w-max border-separate border-spacing-0 text-left">
+        {/* 表头吸顶：实色底 + 下边框，不用阴影。 */}
         <thead>
-          <tr className="border-b border-border-strong text-text-muted">
+          <tr className="text-label-13 text-text-muted">
             {columns.map((col, i) => (
               <th
                 key={col.key}
-                className={`py-2 pr-4 font-medium last:pr-0 ${i === 0 ? "pl-3" : ""}`}
+                scope="col"
+                className={`sticky top-0 z-10 border-b border-border-strong bg-surface py-2 pr-4 font-medium last:pr-3 ${i === 0 ? "pl-3" : ""}`}
                 {...numericAttr(col.numeric)}
               >
                 {col.header}
@@ -98,15 +111,16 @@ function TableBody<T>({
             return (
               <Fragment key={key}>
                 <tr
-                  className="relative border-b border-border last:border-0"
-                  /* 行高 44px：宽松密度，同时满足触摸目标 ≥44px。 */
-                  style={{ height: "44px" }}
+                  className="relative transition-colors *:border-b *:border-border last:*:border-b-0 hover:bg-surface-hover"
+                  /* 行高 36px：紧凑密度。行本身不是点击目标，行内按钮自带 ≥24px 的目标。 */
+                  style={{ height: `${ROW_HEIGHT}px` }}
                   {...{ [rowAttr]: key }}
                 >
                   {columns.map((col, i) => (
                     <td
                       key={col.key}
-                      className={`pr-4 last:pr-0 ${i === 0 ? "pl-3" : ""}`}
+                      /* 不加纵向内边距：行高由 tr 的 36px 决定，单元格内容必须单行（≤32px 的行内按钮）。 */
+                      className={`whitespace-nowrap pr-4 last:pr-3 ${i === 0 ? "pl-3" : ""}`}
                       {...numericAttr(col.numeric)}
                     >
                       {i === 0 && tone !== null && <RowMark tone={tone} />}
@@ -115,8 +129,8 @@ function TableBody<T>({
                   ))}
                 </tr>
                 {expanded && (
-                  <tr className="border-b border-border-strong" data-expanded={key}>
-                    <td colSpan={columns.length} className="bg-bg px-3 py-4">
+                  <tr data-expanded={key}>
+                    <td colSpan={columns.length} className="border-b border-border-strong bg-bg px-3 py-4">
                       {renderExpanded(row)}
                     </td>
                   </tr>
@@ -302,13 +316,42 @@ export function FilterChip({
       type="button"
       onClick={onClick}
       aria-pressed={active}
-      className={`min-h-[44px] rounded-xs border px-3 ${
+      className={`min-h-[44px] rounded-xs border px-3 transition-colors hover:bg-surface-hover active:bg-surface-active ${
         active
           ? "border-accent-fg text-accent-fg font-medium"
-          : "border-border-strong text-text-muted"
+          : "border-border-strong text-text-muted hover:text-text"
       }`}
     >
       {label}
     </button>
+  );
+}
+
+/**
+ * 表格首次加载的骨架：列宽与行高与真实表格一致，数据到达时不跳动。
+ *
+ * 整块 `aria-hidden` —— 加载状态由调用方的文字（「检测中」「加载中」）报给读屏；
+ * 骨架只是视觉占位。
+ */
+export function TableSkeleton({ columns, rows = 6 }: { columns: readonly string[]; rows?: number }) {
+  return (
+    <div aria-hidden="true" data-skeleton="table">
+      <div className="flex border-b border-border-strong py-2 pl-3">
+        {columns.map((w, i) => (
+          <span key={i} className="pr-4" style={{ width: w }}>
+            <Skeleton className="h-3 w-2/3" />
+          </span>
+        ))}
+      </div>
+      {Array.from({ length: rows }, (_, r) => (
+        <div key={r} className="flex items-center border-b border-border pl-3 last:border-0" style={{ height: `${ROW_HEIGHT}px` }}>
+          {columns.map((w, i) => (
+            <span key={i} className="pr-4" style={{ width: w }}>
+              <Skeleton className="h-3.5 w-4/5" />
+            </span>
+          ))}
+        </div>
+      ))}
+    </div>
   );
 }

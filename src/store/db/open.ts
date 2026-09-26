@@ -2,13 +2,10 @@ import { DatabaseSync } from "node:sqlite";
 import { chmod, mkdir, stat } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { dataDir } from "../config.ts";
+import { DIR_MODE, FILE_MODE } from "../paths.ts";
 import { MIGRATIONS, TARGET_VERSION } from "./migrations.ts";
 
-/**
- * SQLite 连接与迁移执行。
- *
- * 用 Node 24 内置的 `node:sqlite`,零新增依赖。WAL 已实测可用。
- */
+/** SQLite 连接与迁移执行，使用 Node 内置的 `node:sqlite`。 */
 
 export function dbPath(root?: string): string {
   return join(dataDir(root), "runtime.db");
@@ -26,34 +23,20 @@ export class MigrationError extends Error {
 }
 
 /**
- * 打开数据库并迁移到目标档位。
- *
- * 每条迁移连同 user_version 的更新一起放在一个事务里:中途失败时整条回滚,
- * 不会留下「表建了一半而 user_version 已经前进」的状态 —— 那种库既不能用
- * 也不能再迁移,只能删掉重建。
+ * 打开数据库并迁移到目标档位。每条迁移与 user_version 更新同在一个事务里，
+ * 避免表建了一半而档位已前进。
  */
 export function openDb(file: string): DatabaseSync {
   const db = new DatabaseSync(file);
 
-  // WAL:读写并发。管理后台轮询进度的同时转发链路在写统计。
+  // WAL：管理后台轮询的同时转发链路在写统计。
   db.exec("PRAGMA journal_mode = WAL");
-  // NORMAL 在 WAL 下已能保证崩溃一致性,FULL 的每次 fsync 对高频统计写不值得。
+  // NORMAL 在 WAL 下已能保证崩溃一致性，FULL 对高频统计写不值得。
   db.exec("PRAGMA synchronous = NORMAL");
-  // 外键在本库里刻意不用:worker_id/proxy_id 是对 config.json 的弱引用,
-  // 配置里删掉 Worker 不应该连带删掉它的历史统计。
+  // 刻意不用外键：worker_id/proxy_id 是对 config.json 的弱引用，删 Worker 不删历史。
   db.exec("PRAGMA busy_timeout = 5000");
-  /*
-   * 删除时擦掉页内容。
-   *
-   * 默认 `secure_delete = 0`：`DELETE` 只把页标记为空闲，**内容仍留在文件里**
-   * —— 实测 `DELETE` + `wal_checkpoint(TRUNCATE)` 之后会话摘要与模型名
-   * 仍能在主库文件里搜到，而 `VACUUM` 也清不掉（它重建文件但不擦原空闲页）。
-   *
-   * 于是 `pruneExpired` / `pruneDetailsBefore` 会给出一个**假的**清理保证：
-   * 「已经清过了」而备份/导出拿到的文件里那些行还在。开了它才名实相符。
-   *
-   * 代价是删除时多写一次零 —— 对本项目的删除频率（启动时各一次）可忽略。
-   */
+  // 删除时擦掉页内容：默认 `DELETE` 只标记空闲页，`pruneExpired` / `pruneDetailsBefore`
+  // 删掉的行仍会留在文件里。
   db.exec("PRAGMA secure_delete = ON");
 
   migrate(db);
@@ -81,7 +64,7 @@ export function migrate(db: DatabaseSync): number {
     db.exec("BEGIN IMMEDIATE");
     try {
       db.exec(m.up);
-      // user_version 不接受参数绑定,只能拼接 —— 故 version 必须是我们自己的整数常量。
+      // user_version 不接受参数绑定，只能拼接自有的整数常量。
       db.exec(`PRAGMA user_version = ${Number(m.version)}`);
       db.exec("COMMIT");
     } catch (err) {
@@ -98,48 +81,28 @@ export function migrate(db: DatabaseSync): number {
 }
 
 /**
- * 供服务端启动使用:确保目录存在后打开。
- *
- * ## 为什么要显式 chmod
- *
- * SQLite 按进程 umask 建文件,实测出来是 **0644** —— 而本项目对 `data/`
- * 下的东西一律 0600(`config.json`、日志、state 文件都是)。库里存着会话
- * 摘要、Worker id 与用量明细:不是凭证,但足以还原"谁在什么时候用了哪个
- * 账号跑了多少 token",而且这张表会进备份与诊断导出。
- *
- * `data/` 目录本身是 0700,所以同机其他用户实际进不来 —— 但依赖目录权限
- * 是**单点防护**:任何一次目录权限被改宽(手工 chmod、复制到别处、
- * 打包进压缩文件)都会让文件权限直接暴露出来。与 `config.ts` 的做法一致:
- * 目录与文件各自都要对。
- *
- * **WAL 与 SHM 也要一起改**:它们与主库同目录、同样含数据
- * (`-wal` 里是尚未 checkpoint 的完整页面)。只改主库会留下两个 0644 的
- * 旁路文件,那是"修了一半"。
+ * 供服务端启动使用：确保目录存在后打开。SQLite 按 umask 建出 0644 文件，
+ * 而库里有会话摘要与用量明细；目录与文件各自都要收紧，不依赖单点防护。
  */
 export async function openRuntimeDb(root?: string): Promise<DatabaseSync> {
   const file = dbPath(root);
-  await mkdir(dirname(file), { recursive: true, mode: 0o700 });
+  await mkdir(dirname(file), { recursive: true, mode: DIR_MODE });
   const db = openDb(file);
   await hardenDbFiles(file);
   return db;
 }
 
-/** 库文件模式。与 `config.ts` 的 `FILE_MODE` 同值,理由见 `openRuntimeDb`。 */
-const DB_FILE_MODE = 0o600;
-
 /**
- * 把库文件及其 WAL/SHM 旁路文件收到 0600。
- *
- * 失败不抛:权限收紧失败不该让网关起不来(例如库在一个不支持 chmod 的
- * 文件系统上)。但也不静默 —— 打一行,让它可被发现。
+ * 把库文件及其 WAL/SHM 旁路文件（同样含数据）收到 0600。失败不抛但打日志，
+ * 不支持 chmod 的文件系统不该让网关起不来。
  */
 async function hardenDbFiles(file: string): Promise<void> {
   for (const path of [file, `${file}-wal`, `${file}-shm`]) {
     try {
       const st = await stat(path);
-      if ((st.mode & 0o777) !== DB_FILE_MODE) await chmod(path, DB_FILE_MODE);
+      if ((st.mode & 0o777) !== FILE_MODE) await chmod(path, FILE_MODE);
     } catch (err) {
-      // WAL/SHM 在某些时刻不存在 —— 那不是错误。
+      // WAL/SHM 在某些时刻不存在，不是错误。
       if ((err as NodeJS.ErrnoException).code === "ENOENT") continue;
       console.error(`无法收紧 ${path} 的权限(库仍可用):${(err as Error).message}`);
     }

@@ -2,35 +2,16 @@ import { readFileSync } from "node:fs";
 import { configPath } from "./paths.ts";
 
 /**
- * 端口解析 —— **唯一真相**。
+ * 端口解析的唯一真相（纪律 #4），供 `server/index.ts`、`scripts/service.mjs`、
+ * `vite.config.ts` 共用，否则各处会探测或转发到不同端口。
  *
- * ## 为什么这必须只有一份实现
- *
- * 端口有三个消费者:`server/index.ts`(真正监听的)、
- * `scripts/service.mjs`(健康等待要探的)、`vite.config.ts`(dev 代理要转发的)。
- * 若监听端口改成读 `config.gateway.port` 而脚本没同步,脚本会去探一个没人
- * 监听的端口,健康等待超时后报「启动失败」,而服务其实已经起来了。
- *
- * vite 若硬编码 9876,症状更隐蔽:dev server 照常起、页面照常开,只是
- * `/health` 与 `/api` 被转发到一个**别的进程**。若另有服务恰好监听 9876,
- * admin 会拿到那个服务的响应 —— 一个"看起来在工作但数据来自错误后端"
- * 的故障,而它不会报任何错。
- *
- * 这是纪律 #4(守卫/名单必须从唯一真相推导)的一例:三份并行手写的
- * 解析逻辑,脱节方向必然是"有一处被漏掉"。
- *
- * ## 优先级
- *
- * `ZG_PORT` > `config.json` 的 `gateway.port` > 9876。
- *
- * `ZG_PORT` 在最前面不是为测试开的后门:它让测试能把端口与 `ZG_DATA_DIR`
- * 一起隔离,而那是「误杀无关进程」「restart 谎报成功」这类缺陷能有常驻回归
- * 测试的前提(见 service.mjs 的说明)。
+ * 优先级：`ZG_PORT` > `config.json` 的 `gateway.port` > 9876。
+ * `ZG_PORT` 让测试能与 `ZG_DATA_DIR` 一起隔离端口。
  */
 
 export const DEFAULT_PORT = 9876;
 
-/** ZG_PORT 非法时抛这个,由调用方决定怎么退出(脚本与服务端的退出方式不同)。 */
+/** ZG_PORT 非法时抛出，由调用方决定怎么退出。 */
 export class PortResolveError extends Error {
   override readonly name = "PortResolveError";
 }
@@ -40,13 +21,8 @@ function validPort(value: unknown): value is number {
 }
 
 /**
- * 解析该用哪个端口。
- *
- * `root` 只在测试里传(与 `configPath` 的约定一致);不传时走 `ZG_DATA_DIR`
- * 或 `cwd/data`。
- *
- * 非法 `ZG_PORT` **抛错而不静默回落** —— 回落会让「我明明设了 ZG_PORT」
- * 变成一个查不出的问题。
+ * 解析该用哪个端口。`root` 只在测试里传，与 `configPath` 约定一致。
+ * 非法 `ZG_PORT` 抛错而不静默回落。
  */
 export function resolvePort(root?: string): number {
   const fromEnv = process.env["ZG_PORT"];
@@ -63,13 +39,7 @@ export function resolvePort(root?: string): number {
     const port = (raw as { gateway?: { port?: unknown } } | null)?.gateway?.port;
     if (validPort(port)) return port;
   } catch {
-    /*
-     * 配置不存在(首启)或不可解析 —— 用默认端口。
-     *
-     * 刻意不在这里报错:服务端加载配置时会给出真正的原因(含 zod 的字段级
-     * 报错),而这里只负责端口。在这里抢先报一个「配置读不到」会把那条
-     * 更有用的消息盖掉。
-     */
+    // 配置不存在或不可解析时用默认端口；真正的原因由加载配置时报告。
   }
 
   return DEFAULT_PORT;

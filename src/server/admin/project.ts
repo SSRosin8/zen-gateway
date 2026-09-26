@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import type { Config, Proxy, Worker } from "../../shared/schema.ts";
+import type { Config, Proxy } from "../../shared/schema.ts";
 import type {
   ModelView,
   ProxyView,
@@ -7,41 +7,20 @@ import type {
   SubscriptionView,
   WorkerView,
 } from "../../shared/contract.ts";
-import { isUsable, isWorkerReady } from "../../core/routing/workerPool.ts";
+import { isUsable } from "../../core/routing/workerPool.ts";
 import { describeResolveFailure, resolveProxy } from "../../core/proxy/pool.ts";
 import { judgeFree, surfacesFor } from "../../core/models/free.ts";
 import { redactUrl } from "../../shared/redact.ts";
 import type { CatalogSnapshot } from "../../core/models/catalog.ts";
 
 /**
- * 配置 → 管理面视图的投影。
- *
- * ## 这一层存在的唯一理由：凭证绝不出进程
- *
- * `config.json` 整个文件都是凭证（Zen API key、Relay Token、代理口令、
- * Clash secret）。管理面要回答的是「这个 Worker 配没配 key」而**不是** key
- * 本身，所以投影必须**窄于**存储 —— 而窄化只在这一个文件里做，不散落在
- * 各个 handler 里。散落的后果是可预见的：新增一个端点时漏掉一个字段，
- * 而那个漏洞没有任何症状（响应照常返回，只是多带了一个 key）。
- *
- * 因此本文件是**唯一**允许读凭证字段的地方，且它只输出 `SecretPresence`。
- * 有一条测试遍历响应的全部字符串值，断言真实 key 不出现在任何一处。
+ * 配置 → 管理面视图的投影。本文件是唯一允许读凭证字段的地方，且只输出 `SecretPresence`：
+ * 窄化散落在各 handler 里，新增端点时漏一个字段不会有任何症状。
  */
 
 /**
- * 凭证的展示指纹：sha256 前 8 位。
- *
- * ## 为什么不复用 `credentialFingerprint.ts`
- *
- * 那个函数是**安全边界**（决定 dispatcher / Controller 是否重建），它的取值
- * 范围由「碰撞会导致复用旧凭证」这条后果决定。这里是**展示用途**，约束不同：
- * 必须短到能在界面上显示，而碰撞的后果只是两个不同 key 看起来一样。
- *
- * 两个用途共用一个函数会让其中一方的约束变化悄悄影响另一方 —— 比如为了
- * 界面好看把长度截短，就会削弱缓存键。所以刻意分开，并在两处互相注明。
- *
- * **用指纹而不是长度**：等长的两个 key 长度相同，于是「我改了没生效」
- * 在界面上不可见 —— 而那恰好是修密码最常见的形态（把打错的换成同长度的对的）。
+ * 凭证的展示指纹：sha256 前 8 位。刻意不复用 `credentialFingerprint`：那是缓存重建的安全边界，
+ * 这里是展示用途，两者约束不同。用指纹而非长度：换成同长度的正确密码时界面才看得出变化。
  */
 export function displayFingerprint(secret: string): SecretPresence {
   const trimmed = secret.trim();
@@ -62,22 +41,8 @@ export type RuntimeWorkerState = {
 };
 
 /**
- * 把配置里的 Worker 与调度器的运行期状态合成一个视图。
- *
- * ## 合并是这个端点存在的全部理由
- *
- * `config.json` 知道「配了什么」，`Scheduler` 知道「现在能不能用」，
- * 而用户问的那个问题（「它为什么没在用我这个账号」）**必须两者一起**
- * 才能回答。进程外没有任何地方同时持有这两半，所以 `npm run status` 与
- * `doctor` 都只能拿到其中一边，这个问题只能由服务自己答。
- *
- * ## `inPool` 与 `enabled` 必须分开显示
- *
- * `isUsable()` 对认证 Worker 要求 apiKey 非空，对匿名 Worker 允许免 key。
- * 合成一个字段的话，匿名 Worker 的类型语义会被丢掉，用户无法区分两种候选。
- *
- * `runtime` 里查不到的 Worker（不在候选池里）—— `ready` 为 false 而不是
- * 「未知」：它确实不会被选中，这是个确定的事实，不是缺失信息。
+ * 合成配置里的 Worker 与调度器运行期状态：「为什么没在用这个账号」必须两者一起才能回答。
+ * `inPool` 与 `enabled` 分开显示（匿名 Worker 可免 key）；runtime 里查不到的 Worker `ready` 为 false。
  */
 export function workerViews(
   config: Config,
@@ -98,26 +63,14 @@ export function workerViews(
       proxyId: worker.proxyId,
       apiKey: displayFingerprint(worker.apiKey),
       inPool,
-      /*
-       * 不在池里就一定不就绪 —— 不看 `state`。
-       *
-       * 这不是防御性冗余:`#retired` 表会为停用过的 Worker 保留状态,
-       * 于是一个 `enabled: false` 的 Worker 仍可能有一条 runtime 记录
-       * (冷却已过期 → ready 为真)。照 `state.ready` 显示会得到
-       * 「已停用 · 就绪」,而它根本不在候选链里。
-       */
+      // 不在池里就一定不就绪：`#retired` 会为停用的 Worker 保留状态，照 `state.ready` 会显示「已停用 · 就绪」。
       ready: inPool && state !== undefined ? state.ready : false,
       cooldownRemainingMs: state?.cooldownRemainingMs ?? 0,
       consecutiveFails: state?.consecutiveFails ?? 0,
       lastFailure: state?.lastFailure ?? null,
       /*
-       * 出口 IP 来自绑定的代理；`proxyId` 为 null（本机直连）时来自
-       * `gateway.directEgressIp`，由探测实测并落盘。不能编一个值：那会让隔离
-       * 报告把所有直连 Worker 归成一组『已知相同』。
-       *
-       * 这条很要紧：直连出口与某个代理 NAT 到同一个公网 IP 恰好是
-       * 「看起来隔离其实没隔离」的形态，直连一律给 null 就永远发现不了它。
-       * 仍未探测过时是 null（→ 隔离报告里算「未知」，不算已隔离）。
+       * 直连 Worker 的出口 IP 来自 `gateway.directEgressIp`（实测落盘），未探测时为 null（隔离报告算未知）。
+       * 不能编值：直连与某代理 NAT 到同一 IP 正是「看似隔离其实没隔离」。
        */
       egressIp:
         worker.proxyId === null
@@ -128,11 +81,8 @@ export function workerViews(
 }
 
 /**
- * 供 `buildIsolationReport` 使用的条目。
- *
- * **只取在候选池里的 Worker**：一个停用的 Worker 不发流量，把它算进隔离
- * 报告会让「未知出口」凭空多出几个，于是 `isolated` 永远为 false ——
- * 用户永远看到「出口未隔离」而实际在用的那几个是隔离的。
+ * 供 `buildIsolationReport` 使用的条目。只取候选池里的 Worker：停用的不发流量，
+ * 算进来会让 `isolated` 永远为 false。
  */
 export function isolationEntries(
   views: readonly WorkerView[],
@@ -142,7 +92,7 @@ export function isolationEntries(
     .map((v) => ({ workerId: v.id, proxyId: v.proxyId, egressIp: v.egressIp }));
 }
 
-/** 代理概览。完整列表在 ProxyPool 页（下一批）。 */
+/** 代理概览。 */
 export function proxySummary(proxies: readonly Proxy[]): {
   total: number;
   enabled: number;
@@ -156,11 +106,8 @@ export function proxySummary(proxies: readonly Proxy[]): {
 }
 
 /**
- * Clash 配置的投影。`apiSecret` 换成指纹。
- *
- * `localProxyPort` 原样给出 —— 它不是凭证，而且它是个高风险字段
- * （与内核实际 `mixed-port` 不一致时桥接静默连到没人监听的端口），
- * 所以界面上必须能看到它。
+ * Clash 配置的投影，`apiSecret` 换成指纹。`localProxyPort` 原样给出：不是凭证，
+ * 且与内核实际 `mixed-port` 不一致时桥接会静默失败，界面必须能看到。
  */
 export function clashView(config: Config): {
   enabled: boolean;
@@ -190,39 +137,16 @@ export function clashView(config: Config): {
   };
 }
 
-/**
- * Worker 池计数 —— 从投影推导，**不另外问一次调度器**。
- *
- * 另问一次调度器会让同一个响应里的 `pool.ready` 与 `workers[].ready` 来自
- * 两次独立的查询，中间状态可能变过；而用户会把它们当成一句话读（「3 个
- * Worker，2 个就绪」后面跟着一张三行的表）。从同一份 `views` 推导，
- * 两者结构上不可能矛盾。
- */
+/** Worker 池计数，从同一份 `views` 推导而不另问调度器，与 `workers[].ready` 结构上不会矛盾。 */
 export function poolCounts(views: readonly WorkerView[]): { ready: number; total: number } {
   const inPool = views.filter((v) => v.inPool);
   return { ready: inPool.filter((v) => v.ready).length, total: inPool.length };
 }
 
 /**
- * 用于自检的凭证字符串清单 —— 测试用它断言「这些值不出现在响应里」。
- *
- * 放在生产代码里而不是测试里，理由是纪律 #4：测试若自己手写一份
- * 「哪些字段算凭证」的名单，schema 加一个凭证字段时那份名单不会更新，
- * 而**脱节方向必然是漏**。这里从 `Config` 的实际结构推导。
- *
- * ## 订阅 URL 只取**token 部分**，不取整条
- *
- * 不能 push 整条 `https://host/path?token=SECRET`：测试断言的是
- * `not.toContain(secret.slice(0, 8))` —— 对每个订阅来说那 8 个字符
- * 都是 `"https://"`。于是
- *
- * - 真正是凭证的那段 token **完全没被检查**；
- * - 而任何含订阅的配置都会让断言**误报**，因为 `gateway.baseUrl`
- *   正当地以 `https://` 开头。
- *
- * 所以这里把 URL 拆开，只交出"看起来像凭证"的那几段：query 的各个值、
- * 以及路径的最后一段（`/sub/abc123def` 这种形态）。粒度必须与缺陷的
- * 粒度一致 —— 查整条 URL 挡不住"只泄漏 token"。
+ * 用于自检的凭证字符串清单，测试断言这些值不出现在响应里。放在生产代码里从 `Config` 推导（纪律 #4）。
+ * 订阅 URL 只取像凭证的片段（query 值与路径末段）：整条 URL 的前 8 位恒为 `https://`，
+ * 既查不到 token 又会与 `gateway.baseUrl` 误报。
  */
 export function allSecretValues(config: Config): string[] {
   const out: string[] = [config.gateway.relayToken];
@@ -251,25 +175,10 @@ function subscriptionSecrets(raw: string): string[] {
   return out;
 }
 
-/** 判定一个 Worker 现在是否就绪 —— 转出以便 handler 不必认识 workerPool。 */
-export { isUsable, isWorkerReady };
-export type { Worker };
-
-/* ------------------------------------------------------------------ *
- * 其余页面的投影
- * ------------------------------------------------------------------ */
-
+/** 转出以便 handler 不必认识 workerPool。 */
 /**
- * 代理列表的投影。
- *
- * 三样东西由服务端算好，而不是让前端拼:
- *
- * 1. `password` → `SecretPresence`（代理口令是凭证）
- * 2. `usedBy` —— 哪些 Worker 引用它。前端要按它显示「删掉会影响谁」，
- *    而那个判断若在前端做，就与 `patch.ts` 的引用完整性校验成了两份实现，
- *    分叉后界面会允许一个服务端必拒的操作。
- * 3. `resolvable` —— 能否解析出一条出口路径。复用 `resolveProxy` 而不是
- *    另写一份「Clash 开了吗 / 协议能直连吗」的判断（纪律 #4）。
+ * 代理列表的投影，由服务端算好：`password` → `SecretPresence`；`usedBy` 与 `patch.ts` 的引用完整性同源；
+ * `resolvable` 复用 `resolveProxy`（纪律 #4）。
  */
 export function proxyViews(config: Config): ProxyView[] {
   const usedByProxy = new Map<string, string[]>();
@@ -305,29 +214,16 @@ export function proxyViews(config: Config): ProxyView[] {
 }
 
 /**
- * 模型列表的投影。
- *
- * ## 为什么要把**付费的也列出来**
- *
- * Models 页要回答「为什么这个模型不能用」，而那必须看到被拒的那些。
- * 只列免费集的话，用户在 OpenCode 里看到一个模型名却在这里找不到它，
- * 于是不知道是「网关不认识它」还是「网关拒绝它」。
- *
- * `reason` 直接来自 `judgeFree` 的联合类型 —— 不在这里另造一套措辞
- * （纪律 #4：那会让界面说的理由与转发时的理由分叉）。
+ * 模型列表的投影。付费的也列出来：Models 页要回答「为什么这个模型不能用」。
+ * `reason` 直接取自 `judgeFree`，不另造措辞（纪律 #4）。
  */
 export function modelViews(config: Config, snapshot: CatalogSnapshot | null): ModelView[] {
   if (snapshot === null) return [];
 
   const view = { ids: snapshot.ids };
   /*
-   * 管理页需要同时回答两个问题：当前目录里有哪些模型，以及配置里记着的免费
-   * 模型是否已经从目录消失。只遍历 `snapshot.entries` 会让第二类模型在生产
-   * 响应中完全消失，`retired` 分支因此只能在单测 fixture 里存在。
-   *
-   * 这些额外 id 只来自用户配置（显式免费名单与协议面覆写），不从历史数据库
-   * 猜测模型，避免把已删除配置重新显示出来。条目缺失时只保留 id，协议面仍由
-   * `surfacesFor` 从当前配置推导。
+   * 额外列出配置里记着但已从目录消失的免费模型（extraFreeIds 与 surfaceOverrides），
+   * 否则 `retired` 在生产响应中永远不出现。只来自当前配置，不从历史数据猜。
    */
   const entries = new Map(snapshot.entries.map((entry) => [entry.id, entry] as const));
   for (const id of config.models.extraFreeIds) entries.set(id, entries.get(id) ?? { id });
@@ -342,12 +238,8 @@ export function modelViews(config: Config, snapshot: CatalogSnapshot | null): Mo
       free: verdict.free,
       reason: verdict.reason,
       /*
-       * `surfacesFor` 终于有了生产调用点 —— 但**只作展示**，不参与放行判定。
-       *
-       * 不能顺手把它接成闸门:默认值是
-       * `["chat","responses"]`，按它放行会让默认配置下**所有**模型的
-       * `/v1/messages` 请求被拒 —— 而那个面已验证可用。
-       * 上游并不按模型区分面，所以当闸门缺乏依据。这里是它该有的用法。
+       * `surfacesFor` 只作展示，不接成放行闸门：默认值不含 messages，
+       * 按它放行会拒掉所有 `/v1/messages` 请求，而上游并不按模型区分面。
        */
       surfaces: [...surfacesFor(entry.id, config.models)],
       listed: snapshot.ids.has(entry.id),
@@ -356,14 +248,8 @@ export function modelViews(config: Config, snapshot: CatalogSnapshot | null): Mo
 }
 
 /**
- * 订阅列表的投影。
- *
- * **URL 过 `redactUrl` 后才出去** —— 订阅 URL 的 token 通常带在 query 或
- * path 里，它本身就是付费凭证。这与 apiKey 只给指纹是同一条规则：
- * 界面要回答"这是哪个订阅"，不该让人从界面把 token 抄走。
- *
- * `proxyCount` 由服务端算 —— 前端拿到的 `proxies` 是分页/筛选后的，
- * 让它自己数会得到一个随筛选变化的数字。
+ * 订阅列表的投影。URL 过 `redactUrl` 后才出去（token 本身是付费凭证）。
+ * `proxyCount` 由服务端算：前端拿到的代理列表是分页/筛选后的。
  */
 export function subscriptionViews(config: Config): SubscriptionView[] {
   const counts = new Map<string, number>();

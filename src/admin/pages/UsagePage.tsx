@@ -76,7 +76,8 @@ const WORKER_COLUMNS: ReadonlyArray<Column<WorkerStat>> = [
     header: "最近状态码",
     numeric: true,
     render: (w) =>
-      w.lastStatus === null ? <span className="text-text-muted">—</span> : <Mono>{w.lastStatus}</Mono>,
+      /* null = 最近一次尝试是传输失败，没有 HTTP 状态码（见 store/db/stats.ts）。 */
+      w.lastStatus === null ? <span className="text-text-muted">无响应</span> : <Mono>{w.lastStatus}</Mono>,
   },
 ];
 
@@ -155,7 +156,7 @@ export function UsagePage({
       <Panel title={`按模型（${data.models.length}）`}>
         {data.models.length === 0 ? (
           <div className="rounded-md bg-surface-accent px-4 py-6 text-center">
-            <p className="font-serif text-lg">这段时间还没有用量</p>
+            <p className="text-heading-16 font-medium">这段时间还没有用量</p>
             <p className="mt-1 text-text-muted">
               跑一次 <Mono>opencode run</Mono> 之后回来看。
             </p>

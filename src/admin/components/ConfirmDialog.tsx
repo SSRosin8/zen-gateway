@@ -54,7 +54,7 @@ export function ConfirmDialog({
     >
       {open && (
         <div className="px-5 py-4">
-          <h2 id="zg-dialog-title" className="text-base font-medium">
+          <h2 id="zg-dialog-title" className="text-heading-16 font-medium">
             {title}
           </h2>
           <div className="mt-3 space-y-2 text-text-muted">{children}</div>

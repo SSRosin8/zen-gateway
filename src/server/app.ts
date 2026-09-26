@@ -18,13 +18,7 @@ const STARTED_AT = Date.now();
 export const VERSION = "0.1.0";
 
 /**
- * 健康体的**唯一**构造点。
- *
- * `/health` 与 `/api/overview` 都要它，而两处各拼一份会分叉（纪律 #4）——
- * 分叉方向是漏：加一个字段时管理面那份不会更新，于是后台显示的健康信息
- * 比 `/health` 旧一个版本，而那种偏差没有任何症状。
- *
- * 走一遍 schema：契约变了这里立刻 typecheck 失败，而不是让 admin 在运行期发现。
+ * 健康体的唯一构造点，`/health` 与 `/api/overview` 共用（纪律 #4）。过 schema 以便契约变化立刻失败。
  */
 export function buildHealth(storeWriteFailures: number) {
   return HealthSchema.parse({
@@ -39,27 +33,9 @@ export function buildHealth(storeWriteFailures: number) {
 }
 
 /**
- * 应用装配。
- *
- * ## 注册表在这里建立,面在这里注册 —— 且仅此一处
- *
- * 这个抽象的约束是「新增一个面 = 加一个文件 + 注册一行,**不动**
- * 路由装配、鉴权、免费判定、重试、透传」。
- *
- * `responses` 与 `messages` 在 `src/server/` 下各只占下面一行 `.register(...)`。
- * 路由(`registry.paths()` 动态挂载)、鉴权守卫(同源推导)、调度、重试、透传
- * 都不因新面而改动。守卫若是手写的路径字面量,加面就会让
- * `/responses`、`/messages` 这类无前缀别名成为免鉴权中继。
- *
- * 两个面各自带来的新东西不在装配层:`responses` 让「体内会话指针优先于头」
- * 那条接线第一次真的可执行,`messages` 需要把 key 镜像到 `x-api-key`
- * (否则上游 500 → 整池 Worker 被冷却)。两者都由**面自己**表达。
- *
- * ## 为什么把 registry 做成参数可注入
- *
- * 测试要能只注册一个假面来验证路由分派,而不必连带真实的 chat 面。
- * 更要紧的是:注册表的**冲突检查**要能被测试直接驱动(两个面抢同一路径),
- * 而那需要能构造出冲突的注册表。
+ * 注册表在这里建立、面在这里注册，且仅此一处：新增一个面 = 加一个文件 + 注册一行，
+ * 路由、鉴权守卫、调度、重试、透传都从注册表推导，不因新面改动。
+ * 各面的特殊行为（会话指针、`x-api-key` 镜像）由面自己表达。registry 可注入以便测试冲突检查。
  */
 export function buildRegistry(): ProtocolRegistry {
   return new ProtocolRegistry()
@@ -69,74 +45,28 @@ export function buildRegistry(): ProtocolRegistry {
 }
 
 export type AppDeps = {
-  /**
-   * 读当前配置。
-   *
-   * 做成函数而非值:配置热更新后下一个请求就该用新值,
-   * 而不是等重启。Relay Token 与 baseUrl 都可能被改。
-   */
+  /** 读当前配置；做成函数以便热更新后下一个请求就用新值。 */
   readonly configOf: () => Config;
   readonly registry?: ProtocolRegistry;
   /** 出口服务。转发与探测必须共用同一个 —— 见 EgressService.upstreamDeps。 */
   readonly egress: EgressService;
-  /**
-   * 调度器。不传则建一个 —— 但**每个 app 只能有一个**。
-   *
-   * 与 egress 同理:两份冷却状态会让「这个 Worker 在冷却」取决于请求碰巧
-   * 走到哪一份,而冷却存在的理由正是别再打那个上游。可注入是为了让测试
-   * 能持有同一个实例来断言跨请求的状态(冷却生效、粘滞命中)。
-   */
+  /** 调度器；不传则建一个，但每个 app 只能有一个（两份冷却状态会分叉）。可注入以便测试断言跨请求状态。 */
   readonly scheduler?: Scheduler;
-  /**
-   * 在架目录缓存。不传则建一个 —— 但**每个 app 只能有一个**。
-   *
-   * 与 scheduler 同理:两份缓存会让"这个模型在不在架"取决于请求走到哪一份,
-   * 而且会把上游目录请求数翻倍。可注入是为了让测试预置一份目录,
-   * 免得每个转发测试都要去打上游。
-   */
+  /** 在架目录缓存；不传则建一个，每个 app 唯一。可注入以便测试预置目录。 */
   readonly catalog?: ModelCatalog;
   readonly newId?: () => string;
   /** 注入以便测试推进时间。 */
   readonly clock?: () => number;
   readonly log?: (message: string) => void;
-  /**
-   * 统计写入。不传则不记统计 —— 转发行为完全不变。
-   *
-   * 与 scheduler/catalog 不同,这个**不在这里兜底 new 一个**:
-   * 它需要一个打开的数据库,而"装配层顺手开个库"会让每个测试都落盘。
-   * 由 `index.ts` 显式注入。
-   */
+  /** 统计写入；不传则不记。需要打开的数据库，所以不在这里兜底，由 `index.ts` 注入。 */
   readonly stats?: StatsSink;
-  /**
-   * 统计/持久化的累计写失败数，供 `/health` 报出。
-   *
-   * 由 `index.ts` 提供 —— 它是唯一同时持有两个 store 引用的地方
-   * （`affinityStore` 被塞进 `Scheduler` 后拿不出来）。不传则报 0。
-   */
+  /** 统计/持久化的累计写失败数，供 `/health` 报出；由同时持有两个 store 的 `index.ts` 提供。 */
   readonly storeWriteFailures?: () => number;
-  /**
-   * 管理 API。不传则 `/api` 只有 `/ping`。
-   *
-   * 与 `stats` 同理**不在这里兜底造一个**：它需要配置写入能力与调度器的
-   * 运行期状态，而「装配层顺手造一个写盘函数」会让每个测试都能改真实配置。
-   * 由 `index.ts` 显式注入。
-   */
+  /** 管理 API；不传则 `/api` 只有 `/ping`。需要写配置能力，不在装配层兜底，由 `index.ts` 注入。 */
   readonly admin?: AdminDeps;
   /**
-   * 覆盖「对端地址怎么取」—— **仅供测试**。
-   *
-   * 生产路径走 `getConnInfo(c).remote.address`（内核报告的 TCP 对端地址，
-   * 唯一可信的来源证据）。但集成测试需要驱动真实装配下的管理 API，
-   * 而 `app.request()` 起不了真 socket，`getConnInfo` 因此拿不到地址 →
-   * 一律判否（默认拒绝）→ 所有管理端点在测试里恒为 403，**整套 API
-   * 无从验证**。
-   *
-   * 这不是给生产开的后门:`loopbackOnly` 的默认实现没变,注入点在装配层,
-   * 而 `index.ts` 从不传它。回环测试若注入 `addressOf`,很容易把**正是**
-   * 要测的那段替换掉,所以这里要说清分工:
-   * 判定逻辑(`isLoopbackAddress`，含 IPv4-mapped IPv6 与 `127.0.0.0/8`)
-   * 由 `tests/unit/middleware.test.ts` 用真实实现穷举验证;
-   * 本注入只替换「地址从哪来」,不替换「怎么判断」。
+   * 仅供测试：覆盖对端地址的来源。`app.request()` 没有真 socket，否则管理面在测试里恒为 403。
+   * 只替换「地址从哪来」，不替换「怎么判断」；判定逻辑由 `tests/unit/middleware.test.ts` 用真实实现验证。
    */
   readonly addressOf?: (c: import("hono").Context) => string | undefined;
 };
@@ -146,24 +76,12 @@ export function createApp(deps?: AppDeps): Hono {
 
   app.get("/health", (c) => c.json(buildHealth(deps?.storeWriteFailures?.() ?? 0)));
 
-  /*
-   * 没有依赖时只提供 /health。
-   *
-   * service.mjs 的健康等待只需要 /health,部分集成测试也只需要它。
-   * 保留这条路径让「启动一个只有健康检查的服务」仍然可能 ——
-   * 但转发面绝不会在没有配置的情况下悄悄以某个默认值工作。
-   */
+  // 没有依赖时只提供 /health（service.mjs 的健康等待与部分测试只要它），转发面不会以默认值悄悄工作。
   if (deps === undefined) return app;
 
   const registry = deps.registry ?? buildRegistry();
   const upstreamOf = (config: Config) => deps.egress.upstreamDeps(config);
-  /*
-   * 目录缓存在进程内唯一 —— 见 AppDeps.catalog。
-   *
-   * 刻意**不**在这里预热:`createApp` 是同步的,而预热要发网络请求。
-   * 预热放在 `server/index.ts`(它本来就是 async),于是测试里建 app
-   * 不会顺带打一次上游 —— 那种隐式网络依赖会让单测偶发失败。
-   */
+  // 目录缓存进程内唯一。不在这里预热（要发网络请求），预热在 `index.ts`，测试建 app 不会打上游。
   const catalog =
     deps.catalog ??
     new ModelCatalog({
@@ -172,22 +90,9 @@ export function createApp(deps?: AppDeps): Hono {
     });
 
   /*
-   * 转发面:先鉴权,再进路由。
-   *
-   * ## 守卫的挂载点必须从注册表推导,不能手写
-   *
-   * 路由本身是 `registry.paths()` 动态挂载的（见 `routes/relay.ts`）,所以
-   * 注册表是"有哪些路径"的唯一真相。守卫若另写一份人工名单,两份就会脱节,
-   * 而**脱节的方向必然是漏**:新增协议面时路由自动出现,守卫却不会。
-   *
-   * 这不是假想。若写成 `/v1/*` + `/chat/*` + `/models` 三条字面量,注册
-   * `responses`/`messages` 之后 `/v1/responses` 与 `/v1/messages` 有鉴权,而
-   * **无前缀别名 `/responses`、`/messages` 完全绕过** —— 成为本机任意进程可用的、
-   * 消耗用户 Worker key 的免鉴权中继。"用通配路径匹配免得逐条挂载时漏掉"
-   * 恰好说反了:通配前缀匹配才是漏的那个,因为它只覆盖它恰好写到的那几个前缀。
-   *
-   * 所以逐条精确挂载,来源与路由同一个 —— 加一个面就自动多一道守卫,
-   * 结构上不可能漏。下面那条断言是最后一道保险。
+   * 转发面守卫的挂载点从注册表推导，逐条精确挂载（纪律 #4）：
+   * 手写 `/v1/*` 之类的通配前缀会漏掉无前缀别名（`/responses`、`/messages`），
+   * 让它们成为免鉴权中继。下面的断言是最后一道保险。
    */
   const tokenOf = () => deps.configOf().gateway.relayToken;
   const relayGuard = relayAuth({ tokenOf });
@@ -196,7 +101,7 @@ export function createApp(deps?: AppDeps): Hono {
 
   const guardedPaths = [...registry.paths(), ...MODELS_PATHS];
   for (const path of guardedPaths) {
-    // 精确路径,不用通配 —— 通配的覆盖范围与注册表无关,正是上面那个 bug 的成因。
+    // 精确路径,不用通配：通配的覆盖范围与注册表无关。
     app.use(path, registry.byPath(path)?.acceptsApiKeyHeader === true ? apiKeyGuard : relayGuard);
   }
 
@@ -213,27 +118,11 @@ export function createApp(deps?: AppDeps): Hono {
   };
 
   app.route("/", createRelayRoutes(relayDeps));
-  app.route(
-    "/",
-    createModelsRoutes({
-      configOf: deps.configOf,
-      upstreamOf,
-      catalog,
-      ...(deps.log !== undefined ? { log: deps.log } : {}),
-    }),
-  );
+  app.route("/", createModelsRoutes({ configOf: deps.configOf, upstreamOf, catalog }));
 
   /*
-   * 管理面:仅回环。
-   *
-   * 这里挂真正的管理 API（`/api/overview`、`/api/stats`、
-   * `PATCH /api/config`）。`/ping` 保留 —— 它是「管理面仅回环」这条约束
-   * 最小的验证目标，且 `assertEveryRouteGuarded` 的变异测试依赖它。
-   *
-   * `loopbackOnly` 挂在 `/*` 上:管理面**任何**路由都不该接受远端,
-   * 所以这里用通配是对的 —— 与转发面相反(那里通配会漏,因为覆盖范围
-   * 与注册表无关)。差别在于:管理面的规则是「全部」,转发面的规则是
-   * 「注册表里那些」,而只有后者需要从真相推导。
+   * 管理面仅回环。这里用 `/*` 通配是对的：管理面的规则是「全部」，
+   * 转发面的规则是「注册表里那些」，只有后者需要从真相推导。
    */
   const admin = new Hono();
   admin.use("/*", loopbackOnly(deps.addressOf !== undefined ? { addressOf: deps.addressOf } : {}));
@@ -250,28 +139,17 @@ export function createApp(deps?: AppDeps): Hono {
   return app;
 }
 
+/** 路由是否被某条中间件路径覆盖：精确相同，或通配前缀（`/api/*` 覆盖 `/api/ping`）。 */
+function coveredBy(middlewarePaths: readonly string[], path: string): boolean {
+  return middlewarePaths.some((mw) => mw === path || (mw.endsWith("/*") && path.startsWith(mw.slice(0, -1))));
+}
+
 /**
- * 启动期断言:每条路由都有守卫。
- *
- * 上面那套「守卫挂载点从注册表推导」已经让漏守卫**不容易**发生,但"不容易"
- * 不是"不可能" —— 将来某个 `app.get(...)` 被直接加进来（新的管理端点、
- * 某个调试端点）就又会出现一条裸路由,而那种错误**不会有任何症状**,
- * 只是安静地对本机所有进程开放。
- *
- * 所以这里把它做成断言而不是约定:Hono 的 `app.routes` 里中间件登记为
- * `ALL`、处理器登记为具体方法,据此可以核对每条处理器路径是否被某条中间件
- * 覆盖。构造期抛错 —— 服务起不来远好于静默敞开。
- *
- * **导出仅为可测。** 只对一个**正确**的 app 断言 `.not.toThrow()` 只能发现误报,
- * 永远发现不了「断言被阉掉」(在本函数首行插一句 `return` 仍会全绿)。
- * 所以测试会喂一个故意装错的 app 进来,见 `tests/unit/middleware.test.ts`;
- * 隔壁 `assertAdminRoutesLoopbackOnly` 用的是同一手法。
+ * 启动期断言：每条处理器路由都被某条中间件（Hono 登记为 `ALL`）覆盖，构造期抛错好过静默敞开。
+ * 导出仅为可测：测试喂一个故意装错的 app 进来（见 `tests/unit/middleware.test.ts`）。
  */
 export function assertEveryRouteGuarded(app: Hono): void {
-  /*
-   * `/health` 故意免鉴权:service.mjs 的健康等待与 doctor 都靠它,
-   * 而它只回报 ok/version/uptime/pid,不含任何配置或凭证。
-   */
+  // `/health` 故意免鉴权：service.mjs 与 doctor 依赖它，且它不含配置或凭证。
   const EXEMPT = new Set(["/health"]);
 
   const middlewarePaths = app.routes.filter((r) => r.method === "ALL").map((r) => r.path);
@@ -281,13 +159,7 @@ export function assertEveryRouteGuarded(app: Hono): void {
     if (route.method === "ALL") continue; // 这是中间件,不是处理器
     if (EXEMPT.has(route.path)) continue;
 
-    const covered = middlewarePaths.some((mw) => {
-      if (mw === route.path) return true;
-      // 通配前缀:`/api/*` 覆盖 `/api/ping`。
-      if (mw.endsWith("/*")) return route.path.startsWith(mw.slice(0, -1));
-      return false;
-    });
-    if (!covered) unguarded.push(`${route.method} ${route.path}`);
+    if (!coveredBy(middlewarePaths, route.path)) unguarded.push(`${route.method} ${route.path}`);
   }
 
   if (unguarded.length > 0) {
@@ -300,25 +172,9 @@ export function assertEveryRouteGuarded(app: Hono): void {
 }
 
 /**
- * 启动期断言:`/api/*` 下的每条路由都被 **loopbackOnly** 覆盖。
- *
- * ## 为什么上面那条断言不够
- *
- * `assertEveryRouteGuarded` 只检查「有没有守卫」，不检查「是哪个」——
- * 一条只挂了 `relayAuth` 而没挂 `loopbackOnly` 的管理路由能通过它。
- * 这是「无前缀别名绕过鉴权」那类缺陷的变体，而且在管理面上是活的：
- * 管理面不设 Relay Token（那是转发面的凭证），它唯一的保护就是「仅本机」。
- *
- * 判据用中间件的**身份**而不是路径形状：`loopbackOnly()` 返回的处理器带
- * 一个标记（见那个文件），据此可以区分它与其他中间件。只比路径的话，
- * 「`/api/*` 上挂了某个中间件」并不能说明挂的是回环闸门。
- *
- * 构造期抛错 —— 服务起不来远好于管理面静默对外开放。
- *
- * **导出仅为可测。** 只对一个**正确**的 app 断言 `.not.toThrow()` 只能发现误报,
- * 永远发现不了「断言被阉掉」(在本函数首行插一句 `return` 仍会全绿),
- * 这条守卫就没有任何东西守着。所以测试会喂一个故意装错的 app 进来
- * （见 `tests/unit/middleware.test.ts`）。
+ * 启动期断言：`/api/*` 下每条路由都被 loopbackOnly 覆盖。`assertEveryRouteGuarded` 只查有无守卫，
+ * 而管理面不设 Relay Token，「仅本机」是唯一保护。按中间件身份（`isLoopbackGuard`）而非路径形状判定。
+ * 导出仅为可测，同上。
  */
 export function assertAdminRoutesLoopbackOnly(app: Hono): void {
   const loopbackPaths = app.routes
@@ -330,12 +186,7 @@ export function assertAdminRoutesLoopbackOnly(app: Hono): void {
     if (route.method === "ALL") continue;
     if (!route.path.startsWith("/api")) continue;
 
-    const covered = loopbackPaths.some((mw) => {
-      if (mw === route.path) return true;
-      if (mw.endsWith("/*")) return route.path.startsWith(mw.slice(0, -1));
-      return false;
-    });
-    if (!covered) unprotected.push(`${route.method} ${route.path}`);
+    if (!coveredBy(loopbackPaths, route.path)) unprotected.push(`${route.method} ${route.path}`);
   }
 
   if (unprotected.length > 0) {

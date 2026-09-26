@@ -1,12 +1,8 @@
 import type { ClashConfig, Config, Proxy } from "../../shared/schema.ts";
 import { isDirectCapable, type BridgeEndpoint, type EgressTarget } from "./dispatcher.ts";
+import { pickBest } from "./clash/select.ts";
 
-/**
- * 代理解析:把配置里的一个代理解析成一条可用的出口路径。
- *
- * 纯函数,不建连接、不发请求 —— 「这个代理该怎么走」与「怎么真的走」
- * 分开,前者才能被穷举测试。
- */
+/** 代理解析:把配置里的一个代理解析成出口路径。纯函数,不建连接,便于穷举测试。 */
 
 export type ResolveFailure =
   | { kind: "not_found"; proxyId: string }
@@ -24,8 +20,7 @@ export function pickBridge(clash: ClashConfig): BridgeEndpoint | null {
   const enabled = clash.bridges.filter((b) => b.enabled);
   if (enabled.length === 0) return null;
 
-  // manual:严格用选中的那个。选中的被停用时不悄悄换一个 ——
-  // 那会让「我明明指定了内核」变成一个无从察觉的偏差。
+  // manual:严格用选中的那个,被停用时不悄悄换一个。
   if (clash.selectionMode === "manual") {
     const chosen = enabled.find((b) => b.id === clash.activeBridgeId);
     if (!chosen) return null;
@@ -34,32 +29,19 @@ export function pickBridge(clash: ClashConfig): BridgeEndpoint | null {
 
   // auto:优先上次健康的那个,否则按 priority 取最优(数值小者优先)。
   const remembered = enabled.find((b) => b.id === clash.activeBridgeId);
-  const best =
-    remembered ??
-    [...enabled].sort((a, b) => a.priority - b.priority || a.id.localeCompare(b.id))[0]!;
+  const best = remembered ?? pickBest(enabled);
 
   return { bridgeId: best.id, host: best.localProxyHost, port: best.localProxyPort };
 }
 
-/**
- * 解析单个代理。
- *
- * 直连优先:协议本身能出口时不绕 Clash —— 少一跳,且不受 selector 全局状态影响
- * (桥接必须持锁串行切换 selector,直连没有这个瓶颈)。
- */
+/** 解析单个代理。直连优先:少一跳,且不受 selector 全局锁影响。 */
 export function resolveProxy(config: Config, proxyId: string | null): ResolveResult {
   // 显式的「不走代理」。
   if (proxyId === null) return { ok: true, target: { mode: "none" } };
 
   const proxy = config.proxies.find((p) => p.id === proxyId);
   if (!proxy) {
-    /*
-     * 引用不存在的代理。
-     *
-     * 这里必须是错误,不能退回本机直连:静默直连意味着这个 Worker
-     * 与其他 Worker 共用同一个公网 IP,而出口隔离正是本项目存在的理由。
-     * (schema 的引用完整性已在加载期拦住这种配置,此处是运行期兜底。)
-     */
+    // 必须报错而不是退回本机直连:静默直连会破坏出口隔离。schema 已在加载期拦住,此处是运行期兜底。
     return { ok: false, failure: { kind: "not_found", proxyId } };
   }
 
@@ -75,12 +57,7 @@ export function resolveProxy(config: Config, proxyId: string | null): ResolveRes
     }
     const bridge = pickBridge(config.clash);
     if (bridge === null) return { ok: false, failure: { kind: "no_bridge", proxyId } };
-    /*
-     * nodeName 必须随 target 一起传下去：dispatcher 的缓存身份要包含它，
-     * 否则同一内核上的所有桥接代理共用一个连接池，而 Clash 在建连时就
-     * 把连接绑定到当时选中的节点 —— 复用旧连接会让出口停留在旧节点，
-     * 刚执行的 select() 形同虚设（见 dispatcher.ts 的说明）。
-     */
+    // nodeName 必须随 target 下传,参与 dispatcher 缓存身份(见 dispatcher.ts)。
     return {
       ok: true,
       target: { mode: "bridge", proxy, bridge, nodeName: bridgeNodeName(proxy) },
@@ -106,12 +83,7 @@ export function describeResolveFailure(failure: ResolveFailure): string {
   }
 }
 
-/**
- * 桥接时该切到哪个 selector 节点。
- *
- * `clashNodeName` 优先于 `name`:从订阅导入时两者可能不同,
- * 而 selector 只认 Clash 自己的节点名。
- */
+/** 桥接时该切到的 selector 节点:`clashNodeName` 优先,订阅导入时可能与 `name` 不同。 */
 export function bridgeNodeName(proxy: Proxy): string {
   return proxy.clashNodeName !== undefined && proxy.clashNodeName !== ""
     ? proxy.clashNodeName

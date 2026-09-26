@@ -1,81 +1,43 @@
 import { z } from "zod";
 import { isIpAddress } from "./ip.ts";
+import { isControlCode } from "./redact.ts";
 
 /**
  * 配置 schema —— server ⇄ admin ⇄ CLI 的唯一契约。
- *
- * 全部对象都是 strict：手工编辑 config.json 是预期用法，拼错字段名必须立刻报错，而不是静默忽略后让人困惑「我明明改了」。
+ * 全部对象都是 strict：手工编辑 config.json 是预期用法，拼错字段名必须立刻报错。
  */
-
-/* ------------------------------------------------------------------ *
- * 基础片段
- * ------------------------------------------------------------------ */
 
 /** 网关监听端口：1024-65535，本工具不需要特权端口。 */
 export const PortSchema = z.number().int().min(1024).max(65535);
 
 /**
- * 内部标识符（Worker / 代理 / 订阅 / Clash 内核的 id）。
- *
- * 字符集必须收窄,因为**这些 id 会进 HTTP 头**:转发响应带
- * `x-zen-gateway-worker: <worker.id>`。若 id 可以是任意字符串,一个含
- * CRLF 的 id 会让 `Headers.set()` 抛 TypeError —— 而那个异常发生在
- * 上游**已经成功**之后,客户端拿到裸 500、上游响应体既不转发也不释放。
- *
- * id 是本机自动生成或用户手填的短标识,没有任何理由包含这些字符。
- */
-/**
- * 探测结果里表示**本机直连出口**的合成 id。
- *
- * `probeProxy(config, null)` 把结果挂在这个 id 下 —— 它不是一个代理 id，
- * `config.proxies` 里永远不会有这一行（落盘时要认出它并写进
- * `gateway.directEgressIp`，否则那次探测的结果无处可存）。
- *
- * **定义在 `shared/` 而不是 `core/proxy/egress.ts`**：`IdSchema` 要拒绝它
- * （见下），而 `egress.ts` 依赖本文件 —— 反向 import 会成环。
- * `dispatcher.ts` 也从这里取，不写字面量 `"__direct__"` —— 那会是第二份真相。
+ * 探测结果里表示本机直连出口的合成 id，落盘时写进 `gateway.directEgressIp`。
+ * 定义在 `shared/`：`IdSchema` 要拒绝它，而 `egress.ts` 依赖本文件，反向 import 会成环。
  */
 export const DIRECT_EGRESS_ID = "__direct__";
 
+/**
+ * 内部标识符（Worker / 代理 / 订阅 / Clash 内核的 id）。字符集收窄是因为 id 会进
+ * `x-zen-gateway-worker` 响应头：含 CRLF 会让 `Headers.set()` 在上游成功后抛错。
+ */
 export const IdSchema = z
   .string()
   .min(1)
   .max(128)
   .regex(/^[A-Za-z0-9._:\-]+$/, { message: "id 只允许字母、数字与 . _ : - " })
-  /*
-   * **拒绝合成 id**。`__direct__` 同时是「本机直连出口」的键，
-   * 于是一个叫这个名字的代理会与直连共用一个身份，两处失效：
-   *
-   * - `applyProbeResults` 把一次测量同时写进 `proxies[i].egressIp` 与
-   *   `gateway.directEgressIp`；
-   * - `POST /api/probe` 按 `proxyId` 建 Map，两条探测结果只剩一条 ——
-   *   另一次测量静默消失；
-   * - `DispatcherPool.get()` 也用它做缓存 id，两条出口共用一个 dispatcher
-   *   → **出口隔离失效**，而那是这个项目存在的理由。
-   *
-   * 概率低（`setup.mjs` 生成的 id 带 `controller_` 前缀），但代价与
-   * 「隔离误报」同级，而拒绝它只要一行。构造期抛错 —— 服务起不来远好于
-   * 静默共用出口。
-   */
+  // 拒绝合成 id：同名代理会与直连共用探测结果和 `DispatcherPool` 缓存，出口隔离失效。
   .refine((id) => id !== DIRECT_EGRESS_ID, {
     message: `"${DIRECT_EGRESS_ID}" 是保留 id（表示本机直连出口），不能用作代理或 Worker 的 id`,
   });
 
 /**
- * 凭证字符串（Zen API key、代理口令、Controller secret）。
- *
- * 不限定具体字符集（上游可能用任意可打印字符），但**必须排除控制字符**:
- * `apiKey` 会被拼进 `Authorization: Bearer <key>`,含 CRLF 的值会让 undici
- * 在 fetch 时抛错,而那个失败被 `classifyError` 归为 `transport` →
- * 客户端收到「502 上游不可达」,尽管请求根本没发出去。归因完全错位。
- *
- * 用逐码点检查而非正则:这段处理凭证,而源码里的字面控制字符在本项目
- * 已被工具改写过（见 redact.ts）。
+ * 凭证字符串（Zen API key、代理口令、Controller secret）必须排除控制字符：
+ * 含 CRLF 的 key 会让 undici 抛错，被误归为 `transport` 而报「上游不可达」。
+ * 逐码点检查而非正则，避免源码里出现字面控制字符（见 redact.ts）。
  */
 function hasControlChars(value: string): boolean {
   for (let i = 0; i < value.length; i += 1) {
-    const code = value.charCodeAt(i);
-    if (code <= 0x1f || code === 0x7f) return true;
+    if (isControlCode(value.charCodeAt(i))) return true;
   }
   return false;
 }
@@ -89,17 +51,12 @@ const HostSchema = z
   .string()
   .min(1)
   .max(255)
-  // 不得含空白或控制字符:host 会进 URL 与 SOCKS 握手,`a\nb` 这类值
-  // 在拼接场景下是注入原语。
+  // host 会进 URL 与 SOCKS 握手，空白或控制字符是注入原语。
   .regex(/^[A-Za-z0-9._:\-[\]%]+$/, { message: "host 只允许主机名/IP 字面量字符" });
 
 /**
- * 实测到的公网出口 IP。
- *
- * 必须是合法 IP 字面量:这个字段是**回显出口报告的分组键**。
- * 若允许任意字符串,一段被劫持的回显响应或一次手工误编辑就会变成一个
- * 独立的「回显出口」,于是每个垃圾值自成一组、看起来全都不同 —— 误报回显出口独立。
- * `null` 表示尚未探测出,与「确认不同」是两件事。
+ * 实测到的公网出口 IP。必须是合法 IP 字面量：它是回显出口报告的分组键，
+ * 垃圾值会自成一组而误报出口独立。
  */
 const EgressIpSchema = z
   .string()
@@ -107,11 +64,8 @@ const EgressIpSchema = z
   .refine((v) => isIpAddress(v), { message: "不是合法的 IPv4/IPv6 字面量" });
 
 /**
- * 上游 baseUrl。
- *
- * 只允许 http/https —— 换成 file:// 或别的 scheme 会把随请求发出的 Bearer key
- * 变成 SSRF 原语。同时拒绝 URL 里内嵌的 user:pass，那种形态会让凭证出现在
- * 任何打印 baseUrl 的地方（日志、诊断、错误信息）。
+ * 上游 baseUrl。只允许 http/https，避免 Bearer key 被发往其他 scheme；
+ * 拒绝内嵌 user:pass，否则凭证会出现在任何打印 baseUrl 的地方。
  */
 export const UpstreamUrlSchema = z
   .string()
@@ -133,19 +87,10 @@ export const UpstreamUrlSchema = z
     }
   });
 
-/**
- * Relay Token —— 客户端访问 /v1/* 所需。
- *
- * 首启自动生成，没有「空表示不校验」这种形态：默认空值等于
- * 本机任何进程都能白用网关，而这是个默认行为，不是用户的选择。
- */
+/** Relay Token，客户端访问 /v1/* 所需。首启自动生成，不支持「空表示不校验」。 */
 export const RelayTokenSchema = z.string().min(16).max(256).regex(/^[A-Za-z0-9_-]+$/, {
   message: "只允许 URL-safe 字符",
 });
-
-/* ------------------------------------------------------------------ *
- * 出口代理
- * ------------------------------------------------------------------ */
 
 /** 能直接做 undici/socks 出口的协议。其余协议只能经 Clash 桥接。 */
 export const DIRECT_PROTOCOLS = ["http", "https", "socks4", "socks5"] as const;
@@ -176,11 +121,7 @@ export const ProxySchema = z
     direct: z.boolean().default(false),
     /** 能否经本地 Clash 桥接出口。 */
     bridgeable: z.boolean().default(false),
-    /**
-     * 最近一次实测到的公网出口 IP。
-     * 出口隔离判定必须按这个字段分组，不能按 id —— 两个不同代理
-     * 可能 NAT 到同一个公网 IP，那种情况下隔离是假的。
-     */
+    /** 最近一次实测的公网出口 IP。隔离判定按它分组而非按 id：不同代理可能 NAT 到同一 IP。 */
     egressIp: EgressIpSchema.nullable().default(null),
   })
   .refine((p) => p.direct || p.bridgeable, {
@@ -188,17 +129,10 @@ export const ProxySchema = z
   });
 export type Proxy = z.infer<typeof ProxySchema>;
 
-/* ------------------------------------------------------------------ *
- * 订阅
- * ------------------------------------------------------------------ */
-
 export const SubscriptionSchema = z.strictObject({
   id: IdSchema,
   name: z.string().min(1).max(200),
-  /**
-   * 订阅 URL 通常把 token 带在 query 或 path 里，本身即凭证。
-   * 打印前必须过 redactUrl()。
-   */
+  /** 订阅 URL 本身即凭证，打印前必须过 redactUrl()。 */
   url: UpstreamUrlSchema,
   enabled: z.boolean().default(true),
   lastFetchedAt: z.string().max(64).nullable().default(null),
@@ -208,10 +142,6 @@ export const SubscriptionSchema = z.strictObject({
   lastFormat: z.string().max(64).nullable().default(null),
 });
 export type Subscription = z.infer<typeof SubscriptionSchema>;
-
-/* ------------------------------------------------------------------ *
- * Clash 桥接
- * ------------------------------------------------------------------ */
 
 export const ClashBridgeSchema = z.strictObject({
   id: IdSchema,
@@ -236,10 +166,6 @@ export const ClashConfigSchema = z.strictObject({
   bridges: z.array(ClashBridgeSchema).max(32).default([]),
 });
 export type ClashConfig = z.infer<typeof ClashConfigSchema>;
-
-/* ------------------------------------------------------------------ *
- * Worker
- * ------------------------------------------------------------------ */
 
 export const WorkerKindSchema = z.enum(["anonymous", "authenticated"]);
 export type WorkerKind = z.infer<typeof WorkerKindSchema>;
@@ -269,10 +195,6 @@ export const WorkerSchema = z
   );
 export type Worker = z.infer<typeof WorkerSchema>;
 
-/* ------------------------------------------------------------------ *
- * 模型规则（配置驱动，不改代码就能跟上 Zen 目录变化）
- * ------------------------------------------------------------------ */
-
 export const ProtocolIdSchema = z.enum(["chat", "responses", "messages"]);
 export type ProtocolId = z.infer<typeof ProtocolIdSchema>;
 
@@ -280,69 +202,26 @@ export const ModelRulesSchema = z.strictObject({
   /** 免费模型的 id 后缀约定。 */
   freeSuffix: z.string().min(1).max(32).default("-free"),
   /**
-   * 无 `-free` 后缀但实际零费率的模型。
-   *
-   * 这是**出厂默认值**，不是代码里的硬编码判定 —— 用户可改，目录的
-   * 定时刷新会按真实目录纠正它。把等价的名单写死在代码常量里
-   * （`SPECIAL_FREE_MODEL_IDS`），目录一变就必须改代码发版。
-   *
-   * 2026-09-22 以**上游权威目录**核实：`GET https://opencode.ai/zen/v1/models`
-   * （免鉴权）返回 **76 个在架模型**，其中 9 个带 `-free` 后缀且全部真免费，
-   * 外加 `big-pickle` 一个零费率无后缀模型 —— 共 10 个免费模型。
-   * 所以这里**只需一条例外**。
-   *
-   * 不要用 models.dev 的 `opencode` provider 做这份名单：它当日报 105 个模型 /
-   * 32 个零费率，与在架目录比对后发现 **23 个零费率项已下架**（`glm-5-free`、
-   * `kimi-k2.5-free`、`minimax-m3-free`、`grok-code` …）。以 `grok-code` 为例 ——
-   * 它在 Zen 自己的目录和定价页里都不存在，把它放进默认值与把某个模型 id 硬编码进代码是同一类错误，只是来源换成了第三方聚合站。
-   *
-   * 注意 `jev-1.13`（无后缀）**不免费**：定价页是输入 $0.042 / 输出免费，
-   * 只有 `jev-1.13-free` 才免费。它不能进这份名单。
+   * 无 `-free` 后缀但实际零费率的模型。这是可改的出厂默认值，不是代码硬编码判定。
+   * 名单以 Zen 在架目录为准，不用 models.dev 等第三方聚合（含已下架项）。
+   * `jev-1.13`（无后缀）不免费，不能进这份名单。
    */
   extraFreeIds: z.array(z.string().min(1).max(128)).max(256).default(["big-pickle"]),
   /**
-   * 默认声明支持的协议面。
-   *
-   * ## 语义已定：**后台展示用的提示，不是放行闸门**
-   *
-   * 依据是已有的测量：
-   *
-   * - **上游不按模型区分面** —— 实测三个面（`chat`/`responses`/`messages`）
-   *   对同一个免费模型都通。所以"这个模型支持哪些面"在上游那边不存在，
-   *   拿它当闸门缺乏依据。
-   * - **接成闸门会立刻打坏一个能用的功能**：默认值是 `["chat","responses"]`，
-   *   按它放行则默认配置下**所有**模型的 `/v1/messages` 请求都被拒 ——
-   *   而那个面的网关路径（鉴权、判定、透传）已有协议级测试。
-   *
-   * 所以它的唯一用途是 Models 页显示"本网关声明支持哪些面"，
-   * 由 `surfacesFor()` 读取。**流式能力那种真正的放行判定在
-   * `ProtocolSurface.streaming` 上**（那是协议面接口的能力位，
-   * 由 `relay.ts` 第 4 步统一执行）—— 两者不要混。
-   *
-   * 要真做成 per-model 闸门的话，前提是先有证据表明上游**确实**按模型区分面，
-   * 而那需要一个能区分「上游拒绝」与「网关拒绝」的探测（`discover:upstream`
-   * 那类脚本）。在那之前，把它接成闸门就是拿一个编出来的约束去拒真实请求。
+   * 默认声明支持的协议面：仅供 Models 页展示（经 `surfacesFor()`），不是放行闸门。
+   * 未观察到上游按模型区分协议面，接成闸门会在默认配置下拒掉所有 `/v1/messages`。
+   * 真正的流式放行判定在 `ProtocolSurface.streaming`，由 `relay.ts` 第 4 步执行。
    */
   defaultSurfaces: z.array(ProtocolIdSchema).min(1).default(["chat", "responses"]),
-  /** 按模型覆写协议面。同样**只作展示** —— 见 `defaultSurfaces`。 */
+  /** 按模型覆写协议面，同样只作展示。 */
   surfaceOverrides: z
     .record(z.string().min(1).max(128), z.array(ProtocolIdSchema))
-    // 与其他集合一样设上限:配置文件是手工可编辑的,无界 record 会让
-    // 一次误粘贴变成启动期的内存与校验开销。目录总量才百余个模型。
+    // 与其他集合一样设上限，防止手工误粘贴造成启动期开销。
     .refine((r) => Object.keys(r).length <= 512, { message: "最多 512 条覆写" })
     .default({}),
   /**
-   * 在架目录缓存的新鲜期。
-   *
-   * 默认 30 分钟。模型目录以**天**为单位变化（实测 09-22 是 76 条、09-23 是
-   * 79 条），所以没必要更短；而更长会让用户刚补进 `extraFreeIds` 的新模型
-   * 等太久才生效。
-   *
-   * 这是**新鲜期**而不是硬过期：过期只触发一次后台刷新，拉不到就继续用旧的。
-   * 目录永不因为"太旧"而失效 —— 一份三天前的目录远好于"网关拒绝一切"。
-   * 见 `core/models/catalog.ts`。
-   *
-   * 下限 1 分钟：更短会让每个请求都在刷目录，而那是转发链路上的额外网络依赖。
+   * 在架目录缓存的新鲜期（非硬过期）：过期只触发后台刷新，拉不到继续用旧目录，
+   * 见 `core/models/catalog.ts`。下限 1 分钟，避免转发链路频繁刷目录。
    */
   catalogTtlMs: z
     .number()
@@ -351,31 +230,12 @@ export const ModelRulesSchema = z.strictObject({
     .max(24 * 60 * 60 * 1000)
     .default(30 * 60 * 1000),
   /**
-   * 免费判定是否与在架目录求交集。
-   *
-   * 默认开。关掉它等于只看后缀／名单（放得偏宽：已下架的 `xxx-free`
-   * 会被放行，然后由上游返回 400）。
-   *
-   * ## 它的作用范围只有一条：**目录存在时是否求交集**
-   *
-   * 它**不是**离线开关。「交集依赖能联网拉到目录，离线环境拉不到，所以用户
-   * 应当能关掉它，免得困在『网关不放行任何模型』里」—— **这个前提不成立**：`judgeFree` 在目录缺失时**已经放行**了
-   * （返回 `*_unverified`，见 `core/models/free.ts` 的「目录缺失时放行」那节）。
-   *
-   * 实测两个取值在离线场景下对转发**完全无差别**（都放行），对 `/v1/models`
-   * 也无差别（都 502）。所以离线时关掉它，什么都不会改变 ——
-   * 而用户会以为自己配错了别的东西。
-   *
-   * 真实的用途是：本地假上游或镜像的目录与真实上游不一致时，交集会误拒 ——
-   * 那种情况下关掉它。
+   * 目录存在时免费判定是否与在架目录求交集。不是离线开关：目录缺失时
+   * `judgeFree` 已放行（`*_unverified`）。用于本地假上游或镜像目录与真实上游不一致时关闭。
    */
   enforceCatalog: z.boolean().default(true),
 });
 export type ModelRules = z.infer<typeof ModelRulesSchema>;
-
-/* ------------------------------------------------------------------ *
- * 调度
- * ------------------------------------------------------------------ */
 
 export const RoutingStrategySchema = z.enum(["anonymous_first", "authenticated_first", "mixed"]);
 export type RoutingStrategy = z.infer<typeof RoutingStrategySchema>;
@@ -383,15 +243,11 @@ export type RoutingStrategy = z.infer<typeof RoutingStrategySchema>;
 export const CooldownConfigSchema = z.strictObject({
   /** 限流：长冷却，但 Retry-After 优先。 */
   rateLimitMs: z.number().int().min(1_000).max(3_600_000).default(900_000),
-  /**
-   * 鉴权失败：短退避。
-   * 故意比限流短得多 —— 一个配错的 key 应该反复暴露，
-   * 而不是安静消失 15 分钟让人以为是别的问题。
-   */
+  /** 鉴权失败：短退避，让配错的 key 反复暴露而不是安静消失。 */
   authFailMs: z.number().int().min(1_000).max(600_000).default(60_000),
   /**
-   * 上游 403:很短的冷却。上游免费闸门按请求形态返回 403,且先于密钥校验,
-   * 长冷却会把请求形态问题放大成 Worker 不可用;保留几秒只为挡住连续打同一个 Worker。
+   * 上游 403：很短的冷却。免费闸门按请求形态返回 403 且先于密钥校验，
+   * 长冷却会把请求形态问题放大成 Worker 不可用。
    */
   forbiddenMs: z.number().int().min(1_000).max(600_000).default(5_000),
   /** 传输失败：指数退避起点与上限。 */
@@ -402,23 +258,12 @@ export type CooldownConfig = z.infer<typeof CooldownConfigSchema>;
 
 export const RoutingConfigSchema = z.strictObject({
   strategy: RoutingStrategySchema.default("anonymous_first"),
-  /*
-   * 用 prefault 而不是 default。
-   *
-   * zod 4 的 `.default({})` 把字面量 `{}` 原样插入，**不会**再跑内层 schema
-   * 的默认值 —— 于是 cooldown 的四个字段全是 undefined，之后任何读它们的
-   * 代码都会静默拿到 undefined 而不是配置里写的冷却时长。
-   * `.prefault({})` 会把 `{}` 过一遍 schema，内层默认值才真的生效。
-   */
+  // prefault 而非 default：zod 4 的 `.default({})` 不执行内层默认值。
   cooldown: CooldownConfigSchema.prefault({}),
   /** 会话亲和的存活时长。 */
   affinityTtlMs: z.number().int().min(60_000).max(86_400_000).default(3_600_000),
 });
 export type RoutingConfig = z.infer<typeof RoutingConfigSchema>;
-
-/* ------------------------------------------------------------------ *
- * 网关
- * ------------------------------------------------------------------ */
 
 export const GatewaySchema = z.strictObject({
   port: PortSchema.default(9876),
@@ -426,36 +271,17 @@ export const GatewaySchema = z.strictObject({
   relayToken: RelayTokenSchema,
   /** 单次上游请求等待响应头的上限。 */
   headersTimeoutMs: z.number().int().min(1_000).max(600_000).default(60_000),
-  /**
-   * 响应体字节之间的空闲上限。
-   * 与 headersTimeout 分开是必须的：用单一总时长会把一条正常的长 SSE
-   * 到点掐断（整个 fetch 被 abort，响应体一起没）。
-   */
+  /** 响应体字节之间的空闲上限。与 headersTimeout 分开，单一总时长会掐断正常的长 SSE。 */
   bodyTimeoutMs: z.number().int().min(1_000).max(3_600_000).default(300_000),
   /** 一条客户端请求最多尝试几个 Worker。 */
   maxAttempts: z.number().int().min(1).max(10).default(3),
   /**
-   * **本机直连**出口最近一次实测到的公网 IP。
-   *
-   * 为什么它要有个地方存：`proxyId: null` 的 Worker 走本机网络出口，
-   * 而**它与某个代理 NAT 到同一个公网 IP 恰好是「看起来隔离其实没隔离」
-   * 的那种形态** —— 所以它必须参与隔离分组。
-   *
-   * 探测会真的跑（结果映射到合成 id `__direct__`），而 `config.proxies`
-   * 里没有那一行 —— 没有这个字段，测量就会被丢弃：每次批测白发一次网络请求，
-   * 而直连 Worker 在隔离报告里永远是「未探测」。
-   *
-   * 放在 `gateway` 而不是造一条假的 `Proxy`：本机直连**不是**一个代理
-   * （没有 host/port/协议可言），硬塞成 Proxy 会让 `resolveProxy`、
-   * dispatcher 缓存、UI 列表都要为这个特例开分支。
+   * 本机直连出口最近一次实测的公网 IP（探测 id `__direct__`）。直连 Worker 也必须
+   * 参与隔离分组。放在 `gateway` 而非伪造一条 `Proxy`，免得 `resolveProxy` 等处开特例。
    */
   directEgressIp: EgressIpSchema.nullable().default(null),
 });
 export type Gateway = z.infer<typeof GatewaySchema>;
-
-/* ------------------------------------------------------------------ *
- * 顶层
- * ------------------------------------------------------------------ */
 
 /** 当前配置格式版本。加字段不必升版本；改语义/改形状才升，并配迁移。 */
 export const CONFIG_VERSION = 1;
@@ -472,27 +298,13 @@ export const ConfigSchema = z
     subscriptions: z.array(SubscriptionSchema).max(64).default([]),
     clash: ClashConfigSchema.prefault({}),
   })
-  /*
-   * 引用完整性。
-   *
-   * 这不是洁癖 —— 一个指向已删除代理的 Worker 会静默退回本机直连出口，
-   * 于是它和其他 Worker 共用同一个公网 IP，而出口隔离正是本项目存在的理由。
-   * 这种失败必须在加载配置时就暴露，不能等到 Zen 因同 IP 多账号而封号。
-   */
+  // 引用完整性：指向已删除代理的 Worker 会静默退回直连、破坏出口隔离，必须加载时暴露。
   .superRefine((cfg, ctx) => {
     const proxyIds = new Set(cfg.proxies.map((p) => p.id));
     const subIds = new Set(cfg.subscriptions.map((s) => s.id));
     const bridgeIds = new Set(cfg.clash.bridges.map((b) => b.id));
 
-    /*
-     * 校验消息**不得插值任何用户数据**。
-     *
-     * `issue.path` 已经精确指到出错的元素（如 `workers.0.proxyId`），
-     * 再把值拼进消息只带来一个后果：config.ts 的 formatIssues 会把它
-     * 放进 ConfigError.message，而那条消息会进日志、终端、以及用户
-     * 粘贴的报错。代理 name 来自订阅导入 —— 那正是「测试不得用真实
-     * 订阅数据」所要保护的同一类数据。
-     */
+    // 校验消息不插值用户数据：`issue.path` 已定位元素，消息会进 ConfigError 与日志。
     const dup = (label: string, ids: string[], path: string) => {
       const seen = new Set<string>();
       ids.forEach((id, i) => {

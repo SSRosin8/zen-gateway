@@ -1,0 +1,24 @@
+name: 功能建议
+description: 提出新能力或改进现有行为
+labels: [enhancement]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        本项目是本机单用户工具，不做多用户、公共服务或通用 provider 平台。
+        提建议前请先读 `docs/requirements.md` 的功能边界。
+  - type: textarea
+    id: problem
+    attributes:
+      label: 要解决的问题
+      description: 现在做不到什么，或哪里不方便。
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: 建议的做法
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: 考虑过的替代方案

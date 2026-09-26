@@ -27,7 +27,6 @@ import {
   clashView,
   displayFingerprint,
   isolationEntries,
-  isUsable,
   modelViews,
   poolCounts,
   proxySummary,
@@ -37,29 +36,16 @@ import {
   type RuntimeWorkerState,
 } from "../admin/project.ts";
 import type { BatchProbeRunner } from "../admin/batchRunner.ts";
+import { usedProxyIds } from "../../core/routing/workerPool.ts";
 import { fetchSubscription, type FetchDeps } from "../../core/proxy/subscription/fetch.ts";
 import { importSubscriptionNodes } from "../../core/proxy/subscription/import.ts";
 
 /**
- * 管理 API。
- *
- * ## 三条硬规则
- *
- * 1. **凭证绝不出进程。** 全部响应经 `admin/project.ts` 投影，那里是唯一
- *    读凭证字段的地方，且只输出 `SecretPresence`（有没有 + 8 位指纹）。
- * 2. **仅回环。** `app.ts` 给 `/api/*` 挂了 `loopbackOnly`，它只读内核报告的
- *    TCP 对端地址、绝不采信 `X-Forwarded-For`。本文件不再自己判断来源 ——
- *    两份判断必然分叉（纪律 #4）。
- * 3. **写入必须原子且可回退。** 复用 `saveConfig`（临时文件 → fsync →
- *    rename，0600 一出生就有），并在写之前把合并结果全量过一遍 `ConfigSchema`。
- *
- * ## 管理面的 body 上限
- *
- * 安全约束里有一条「管理 JSON 请求体有上限；relay 透传对多模态保持
- * 无界」。管理侧每个读 body 的端点都必须过闸门，否则这条约束会静默变成「不成立」。
- *
- * 上限 1 MiB：一份含 512 个 Worker 的配置补丁实测不到 100 KB，而转发面的
- * 64 MiB 是为多模态留的，管理面没有那个需求。
+ * 管理 API。三条硬规则：
+ * 1. 凭证绝不出进程：响应全部经 `admin/project.ts` 投影，只输出 `SecretPresence`。
+ * 2. 仅回环：由 `app.ts` 挂的 `loopbackOnly` 判定，本文件不另判断来源（纪律 #4）。
+ * 3. 写入原子且可回退：合并结果先全量过 `ConfigSchema`，再经 `saveConfig` 原子写。
+ * 每个读 body 的端点都必须过 1 MiB 闸门；转发面的 64 MiB 是为多模态留的。
  */
 
 /** 管理请求体上限。与 relay 的 64 MiB 刻意不同 —— 见文件头。 */
@@ -79,13 +65,8 @@ export type AdminStatsSource = {
 export type AdminDeps = {
   readonly configOf: () => Config;
   /**
-   * 落盘并**让进程内所有读者立刻看到新配置**。
-   *
-   * 由 `index.ts` 提供 —— 它是唯一持有那个可变引用的地方。`configOf()` 是函数，
-   * 但没有这个入口就没有任何东西会改它指向的对象，它返回的恒是启动时那份。
-   *
-   * **必须换一个新对象**而不是原地改：`Scheduler.#syncedFrom` 用引用比较
-   * 判断「配置换了没有」，原地改会让 Worker 池不重新 sync。
+   * 落盘并让进程内所有读者立刻看到新配置；由持有可变引用的 `index.ts` 提供。
+   * 必须换新对象：`Scheduler.#syncedFrom` 用引用比较判断配置是否变化。
    */
   readonly applyConfig: (next: Config, expected?: Config) => Promise<void>;
   /** 实际监听端口（含 ZG_PORT 覆盖），而不是配置文件里的默认值。 */
@@ -94,27 +75,15 @@ export type AdminDeps = {
   readonly runtimeWorkers: () => readonly RuntimeWorkerState[];
   readonly catalog: ModelCatalog;
   /**
-   * 出口服务。**必须与转发面共用同一个** —— 见 `EgressService.upstreamDeps`：
-   * selector 的 `now` 是进程外全局状态，两套锁会让探测量到的出口与转发实际
-   * 用的那个不一致，而隔离报告正是按实测 IP 分组。不传则 `/probe` 不可用。
+   * 出口服务，必须与转发面共用同一个（见 `EgressService.upstreamDeps`），
+   * 否则探测量到的出口与转发实际用的不一致。不传则 `/probe` 不可用。
    */
   readonly egress?: EgressService;
-  /**
-   * 批量探测的执行器。不传则那两个端点报不可用。
-   *
-   * 它需要一个打开的数据库（进度要持久化），所以与 `stats` 同理由
-   * **不在装配层兜底造一个**。
-   */
+  /** 批量探测执行器；需要打开的数据库，不在装配层兜底造。不传则端点报不可用。 */
   readonly batch?: BatchProbeRunner;
   readonly health: () => Overview["health"];
   readonly stats?: AdminStatsSource;
-  /**
-   * 订阅拉取的注入点。测试用它喂一个假 fetch。
-   *
-   * 生产不传 —— 走 `globalThis.fetch`。**刻意不经 dispatcher 池**:
-   * 订阅是从机场拉配置，不是发上游请求，不该占用出口代理，
-   * 也不该因为某个 Worker 的出口坏了就拉不到订阅。
-   */
+  /** 订阅拉取注入点。生产走 `globalThis.fetch`，刻意不经出口 dispatcher 池。 */
   readonly subscriptionFetch?: FetchDeps;
   readonly log?: (message: string) => void;
 };
@@ -127,40 +96,20 @@ function adminError(c: Context, type: AdminErrorType, message: string) {
     not_found: 404,
     internal_error: 500,
   }[type] as 400 | 404 | 422 | 500;
-  /*
-   * 过一遍 `AdminErrorSchema` 而不是手工拼装。
-   *
-   * 手工拼装的话，schema 描述的形状与这里手写的对象各存一份，
-   * 于是「改了枚举而忘了改 handler」不会有任何症状。
-   * 经它构造则是构造期抛错，与其余管理端点一致。
-   */
+  // 经 `AdminErrorSchema` 构造，避免 schema 与手写形状各存一份。
   return c.json(AdminErrorSchema.parse({ error: { type, message } }), status);
 }
 
 export function createAdminRoutes(deps: AdminDeps): Hono {
   const app = new Hono();
 
-  /**
-   * 正在刷新的订阅 id —— 进程内互斥，见 `/subscriptions/:id/refresh`。
-   *
-   * 按 id 而不是全局：两个不同订阅并发刷新是安全的（它们只动自己的节点），
-   * 而全局锁会让"刷新全部"变成串行，那没必要。
-   */
+  /** 正在刷新的订阅 id，按 id 进程内互斥：不同订阅并发刷新是安全的。 */
   const refreshing = new Set<string>();
 
-  /**
-   * 探针。保留 —— `assertEveryRouteGuarded` 的测试依赖它，
-   * 而且它是「管理面仅回环」这条约束最小的验证目标。
-   */
+  /** 探针；`assertEveryRouteGuarded` 的测试依赖它。 */
   app.get("/ping", (c) => c.json({ ok: true }));
 
-  /**
-   * Overview —— 一个请求给完这一页要的全部东西。
-   *
-   * 刻意做成聚合端点而不是六个小端点：这一页每个数字都来自**同一时刻**的
-   * 状态，分六个请求拿会让「3 个 Worker / 2 个就绪 / 隔离成立」这三句话
-   * 描述三个不同瞬间的系统 —— 而它们会被当成一句话读。
-   */
+  /** Overview 聚合端点：页面上每个数字必须来自同一时刻的状态。 */
   app.get("/overview", (c) => {
     const config = deps.configOf();
     const views = workerViews(config, deps.runtimeWorkers());
@@ -168,12 +117,8 @@ export function createAdminRoutes(deps: AdminDeps): Hono {
     const report = buildIsolationReport(isolationEntries(views));
 
     /*
-     * 目录**只读缓存,绝不发请求**。
-     *
-     * 与转发路径同一条规则:管理面刷新一次页面不该触发一次上游查询 ——
-     * 那会让打开后台变成一个有网络依赖的动作,而目录本来就有后台刷新
-     * (`refreshIfStale`)在维护。拉不到时 `freeCount` 为 **null 而不是 0**:
-     * 「还没拿到目录」与「一个免费模型都没有」是两件事,后者才需要排查。
+     * 目录只读缓存，绝不发请求。拉不到时 `freeCount` 为 null 而不是 0：
+     * 「还没拿到目录」与「一个免费模型都没有」是两件事。
      */
     const identity = catalogIdentityOf(config);
     const snapshot = deps.catalog.cached(slotOf(identity));
@@ -203,32 +148,17 @@ export function createAdminRoutes(deps: AdminDeps): Hono {
       proxies: proxySummary(config.proxies),
     };
 
-    /*
-     * 走一遍 schema 再返回。
-     *
-     * 契约变了这里立刻失败,而不是让 admin 在浏览器里 parse 失败 ——
-     * 与 `/health` 同一个做法。代价是一次序列化校验,对一个本机管理端点可忽略。
-     */
+    // 过 schema 再返回：契约变化在服务端立刻失败，而不是在浏览器里 parse 失败。
     return c.json(OverviewSchema.parse(body));
   });
 
   /**
-   * 统计。
-   *
-   * `days` 查询参数默认 30:`requestCounts` 的 `COUNT(DISTINCT request_id)`
-   * 是**唯一随行数线性变慢**的聚合(实测 100k 行 12.4ms、1M 行约 124ms),
-   * 而它是**同步**调用 —— 不带 sinceDay 会阻塞事件循环那么久。
-   * 所以管理 API 总是传它。
+   * 统计。`days` 默认 30：`requestCounts` 的 `COUNT(DISTINCT request_id)` 随行数线性变慢，
+   * 且同步调用会阻塞事件循环。
    */
   app.get("/stats", (c) => {
     if (deps.stats === undefined) {
-      /*
-       * 统计库不可用时**不假装有数据**。
-       *
-       * `index.ts` 刻意让库打不开也不阻止启动(转发是正确性,统计是可用性改善),
-       * 所以这条路径真实可达。返回全 0 会让「库坏了」看起来像「没人用」——
-       * 那正是 `storeWriteFailures` 存在要防的同一种误导。
-       */
+      // 统计库不可用时不假装有数据：返回全 0 会让「库坏了」看起来像「没人用」。
       return adminError(c, "internal_error", "统计库不可用,本次未加载统计(转发不受影响)");
     }
 
@@ -255,22 +185,13 @@ export function createAdminRoutes(deps: AdminDeps): Hono {
   });
 
   /**
-   * 改配置。
-   *
-   * 整个流程:读体(有上限)→ 过 patch schema → 纯函数合并
-   * (含全量 `ConfigSchema` 与引用完整性)→ 原子写 → 换进程内引用。
-   *
-   * **任何一步失败都不落盘**,而且失败类型区分开 —— 「id 打错了」(404)与
-   * 「合并后配置非法」(422)与「磁盘写不动」(500)的下一步完全不同。
+   * 改配置：有界读体 → patch schema → 纯函数合并（全量 `ConfigSchema` 与引用完整性）→ 原子写 → 换引用。
+   * 任何一步失败都不落盘，且 404/422/500 分开报。
    */
   app.patch("/config", async (c) => {
     let raw: Uint8Array;
     try {
-      /*
-       * **有界读取**。不能「查 content-length + 读完再量」：
-       * `transfer-encoding: chunked` 根本不给那个头，于是整条检查被绕过。
-       * 所以边读边数，理由见 `server/boundedBody.ts`。
-       */
+      // 有界读取：chunked 请求没有 content-length，只能边读边数。见 `boundedBody.ts`。
       raw = await readBoundedBody(c.req.raw, MAX_ADMIN_BODY_BYTES);
     } catch (err) {
       if (err instanceof BodyTooLargeError) {
@@ -305,14 +226,7 @@ export function createAdminRoutes(deps: AdminDeps): Hono {
       return adminError(c, result.failure.kind, result.failure.message);
     }
 
-    /*
-     * 没有实际变化就不写盘。
-     *
-     * 一个空 patch(或把字段改成它已有的值)不该产生一次磁盘写 + 一次
-     * Worker 池 re-sync —— 后者会让所有 Worker 的冷却状态走一遍
-     * 「保留同 id 状态」的路径,而那条路径在 apiKey 相同时才保留。
-     * 无谓地跑它没有收益,只增加一次出错机会。
-     */
+    // 没有实际变化就不写盘，也不触发一次无谓的 Worker 池 re-sync。
     if (!result.changed) {
       return c.json({ ok: true, changed: false });
     }
@@ -320,13 +234,7 @@ export function createAdminRoutes(deps: AdminDeps): Hono {
     try {
       await deps.applyConfig(result.config, deps.configOf());
     } catch (err) {
-      /*
-       * 写盘失败 —— 进程内的配置**也不能换**。
-       *
-       * 换了的话内存与磁盘不一致:界面显示改动生效了,而下次重启会退回旧值。
-       * 「一半生效」比「没生效」更难查,所以 `applyConfig` 的实现必须
-       * 先写盘成功再换引用(见 `index.ts`)。
-       */
+      // 写盘失败时进程内配置也不换，`applyConfig` 先写盘成功再换引用（见 `index.ts`）。
       deps.log?.(`配置写入失败: ${safeErrorMessage(err)}`);
       return adminError(c, "write_failed", `配置写入失败:${safeErrorMessage(err)}`);
     }
@@ -335,30 +243,9 @@ export function createAdminRoutes(deps: AdminDeps): Hono {
   });
 
   /**
-   * 探测出口并**把实测 IP 写回配置**。
-   *
-   * ## 为什么需要这个端点
-   *
-   * 没有它，`isolation` 恒为
-   * `{ groups: [], unknownWorkerIds: [全部], isolated: false }` —— 出口隔离视图
-   * **结构上永远无法成立**。两个原因叠在一起：
-   *
-   * 1. 只探测不写回的话，`probe_results` 有记录，但 `config.proxies[].egressIp`
-   *    从未被写过 —— 把实测 IP 并回 `Proxy` 的只有 `applyProbeResult()`。
-   * 2. `doctor.mjs` **自建** `EgressService` 且只读配置
-   *    —— 它的实测结果留在自己进程里，服务这边看不到。
-   *
-   * 于是「按实测 `egressIp` 分组」这条核心要求(出口隔离正是本项目存在的
-   * 理由)需要服务侧的数据来源:探测走**服务自己的** `EgressService`
-   * (与转发共用同一个 dispatcher 池与 selector 锁 —— 那是不变量 #7 的延伸,
-   * 否则量到的出口不是转发实际用的那个),结果经 `applyProbeResult` 并回配置并落盘。
-   *
-   * ## 同步返回,不做长任务
-   *
-   * 批量探测是个带状态机的长任务(`idle|screening|running|paused|...`),
-   * 见 `/batch-probe`,服务于代理池页。这里是同步版本:只探在用的出口,
-   * 个位数节点约 6 秒 —— 一个同步请求可以接受,而 Overview 需要
-   * 「点一下就能看到隔离报告」这个最小能力。几十个节点的批测仍走长任务。
+   * 探测在用的出口并把实测 IP 写回配置：隔离报告按 `config.proxies[].egressIp` 分组，
+   * 只探测不写回则隔离永远无法成立。探测走服务自己的 `EgressService`（不变量 #7 的延伸）。
+   * 同步返回，只探在用出口；几十个节点的批测走 `/batch-probe`。
    */
   app.post("/probe", async (c) => {
     if (deps.egress === undefined) {
@@ -366,14 +253,7 @@ export function createAdminRoutes(deps: AdminDeps): Hono {
     }
 
     const config = deps.configOf();
-    /*
-     * 只探**在用的**出口 —— 按 Worker 实际绑定去重。
-     *
-     * 探一个没人用的代理没有诊断价值,而每次探测都要真发网络请求
-     * (桥接还要切 selector、串行化)。`null` 也在里面:本机直连也是一个出口,
-     * 而它与某个代理 NAT 到同一个 IP 恰好是「看起来隔离其实没隔离」的形态。
-     */
-    const proxyIds = [...new Set(config.workers.filter(isUsable).map((w) => w.proxyId))];
+    const proxyIds = usedProxyIds(config);
     if (proxyIds.length === 0) {
       return adminError(c, "invalid_config", "没有可用的 Worker,无从探测出口");
     }
@@ -387,27 +267,11 @@ export function createAdminRoutes(deps: AdminDeps): Hono {
     }
 
     /*
-     * 把成功的实测 IP 并回配置。
-     *
-     * `applyProbeResult` 对失败**不清空**已有 IP —— 一次网络抖动不该让
-     * 「这个代理的出口是什么」这条已知事实消失,否则隔离视图会在每次抖动时
-     * 把已确认隔离的节点退回「未知」。那条规则在纯函数里,这里只负责接线。
-     *
-     * ## 合并前必须**重读**配置
-     *
-     * `probeAll` 实测约 6 秒，那几秒足够用户在 Worker 页改个名并保存。
-     * 若用探测**开始前**那份快照，探测返回后写回时会把用户的
-     * 改动凭空覆盖掉 —— 响应 200、`changed: true`，没有任何症状。
-     *
-     * 同一文件的订阅刷新（`POST /subscriptions/:id/refresh`）与
-     * `batchRunner.#persist` 也防了这个；三处同类路径必须一致（纪律 #4）。
+     * 合并前必须重读配置：探测耗时数秒，用开始前的快照写回会覆盖用户期间的改动。
+     * 订阅刷新与 `batchRunner.#persist` 同样防了这个，三处须一致（纪律 #4）。
+     * 失败不清空已有 IP；`applyProbeResults` 同时处理直连（`__direct__` → `gateway.directEgressIp`）。
      */
     const byProxy = new Map(results.map((r) => [r.proxyId, r.outcome] as const));
-    /*
-     * 走 `applyProbeResults` 而不是自己 map 一遍 proxies —— 它同时处理
-     * **本机直连**那条（合成 id `__direct__` → `gateway.directEgressIp`）。
-     * 只并 proxies 的话，直连的测量会被静默丢弃。
-     */
     const fresh = deps.configOf();
     const merged = applyProbeResults(fresh, byProxy);
     const changed = merged.changed;
@@ -421,20 +285,7 @@ export function createAdminRoutes(deps: AdminDeps): Hono {
       }
     }
 
-    /*
-     * 返回**每个出口的结果**，失败的也要给出原因。
-     *
-     * 只回「成功几个」会让「为什么那个节点探不出来」无从查证，而那恰好是
-     * 用户最需要的信息（例如混合端口配错时全部桥接代理传输失败，
-     * 而控制面是通的 —— 只有逐条的 failureKind 能指出方向）。
-     */
-    /*
-     * 过一遍 schema —— 与其余端点一致。
-     *
-     * 过 schema 挡的不是今天的泄漏
-     * （今天没有），而是"将来新增一个字段时忘了想它该不该出去" ——
-     * 那种漏洞没有任何症状，响应照常返回，只是多带了一样东西。
-     */
+    // 返回每个出口的结果（含失败原因）；过 schema 防将来新增字段被无意带出。
     return c.json(
       ProbeReportSchema.parse({
       ok: true,
@@ -450,24 +301,9 @@ export function createAdminRoutes(deps: AdminDeps): Hono {
   });
 
   /**
-   * 刷新一个订阅。
-   *
-   * 三层各司其职：`fetchSubscription` 负责多 UA 协商（网络），
-   * `parseSubscription` 负责认格式（纯函数），`importSubscriptionNodes`
-   * 负责并进配置（纯函数）。这里只接线，并把结果写盘。
-   *
-   * ## 单飞：同一个订阅不允许两个刷新并发
-   *
-   * 与批量探测同一个理由，但成因不同：这里两个并发刷新会**互相覆盖**
-   * 配置（各自读一份旧 config、各自算合并、后写的赢），于是先写的那批
-   * 新增节点凭空消失。用一个进程内的 id 集合做互斥 —— 与 `BatchProbeRunner`
-   * 的 `#running` 同构。
-   *
-   * ## 失败也要写回 `lastErrorKind`
-   *
-   * 否则用户点一次"刷新"看到一个报错弹窗，刷新页面后订阅行看起来一切正常
-   * —— 而它其实已经连续失败三天了。`lastFetchedAt` 只在成功时更新
-   * （它的语义是"最后一次成功拉到"），失败只记 kind。
+   * 刷新一个订阅：`fetchSubscription`（多 UA 协商）→ `parseSubscription` → `importSubscriptionNodes`，这里只接线并写盘。
+   * 同一订阅单飞：并发刷新各自读旧配置合并，后写的会覆盖先写的新增节点。
+   * 失败也写回 `lastErrorKind`；`lastFetchedAt` 只在成功时更新。
    */
   app.post("/subscriptions/:id/refresh", async (c) => {
     const id = c.req.param("id");
@@ -486,11 +322,7 @@ export function createAdminRoutes(deps: AdminDeps): Hono {
     try {
       const outcome = await fetchSubscription(subscription.url, deps.subscriptionFetch ?? {});
 
-      /*
-       * 无论成功失败都要更新订阅行的元信息 —— 见上文。
-       * 注意这里**重新读一次** `configOf()`：拉取期间用户可能改过配置
-       * （那几秒足够点一次保存），用启动时那份会把他的改动覆盖掉。
-       */
+      // 重读配置：拉取期间用户可能改过配置。
       const fresh = deps.configOf();
       const touch = (extra: Partial<(typeof fresh.subscriptions)[number]>) => ({
         ...fresh,
@@ -566,13 +398,7 @@ export function createAdminRoutes(deps: AdminDeps): Hono {
     }
   });
 
-  /**
-   * 代理池。
-   *
-   * 与 Overview 一样是**聚合**端点：这一页要同时显示代理列表、Clash 内核状态
-   * 与隔离报告，而三者必须来自同一时刻 —— 分开拿会让「这个节点没出口 IP」
-   * 与「隔离不成立」描述两个不同瞬间，而它们是同一件事的两面。
-   */
+  /** 代理池聚合端点：代理列表、Clash 状态与隔离报告必须来自同一时刻。 */
   app.get("/proxies", (c) => {
     const config = deps.configOf();
     const views = workerViews(config, deps.runtimeWorkers());
@@ -594,11 +420,8 @@ export function createAdminRoutes(deps: AdminDeps): Hono {
   });
 
   /**
-   * 模型列表。
-   *
-   * **只读缓存,绝不发请求** —— 与 Overview 同一条规则。目录拿不到时
-   * `catalogAvailable: false` 且列表为空，而**不是**返回一个空列表就完事:
-   * 「拿不到目录」与「目录里一个模型都没有」的下一步完全不同。
+   * 模型列表，只读缓存。目录拿不到时 `catalogAvailable: false`：
+   * 「拿不到目录」与「目录为空」的下一步不同。
    */
   app.get("/models", (c) => {
     const config = deps.configOf();
@@ -622,46 +445,22 @@ export function createAdminRoutes(deps: AdminDeps): Hono {
   /* ---------------- 批量探测（长任务） ---------------- */
 
   /**
-   * 当前进度。前端轮询这个（运行中 500ms / 空闲 5000ms）。
-   *
-   * 进度归**服务端**所有 —— 刷新页面或关掉再开都能接着看。理由不只是便利:
-   * 探测**已经在跑**（在切 selector、在发真实请求），而前端内存里的进度只是
-   * 它的倒影。真相放前端意味着刷新之后真相就没了，而那批探测还在跑 ——
-   * 用户此时看到「空闲」并再点开始，就会有两批并发互相换出口节点。
+   * 当前进度，前端轮询。进度归服务端所有：探测仍在跑时刷新页面不能丢掉真相，
+   * 否则用户会再点开始，造成两批并发互换出口节点。
    */
   app.get("/batch-probe", (c) => {
     if (deps.batch === undefined) {
       return adminError(c, "internal_error", "批量探测不可用(统计库未就绪)");
     }
-    const startedAt = deps.batch.startedAt();
-    return c.json(
-      BatchProgressSchema.parse({
-        ...deps.batch.snapshot(),
-        // 从未跑过 → null，而不是 0：「没开始」与「刚开始」是两件事。
-        elapsedMs: startedAt === null ? null : Math.max(0, Date.now() - startedAt),
-      }),
-    );
+    return c.json(batchProgressView(deps.batch));
   });
 
   /**
-   * 控制批量探测。
-   *
-   * 四个动作走同一个端点而不是四个:它们是**同一个状态机**的输入，
-   * 而把状态机的字母表拆成四条路由会让「哪些动作在当前状态下合法」
-   * 散落在四个 handler 里。合法性判断在 reducer 一处（不合法的转移
-   * 返回原状态，不抛异常 —— 事件来自轮询与点击两个源，可以乱序到达）。
+   * 控制批量探测。四个动作是同一状态机的输入，合法性在 reducer 一处判断
+   * （不合法转移返回原状态，不抛）。
    */
   app.post("/batch-probe", async (c) => {
-    /*
-     * 体积闸门排在**业务可用性检查之前**。
-     *
-     * 反过来的话，一个 8 MiB 的请求在 runner 未就绪时会先被完整读进内存
-     * 再返回 500 —— 体积闸门存在的理由恰恰是"不要读那么多"，
-     * 而它是否生效不该取决于另一个组件的状态。
-     *
-     * `MAX_ADMIN_BODY_BYTES` 是本文件的常量，每个写端点都必须显式用它：
-     * 上限写在调用点而不是闸门上，漏一处就是 8 MiB 的 body 被照常接受。
-     */
+    // 体积闸门排在可用性检查之前：是否读入大 body 不该取决于 runner 状态。
     let action: string;
     try {
       const raw = await readBoundedBody(c.req.raw, MAX_ADMIN_BODY_BYTES);
@@ -682,13 +481,7 @@ export function createAdminRoutes(deps: AdminDeps): Hono {
       case "start": {
         const started = deps.batch.start();
         if (!started) {
-          /*
-           * 409 而不是静默排队。
-           *
-           * 两批并发会互相切 selector（进程外全局状态），于是实测到的出口
-           * 不是转发实际会用的那个 —— 而隔离报告正按那个 IP 分组。
-           * 也可能是「没有可用 Worker」，两种都用 409 但文案不同。
-           */
+          // 409 不排队：两批并发会互相切 selector；也可能是没有可用 Worker。
           return c.json(
             {
               error: {
@@ -714,15 +507,17 @@ export function createAdminRoutes(deps: AdminDeps): Hono {
         return adminError(c, "invalid_request", "action 必须是 start / pause / resume / cancel");
     }
 
-    const startedAt = deps.batch.startedAt();
-    return c.json(
-      BatchProgressSchema.parse({
-        ...deps.batch.snapshot(),
-        // 从未跑过 → null，而不是 0：「没开始」与「刚开始」是两件事。
-        elapsedMs: startedAt === null ? null : Math.max(0, Date.now() - startedAt),
-      }),
-    );
+    return c.json(batchProgressView(deps.batch));
   });
 
   return app;
+}
+
+function batchProgressView(batch: BatchProbeRunner) {
+  const startedAt = batch.startedAt();
+  return BatchProgressSchema.parse({
+    ...batch.snapshot(),
+    // 从未跑过 → null，而不是 0：「没开始」与「刚开始」是两件事。
+    elapsedMs: startedAt === null ? null : Math.max(0, Date.now() - startedAt),
+  });
 }

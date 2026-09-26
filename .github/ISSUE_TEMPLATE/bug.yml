@@ -1,0 +1,58 @@
+name: 缺陷报告
+description: 网关、管理后台或脚本的行为与文档不符
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        请勿粘贴真实 API key、Relay Token、订阅地址、节点名、公网 IP 或未脱敏的日志原文。
+        示例值请用 `fake-key-not-real`、`203.0.113.9`、`proxy.invalid` 这类虚构数据。
+  - type: textarea
+    id: what
+    attributes:
+      label: 现象
+      description: 实际发生了什么，期望是什么。
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: 复现步骤
+      placeholder: |
+        1. npm start
+        2. ...
+    validations:
+      required: true
+  - type: textarea
+    id: doctor
+    attributes:
+      label: npm run doctor 输出（已脱敏）
+      render: text
+  - type: input
+    id: version
+    attributes:
+      label: 版本
+      description: 提交哈希（git rev-parse --short HEAD）与 node --version
+    validations:
+      required: true
+  - type: dropdown
+    id: area
+    attributes:
+      label: 涉及范围
+      options:
+        - 协议转发（chat / responses / messages）
+        - Worker 调度与冷却
+        - 出口与 Clash
+        - 管理后台
+        - 脚本（setup / doctor / service）
+        - 文档
+        - 其他
+    validations:
+      required: true
+  - type: checkboxes
+    id: privacy
+    attributes:
+      label: 隐私确认
+      options:
+        - label: 我已确认上面的内容不含真实凭证、IP、节点名或公司信息
+          required: true

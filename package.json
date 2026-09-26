@@ -4,6 +4,11 @@
   "private": true,
   "type": "module",
   "description": "本地 OpenCode Zen 免费模型网关：多协议面、Worker 调度、出口隔离",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/SSRosin8/zen-gateway.git"
+  },
   "engines": {
     "node": ">=24.0.0"
   },

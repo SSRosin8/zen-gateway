@@ -1,23 +1,13 @@
 import type { ClashBridge } from "../../../shared/schema.ts";
 import { safeErrorMessage } from "../../../shared/redact.ts";
 import { isGroupType } from "../../../shared/clashNodeTypes.ts";
+import { directoryBase } from "../../upstream/url.ts";
 import { BlockList, isIP } from "node:net";
 
 /**
- * Clash / Mihomo External Controller 客户端。
- *
- * 只覆盖本项目需要的操作:探活、读运行配置、枚举分组与节点、切换选中节点、
- * 测延迟，以及供 doctor 核对选路的规则与 DNS 查询。
- *
- * ## 节点名必须 URL 编码
- *
- * 节点名可能含空格、冒号、emoji 和连续空格。直接拼进 path 会产生非法 URL 或
- * 指向错误的资源，所以每一处都过 `encodeURIComponent`。
- *
- * ## secret 是凭证
- *
- * 任何错误信息都不得回显 `apiSecret`。这里统一走 `safeErrorMessage`,
- * 并且绝不把 apiBase 以外的 URL 片段放进错误。
+ * Clash / Mihomo External Controller 客户端:探活、读运行配置、枚举分组与节点、切换节点、
+ * 测延迟,以及供 doctor 核对选路的规则与 DNS 查询。
+ * 节点名一律过 `encodeURIComponent`;错误信息不得回显 `apiSecret`,统一走 `safeErrorMessage`。
  */
 
 export type SelectorGroup = {
@@ -36,10 +26,7 @@ export type ProxyNode = {
 };
 
 /**
- * 上游 host 在规则表里的首条命中。
- *
- * `unknown` 表示在任何能判定的规则命中之前遇到了无法判定的规则（需要进程名、
- * 端口、GeoIP 数据库，或 DNS 读不到时的 IP 规则）；此时不下结论。
+ * 上游 host 在规则表里的首条命中。`unknown` 表示先遇到了无法在进程外判定的规则,此时不下结论。
  */
 export type UpstreamRoute =
   | { kind: "matched"; index: number; type: string; payload: string; proxy: string; ip: string | null }
@@ -52,11 +39,8 @@ function normType(type: string): string {
 }
 
 /**
- * 按内核的顺序语义找首条命中：规则从上到下，第一条匹配即生效。
- *
- * 只判定与 host/IP 直接相关的类型；其余类型（GeoSite、GeoIP、进程、端口、
- * 逻辑组合……）无法在进程外可靠复现，遇到时返回 `unknown` 而不是跳过 ——
- * 跳过会让后面的私网规则被误报成命中。IP 段匹配用 `net.BlockList`。
+ * 按内核顺序语义找首条命中。只判定与 host/IP 直接相关的类型;其余返回 `unknown` 而不是跳过,
+ * 否则后面的私网规则会被误报成命中。IP 段匹配用 `net.BlockList`。
  */
 export function matchUpstreamRule(rules: readonly unknown[], host: string, ips: readonly string[] | null): UpstreamRoute {
   const h = host.toLowerCase();
@@ -91,12 +75,8 @@ export function matchUpstreamRule(rules: readonly unknown[], host: string, ips: 
 }
 
 /**
- * Controller 交互失败的分类。
- *
- * `invalid_input` 与其余几种性质不同:它表示**调用方传进来的名字不合法**,
- * 而不是上游出了问题。必须单独一类 —— `delay()` 会把 `bad_response`/`not_found`
- * 当作「节点不可用」吞掉并返回 null,若输入错误也用那两类,一个配置错误就会被
- * 伪装成「这个节点没有延迟数据」,彻底看不见。
+ * Controller 交互失败的分类。`invalid_input` 表示调用方传入的名字不合法,必须单独一类:
+ * `delay()` 会把 `bad_response`/`not_found` 吞成 null,配置错误会被伪装成「没有延迟数据」。
  */
 export type ControllerErrorKind =
   | "unreachable"
@@ -129,26 +109,11 @@ const DEFAULT_TIMEOUT_MS = 5_000;
 const DELAY_TIMEOUT_MS = 5_000;
 
 /**
- * 编码单个路径段,并拒绝会被路径归一化吃掉的名字。
- *
- * ## 为什么必须拒绝而不是编码
- *
- * 点段无法靠编码保护:WHATWG URL 规范**明确**把 `.`、`..`、`%2e`、`%2e%2e`
- * (不分大小写)都当作点段处理。实测:
- *
- *   proxies/../delay        → /delay
- *   proxies/%2E%2E/delay    → /delay     ← 编码无效
- *   u.pathname = ".../.."   → 同样归一化  ← 直接赋值也无效
- *
- * 于是 `select("..", n)` 会把 PUT 打到 Controller 根路径,
- * `delay("..", url)` 会打到 `/delay` —— 都不是调用方想操作的资源。
- * `selectorGroup` 在 schema 里是任意 1–200 字符,这条路径是可达的。
- *
- * 唯一正确的做法是在 API 边界拒绝:真实的 Clash 分组或节点不可能叫
- * `.` 或 `..`,把这种输入当成配置错误报出来,远好于静默操作错误的资源。
+ * 编码单个路径段,并拒绝纯点名。WHATWG URL 把 `.`、`..`、`%2e%2e` 都当作点段归一化,
+ * 编码无法保护:`select("..", n)` 会把 PUT 打到 Controller 根路径。真实分组不会叫这种名字。
  */
 function encodeSegment(value: string, what: "分组" | "节点"): string {
-  // 归一化后只剩点的名字一律拒绝(含 %2e 这类已编码形态)。
+  // 含 %2e 这类已编码形态。
   const decoded = (() => {
     try {
       return decodeURIComponent(value);
@@ -183,22 +148,8 @@ export class ClashController {
 
   constructor(bridge: Pick<ClashBridge, "id" | "apiBase" | "apiSecret">, opts: ControllerOptions = {}) {
     this.bridgeId = bridge.id;
-    /*
-     * 用 URL 归一化 base,不做字符串拼接。
-     *
-     * 不能只 `replace(/\/+$/, "")` 再直接拼路径:那样 `apiBase` 带 query 或
-     * fragment 时会拼出永远到不了的地址:`http://h:9090/?x=1` + `/proxies`
-     * → `http://h:9090/?x=1/proxies`(路径其实是 `/`)。而 schema 的
-     * `UpstreamUrlSchema` 是允许 query 的。
-     *
-     * 归一化为「origin + pathname + 末尾斜杠」,后续一律用相对路径解析,
-     * 这样也顺带支持 `http://h:9090/api` 这类带前缀的 base。
-     */
-    const base = new URL(bridge.apiBase);
-    base.search = "";
-    base.hash = "";
-    if (!base.pathname.endsWith("/")) base.pathname = `${base.pathname}/`;
-    this.#base = base.href;
+    // 归一化后用相对路径解析：字符串拼接在 `apiBase` 带 query 时会拼出到不了的地址。
+    this.#base = directoryBase(bridge.apiBase).href;
 
     this.#secret = bridge.apiSecret;
     this.#timeoutMs = opts.timeoutMs ?? DEFAULT_TIMEOUT_MS;
@@ -210,7 +161,7 @@ export class ClashController {
   }
 
   async #request(path: string, init: RequestInit = {}, timeoutMs?: number): Promise<Response> {
-    // path 是相对路径(如 `proxies/GLOBAL`),交给 URL 解析 —— 见构造器说明。
+    // path 是相对路径(如 `proxies/GLOBAL`)。
     const url = new URL(path, this.#base).href;
     let res: Response;
     try {
@@ -224,7 +175,6 @@ export class ClashController {
       if (name === "TimeoutError" || name === "AbortError") {
         throw new ControllerError(`Controller ${this.#base} 响应超时`, "timeout");
       }
-      // safeErrorMessage 兜住任何可能含凭证的底层消息。
       throw new ControllerError(
         `无法连接 Controller ${this.#base}:${safeErrorMessage(err)}`,
         "unreachable",
@@ -233,7 +183,7 @@ export class ClashController {
 
     if (res.status === 401 || res.status === 403) {
       await res.body?.cancel().catch(() => {});
-      // 绝不回显 secret —— 只说明是鉴权问题。
+      // 绝不回显 secret。
       throw new ControllerError(
         `Controller 拒绝鉴权(${res.status});检查 apiSecret 配置`,
         "auth",
@@ -260,7 +210,7 @@ export class ClashController {
     }
   }
 
-  /** 探活。返回内核版本字符串。 */
+  /** 探活,返回内核版本。 */
   async version(): Promise<{ version: string; isMeta: boolean }> {
     const body = await this.#json("version");
     if (body === null || typeof body !== "object") {
@@ -275,11 +225,8 @@ export class ClashController {
   }
 
   /**
-   * 读内核运行配置里本项目关心的两项：选路模式与混合端口。
-   *
-   * 两者来自同一次 `/configs` 响应。字段缺失或类型不对时各自为 null，由调用方
-   * 决定默认值（选路模式按 `rule` 保守处理；混合端口缺失不能用 `socks-port`
-   * 或 `port` 代替，因为桥接 dispatcher 使用 HTTP CONNECT）。
+   * 读运行配置的选路模式与混合端口;缺失时各自为 null,由调用方定默认值。
+   * 混合端口缺失不能用 `socks-port`/`port` 代替:桥接 dispatcher 使用 HTTP CONNECT。
    */
   async runtimeConfig(): Promise<{ mode: string | null; mixedPort: number | null }> {
     const body = (await this.#json("configs")) as { mode?: unknown; "mixed-port"?: unknown } | null;
@@ -291,25 +238,9 @@ export class ClashController {
   }
 
   /**
-   * 规则实际把流量导向哪些分组（出口隔离与 `GLOBAL` 陷阱的判据）。
-   *
-   * ## 为什么需要它：`GLOBAL` 陷阱不能靠名字判断
-   *
-   * `mode: rule` 下 `GLOBAL` 分组**不参与选路**，切它什么都不改变 ——
-   * 而那个故障不报任何错（控制面通、切换返回 204、探测也能拿到 IP），
-   * 只有按实测公网 IP 分组才会发现所有 Worker 共用一个出口。
-   *
-   * 按**名字**把 `GLOBAL` 降级只是个启发式：
-   * 一个名字不叫 GLOBAL 却同样不参与选路的分组仍会被选中。
-   * 真正的判据是"规则实际导向哪个分组"，而 `/rules` 正好给出这个 ——
-   * 一份实测配置的 556 条规则里 382 条指向 `Proxy`、173 条 `DIRECT`，
-   * 而 `GLOBAL` 出现在**零条**规则里。
-   *
-   * ## 兜底规则（`MATCH`）单独给出
-   *
-   * 它是"其余一切走哪里"，也就是转发到 `opencode.ai` 时最可能命中的那条
-   * （同一份配置里 MATCH → `Proxy`，且 hitCount 非零）。它比"出现次数最多"
-   * 更接近真相：一条 MATCH 覆盖所有未命中的域名。
+   * 规则实际把流量导向哪些分组。`GLOBAL` 陷阱不能靠名字判断:`mode: rule` 下不参与选路的分组
+   * 切换也返回 204、探测也能拿到 IP;真正判据是 `/rules` 的导向。兜底规则 `MATCH` 单独给出,
+   * 它最可能是转发到 `opencode.ai` 时命中的那条。
    */
   async routedGroups(): Promise<{ targets: ReadonlyMap<string, number>; fallback: string | null }> {
     const rules = await this.#rules();
@@ -321,7 +252,7 @@ export class ClashController {
       const proxy = typeof rule.proxy === "string" ? rule.proxy : "";
       if (proxy === "") continue;
       targets.set(proxy, (targets.get(proxy) ?? 0) + 1);
-      // `MATCH` 是兜底规则 —— mihomo 报成 "Match"，原版 Clash 报 "MATCH"。
+      // mihomo 报 "Match",原版 Clash 报 "MATCH"。
       if (typeof rule.type === "string" && rule.type.toLowerCase() === "match") {
         fallback = proxy;
       }
@@ -330,14 +261,9 @@ export class ClashController {
   }
 
   /**
-   * 上游 host 在规则表里会命中哪一条。
-   *
-   * 分组参与选路（见 `routedGroups`）不代表上游请求会走到它：在分组规则之前，
-   * 私网 `IPCIDR → DIRECT` 之类的规则可能先命中。企业 DNS 把公网域名解析到内网
-   * 地址时就是这种情况，而所有 Worker 的 Zen 请求会静默直连、共用一个出口。
-   *
-   * 解析用内核自己的 `/dns/query`，与内核判定 IP 规则时的解析一致；本机解析器
-   * 可能给出不同结果。读不到 DNS 时 IP 规则一律视为无法判定。
+   * 上游 host 在规则表里会命中哪一条。分组参与选路不代表上游请求走到它:私网
+   * `IPCIDR → DIRECT` 可能先命中(企业 DNS 把公网域名解析到内网时),Worker 会静默共用出口。
+   * 解析用内核自己的 `/dns/query`;读不到 DNS 时 IP 规则视为无法判定。
    */
   async upstreamRoute(host: string): Promise<UpstreamRoute> {
     const rules = await this.#rules();
@@ -418,14 +344,8 @@ export class ClashController {
     return out;
   }
 
-  /**
-   * 切换 selector 的选中节点。
-   *
-   * 调用方**必须**持有该内核的 SelectorLock:selector 的 `now` 是全局状态,
-   * 并发切换会让两个请求互相换掉对方的出口节点。
-   */
+  /** 切换 selector 的选中节点;调用方必须持有该内核的 SelectorLock。 */
   async select(group: string, node: string): Promise<void> {
-    // 节点名含空格/冒号/emoji,必须编码。
     await this.#request(`proxies/${encodeSegment(group, "分组")}`, {
       method: "PUT",
       headers: { "content-type": "application/json" },
@@ -443,13 +363,7 @@ export class ClashController {
     return now;
   }
 
-  /**
-   * 测某个节点的延迟。
-   *
-   * 这是**控制面**的延迟,由 Clash 自己去连测试 URL —— 它证明节点可用,
-   * 但不证明我们的流量真的从那个节点出去。出口隔离必须靠数据面实测公网 IP
-   * (见 probe.ts),不能用这个数字代替。
-   */
+  /** 测某个节点的控制面延迟:证明节点可用,不证明流量从该节点出去(出口隔离见 probe.ts)。 */
   async delay(node: string, testUrl: string): Promise<number | null> {
     const query = new URLSearchParams({ timeout: String(DELAY_TIMEOUT_MS), url: testUrl });
     try {

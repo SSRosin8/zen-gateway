@@ -25,10 +25,10 @@ export function Nav({ current }: { current: PageId }) {
               <a
                 href={toHash({ ...parseHash(""), page })}
                 /* 触摸目标 ≥44px。 */
-                className={`inline-flex min-h-[44px] items-center border-b-[3px] px-3 font-medium no-underline sm:px-4 ${
+                className={`inline-flex min-h-[44px] items-center rounded-t-sm border-b-[3px] px-3 font-medium no-underline transition-colors hover:bg-surface-hover active:bg-surface-active sm:px-4 ${
                   active
                     ? "border-b-accent-fg text-accent-fg"
-                    : "border-b-transparent text-text-muted"
+                    : "border-b-transparent text-text-muted hover:text-text"
                 }`}
                 /* 屏幕阅读器要知道哪个是当前页 —— 颜色与边框它读不到。 */
                 aria-current={active ? "page" : undefined}

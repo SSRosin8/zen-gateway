@@ -26,9 +26,15 @@
     background-color: var(--zg-bg);
     color: var(--zg-text);
     font-family: var(--font-sans);
-    font-size: 14px;
-    line-height: 1.55;
+    font-size: var(--text-label-14);
+    /* 单行元素（表格、标签、按钮）用紧行高；多行说明段落在下面放宽到 1.7。 */
+    line-height: var(--text-label-14--line-height);
     -webkit-font-smoothing: antialiased;
+  }
+
+  /* 多行说明文字：中文在 14px 下行高 1.7 才不显得挤（字面框比拉丁字母满）。 */
+  p {
+    line-height: var(--text-copy-14--line-height);
   }
 
   /* 数字逐位可比：延迟、token 数、计数在表格里必须能上下对齐。 */
@@ -41,6 +47,19 @@
   :focus-visible {
     outline: 2px solid var(--zg-accent-fg);
     outline-offset: 2px;
+  }
+
+  /* 骨架：延迟 300ms 再淡入 —— 本机请求多数在此之前返回，骨架根本不出现，
+     避免「闪一下灰块」。只动 opacity，没有扫光。 */
+  .zg-skeleton {
+    opacity: 0;
+    animation: zg-skeleton-in 200ms ease-out 300ms forwards;
+  }
+
+  @keyframes zg-skeleton-in {
+    to {
+      opacity: 1;
+    }
   }
 
   @media (prefers-reduced-motion: reduce) {

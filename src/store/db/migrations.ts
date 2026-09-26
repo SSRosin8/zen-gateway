@@ -1,13 +1,7 @@
 /**
- * 数据库迁移。
- *
- * 每条迁移只往前走，用 `PRAGMA user_version` 记档位。不写 down：
- * 单机自用工具回滚 schema 的实际做法是删库重建（这里存的全是可再生的
- * 运行时数据），维护一套没人跑过的 down 脚本只会带来虚假的安全感。
- *
- * 表的边界：凡是高频写 + 需要聚合查询的都在这里；凭证与用户意图在 config.json。
- * 因此本库里的 worker_id / proxy_id 都是对 config.json 的弱引用 ——
- * 配置里删掉一个 Worker，它的历史统计会留下，UI 不得据此把它复活。
+ * 数据库迁移，只往前走，用 `PRAGMA user_version` 记档位。不写 down：
+ * 库里全是可再生的运行时数据，回滚的做法是删库重建。
+ * worker_id / proxy_id 是对 config.json 的弱引用，UI 不得据历史统计复活已删 Worker。
  */
 
 export type Migration = {
@@ -155,37 +149,12 @@ export const MIGRATIONS: Migration[] = [
     version: 2,
     name: "hash-check-counts-bytes",
     /*
-     * 修掉一个**实测可被绕过**的约束。
+     * 档位 1 的 CHECK 可被 NUL 字节绕过：SQLite 的 `length()` 与 `GLOB` 对 TEXT
+     * 在首个 NUL 处停止。补 `length(CAST(hash AS BLOB)) = 64` 限定字节数；
+     * 字符长度与字节长度都要 64 才能排除多字节字符。
      *
-     * 档位 1 的两个 CHECK 写的是 `length(hash) = 64`,而 SQLite 的 `length()`
-     * 对 TEXT **在首个 NUL 字节处停止计数**,`GLOB` 同样只看 NUL 之前那段。
-     * 于是「64 个 hex 字符 + 一个 NUL 字节 + 任意明文」完整通过校验:
-     *
-     *   length('abc' || char(0) || 'defghij')          → 3
-     *   ('aaa'||char(0)||'ZZZ!!') NOT GLOB '*[^0-9a-f]*' → 1（通过）
-     *
-     * 实测经 `AffinityStore.putSession()` 写入这样一个值:`writeFailures` 为 0,
-     * SQL 侧看到的 `length()` 是 64 而实际字节数 99,**明文完整落在磁盘文件里**
-     * (wal_checkpoint 后 `strings` 搜得到),而 JS 读回时在 NUL 处被截断 ——
-     * 也就是说所有读路径都看不见那条尾巴。
-     *
-     * 补 `length(CAST(hash AS BLOB)) = 64`:BLOB 的长度是真实字节数,NUL
-     * 不再能截断判定。两个条件都留着 —— 字符长度与字节长度**都**必须是 64
-     * 才能排除多字节字符(64 个 CJK 是 64 字符 / 192 字节,单看任一个都不够)。
-     *
-     * ## 为什么这条值得一个迁移而不是"反正生产路径不会触发"
-     *
-     * 今天确实触发不到:生产路径每个键都经 `digestOf()`,输出恒为纯 hex。
-     * 但档位 1 的注释声称「把『只存 sha256 摘要』从约定**变成结构约束**」、
-     * 「任何自然语言都进不来」—— 而那句是假的。**假的强保证比没有保证更危险**:
-     * 下一条写入路径(管理 API 手工绑定、导入/恢复工具、诊断回灌)
-     * 的作者会读这句注释,然后不再自己检查。
-     *
-     * 迁移方式是**重建表 + 搬数据**:SQLite 不支持 ALTER 修改 CHECK。
-     * 旧行全部来自 `digestOf()` 所以必然合规;万一有不合规的(手工改过库、
-     * 从别处恢复的库),`INSERT INTO ... SELECT` 会被新 CHECK 拦下并让整条
-     * 迁移回滚 —— 那是对的:一个装着非摘要值的库应当拒绝启动并让人来看,
-     * 而不是静默丢掉那些行。
+     * SQLite 不支持 ALTER 修改 CHECK，故重建表 + 搬数据。不合规的旧行会让迁移
+     * 回滚、拒绝启动，而不是静默丢行。
      */
     up: `
       CREATE TABLE session_affinity_new (
@@ -229,40 +198,12 @@ export const MIGRATIONS: Migration[] = [
     version: 3,
     name: "gateway-rejections-and-dropped-usage",
     /*
-     * 记录「网关拒绝」这项统计，并把「我们自己丢了用量」
-     * 与「上游没报用量」分开。
+     * `gateway_rejections`：网关在打上游之前拒绝的请求，按天聚合计数。`model` 是
+     * 客户端可控字符串，进库前经 `normalizeRejectionModel` 归一化以免无界增长；
+     * `reason` 从 `judgeFree` 的联合类型推导（纪律 #4）。
      *
-     * ## 一、`gateway_rejections`
-     *
-     * `relay.ts` 有六条在打上游**之前**就返回的路径
-     * （400 读体失败 / 413 超限 / 400 空体 / 400 非法 JSON / 403 免费闸门 /
-     * 503 无可用 Worker）。不记录它们，「我有多少请求被网关自己挡了」就完全
-     * 无法回答，而
-     * `not_free` 与 `retired` 的处置完全不同（前者改模型名、后者删
-     * `extraFreeIds` 条目），哪种发生得多也不可观测。
-     *
-     * **按天聚合而不是逐条记行**，与 `model_usage` 同构：这是计数不是日志。
-     * 更要紧的是它**不能无界增长** —— `model` 是客户端可控字符串，而被拒的
-     * 请求里它恰好**没通过**任何校验（`not_free` 那条尤其）。所以：
-     *
-     * - `model` 进库前要归一化成占位符，除非它在已知目录里（见 `normalizeRejectionModel`）
-     * - 按天 upsert，一个 reason × protocol × model 一行
-     *
-     * `reason` 的取值从 `judgeFree` 的 `reason` 联合类型 + 几个
-     * `invalid_request` 子类推导，不另手写一份（纪律 #4）。
-     *
-     * ## 二、`model_usage.requests_dropped_usage`
-     *
-     * `createUsageCollector.dropped()` 的文档明写它与 `usage() === null`
-     * **必须分开**，否则「覆盖率会把我们自己丢的计成上游没报的」——
-     * 所以 `recordUsage` 不能只看 `totals`、让 `.dropped()` 只剩一行日志这一个读者。
-     *
-     * 两个入口都可达：一条 >1 MiB 的 `data:` 行被整条弃掉，以及**上游中途
-     * 断流**（更常见）。与「上游从不报用量显示成 100% 覆盖」
-     * **严格对称**，而处置方向相反 —— 一个要改代码（我们的界定常量错了），
-     * 一个不用（上游就是不报）。库里两者同形则分不出来。
-     *
-     * 新列有 DEFAULT 0，所以旧行不需要回填。
+     * `model_usage.requests_dropped_usage`：网关自己丢的用量（`createUsageCollector.dropped()`），
+     * 与上游没报用量分开计，两者处置方向相反。新列有 DEFAULT 0，旧行无需回填。
      */
     up: `
       CREATE TABLE gateway_rejections (

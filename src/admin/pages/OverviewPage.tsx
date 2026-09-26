@@ -121,7 +121,7 @@ function WorkerTable({ workers }: { workers: readonly WorkerView[] }) {
   if (workers.length === 0) {
     return (
       <div className="rounded-md bg-surface-accent px-4 py-6 text-center">
-        <p className="font-serif text-lg">还没有配置 Worker</p>
+        <p className="text-heading-16 font-medium">还没有配置 Worker</p>
         <p className="mt-1 text-text-muted">
           在 <a href="#workers" className="text-accent-fg underline">Worker 页</a>{" "}
           新增一个：匿名 Worker 不需要 key，认证 Worker 填你自己的 Zen API key。

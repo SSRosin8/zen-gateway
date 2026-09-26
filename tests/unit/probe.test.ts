@@ -3,10 +3,10 @@ import { Agent } from "undici";
 import { createServer, type Server } from "node:http";
 import {
   buildIsolationReport,
-  isIpAddress,
   probeEgress,
   type IpEchoService,
 } from "../../src/core/proxy/probe.ts";
+import { isIpAddress } from "../../src/shared/ip.ts";
 import { SelectorLock } from "../../src/core/proxy/selectorLock.ts";
 
 /** 起一个本机 HTTP 服务并返回其 origin;用真实网络路径而不是 mock fetch。 */
