@@ -8,6 +8,7 @@ import {
   fakeClashPort,
   port,
   run,
+  UNREACHABLE_UPSTREAM,
   SETUP,
   startFakeClash,
   useScriptSandbox,
@@ -85,7 +86,7 @@ describe("setup 不动用户自己的东西", () => {
       JSON.stringify(
         ConfigSchema.parse({
           version: CONFIG_VERSION,
-          gateway: { relayToken: token, port },
+          gateway: { relayToken: token, port, baseUrl: UNREACHABLE_UPSTREAM },
           workers: [{ id: "mine", kind: "authenticated", apiKey: "MY-KEY", proxyId: null }],
           clash: {
             enabled: true,

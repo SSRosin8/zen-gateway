@@ -81,10 +81,16 @@ export async function run(script: string, args: string[] = [], env: Record<strin
 
 export const configFile = () => join(dataDir, "config.json");
 
+/**
+ * 默认上游指向一个不监听的回环端口：目录预热与第 6 层都确定地得到「不可达」，
+ * 测试不连真实 Zen，也不因运行环境能否访问外网而改变结果。
+ */
+export const UNREACHABLE_UPSTREAM = "http://127.0.0.1:1/v1";
+
 export async function writeConfig(overrides: Record<string, unknown> = {}): Promise<Config> {
   const config = ConfigSchema.parse({
     version: CONFIG_VERSION,
-    gateway: { relayToken: "test-token-not-a-real-secret", port },
+    gateway: { relayToken: "test-token-not-a-real-secret", port, baseUrl: UNREACHABLE_UPSTREAM },
     ...overrides,
   });
   await writeFile(configFile(), JSON.stringify(config, null, 2), { mode: 0o600 });

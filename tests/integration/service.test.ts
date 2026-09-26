@@ -27,10 +27,27 @@ let strays: number[];
 // 避开常用端口与其他用例；每个用例递增。
 let nextPort = 19876;
 
+/*
+ * 首启会生成指向真实 Zen 的默认配置，目录预热随即访问外网：结果随运行环境变化，
+ * 生命周期用例也不该依赖网络。预先写一份上游不可达的最小配置；需要验证首启或
+ * 端口解析的用例自己覆盖这份文件。
+ */
+async function writeOfflineConfig(): Promise<void> {
+  await writeFile(
+    join(dataDir, "config.json"),
+    JSON.stringify({
+      version: 1,
+      gateway: { relayToken: "service-test-token-not-real", baseUrl: "http://127.0.0.1:1/v1" },
+    }),
+    { mode: 0o600 },
+  );
+}
+
 beforeEach(async () => {
   dataDir = await mkdtemp(join(tmpdir(), "zg-svc-"));
   port = nextPort++;
   strays = [];
+  await writeOfflineConfig();
 });
 
 afterEach(async () => {
@@ -410,7 +427,7 @@ describe("端口解析与服务端一致", () => {
       join(dataDir, "config.json"),
       JSON.stringify({
         version: 1,
-        gateway: { port: p, relayToken: "service-test-token-not-real" },
+        gateway: { port: p, relayToken: "service-test-token-not-real", baseUrl: "http://127.0.0.1:1/v1" },
       }),
       { mode: 0o600 },
     );
