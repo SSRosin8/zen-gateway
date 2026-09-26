@@ -54,7 +54,7 @@ describe("classifyStatus", () => {
 });
 
 describe("isRetryable", () => {
-  it.each(["rate_limit", "upstream_error", "transport", "timeout"] as FailureKind[])(
+  it.each(["rate_limit", "forbidden", "upstream_error", "transport", "timeout"] as FailureKind[])(
     "%s 可重试",
     (kind) => {
       expect(isRetryable(kind)).toBe(true);

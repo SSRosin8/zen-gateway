@@ -313,3 +313,47 @@ describe("三个面一起注册 —— 加面不动装配", () => {
     }
   });
 });
+
+/* ================================================================== *
+ * 注册表拒绝静默失效的路径形态
+ * ================================================================== */
+
+describe("注册表：拒绝永不匹配与面内重复的路径", () => {
+  it("面内重复声明同一路径被拒", () => {
+    // 先前只查别的面占用的路径,面内重复被静默接受。
+    const r = new ProtocolRegistry();
+    expect(() => r.register(fakeSurface("chat", ["/x", "/x"]))).toThrow(ProtocolRegistryError);
+  });
+
+  it.each([
+    ["含 query", "/a?y=1"],
+    ["含 fragment", "/a#frag"],
+    ["含空格", "/a b"],
+    ["含尾部空格", "/a "],
+    ["连续斜杠", "//a"],
+    ["中间连续斜杠", "/a//b"],
+  ])("永远匹配不到请求路径的形态被拒：%s", (_label, path) => {
+    /*
+     * 注册这样的路径 = 注册一个静默失效的面,与空 clientPaths 同类。
+     * 这里还多一层意义:`app.ts` 从 `registry.paths()` 推导鉴权
+     * 挂载点,一条匹配不到的路径会让守卫与处理器双双挂空 ——
+     * 虽然二者仍一致（不构成漏洞）,但"整个面无声消失"极难归因。
+     */
+    const r = new ProtocolRegistry();
+    expect(() => r.register(fakeSurface("chat", [path]))).toThrow(ProtocolRegistryError);
+  });
+
+  it("注册失败后注册表不被部分污染", () => {
+    const r = new ProtocolRegistry().register(fakeSurface("chat", ["/ok"]));
+    expect(() => r.register(fakeSurface("responses", ["/good", "/bad?x"]))).toThrow();
+    expect(r.byPath("/good")).toBeNull();
+    expect(r.get("responses")).toBeNull();
+    expect(r.size).toBe(1);
+  });
+
+  it("正常路径仍可注册（上面几条不是靠拒绝一切实现的）", () => {
+    const r = new ProtocolRegistry();
+    expect(() => r.register(fakeSurface("chat", ["/v1/chat/completions", "/chat/completions"]))).not.toThrow();
+    expect(r.paths()).toHaveLength(2);
+  });
+});

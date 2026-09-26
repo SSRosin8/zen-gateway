@@ -47,10 +47,11 @@ import { dirname, join } from "node:path";
 import { resolvePort } from "../src/store/port.ts";
 import { configExists, loadConfig, ConfigError } from "../src/store/config.ts";
 import { HealthSchema } from "../src/shared/contract.ts";
+import { DIRECT_EGRESS_ID } from "../src/shared/schema.ts";
 import { isUsable } from "../src/core/routing/workerPool.ts";
 import { safeErrorMessage } from "../src/shared/redact.ts";
 import { probeBridges, selectBridge } from "../src/core/proxy/clash/select.ts";
-import { ClashController } from "../src/core/proxy/clash/controller.ts";
+import { ClashController, ControllerError } from "../src/core/proxy/clash/controller.ts";
 import { createInstance, dataDirOf } from "./lib/instance.mjs";
 import { detail, heading, humanMs, line, nextStep } from "./lib/report.mjs";
 import { checkArgs } from "./lib/args.mjs";
@@ -67,6 +68,9 @@ checkArgs({
 });
 
 const DEEP = process.argv.includes("--deep");
+
+/** Controller 是本机 HTTP；3 秒足以区分「没开」与「慢」。 */
+const CONTROL_TIMEOUT_MS = 3_000;
 
 /*
  * 端口解析复用 `src/store/port.ts` —— 与 service.mjs、vite.config.ts 同一处。
@@ -236,7 +240,7 @@ async function layerService() {
     return {
       status: "fail",
       text: "服务未在运行",
-      nextStep: `npm start\n（企业网络下需要 NODE_EXTRA_CA_CERTS,见 docs/usage.md —— 否则服务起得来但模型目录是空的。）`,
+      nextStep: `npm start\n（企业网络下需要 NODE_EXTRA_CA_CERTS,见 docs/usage.md —— 否则服务起得来，但 /v1/models 返回 502 upstream_unreachable。）`,
     };
   }
 
@@ -475,24 +479,17 @@ async function layerClashControl() {
 
   const results = [];
   for (const bridge of bridges) {
+    const controller = new ClashController(bridge, { timeoutMs: CONTROL_TIMEOUT_MS });
     try {
-      const res = await fetch(new URL("version", ensureSlash(bridge.apiBase)).href, {
-        ...(bridge.apiSecret === "" ? {} : { headers: { authorization: `Bearer ${bridge.apiSecret}` } }),
-        signal: AbortSignal.timeout(3000),
-      });
-      if (res.status === 401 || res.status === 403) {
-        results.push({ bridge, ok: false, why: `鉴权被拒(${res.status})—— apiSecret 不对` });
-        continue;
-      }
-      if (!res.ok) {
-        results.push({ bridge, ok: false, why: `返回 ${res.status}` });
-        continue;
-      }
-      const body = await res.json();
-      results.push({ bridge, ok: true, why: `${body?.meta === true ? "mihomo" : "clash"} ${body?.version ?? "?"}` });
+      const v = await controller.version();
+      results.push({ bridge, controller, ok: true, why: `${v.isMeta ? "mihomo" : "clash"} ${v.version}` });
     } catch (err) {
-      // 绝不回显 apiSecret —— safeErrorMessage 兜住任何含凭证的底层消息。
-      results.push({ bridge, ok: false, why: safeErrorMessage(err) });
+      const why =
+        err instanceof ControllerError && err.kind === "auth"
+          ? `鉴权被拒(${err.status})—— apiSecret 不对`
+          : // 绝不回显 apiSecret —— safeErrorMessage 兜住任何含凭证的底层消息。
+            safeErrorMessage(err);
+      results.push({ bridge, controller, ok: false, why });
     }
   }
 
@@ -521,8 +518,12 @@ async function layerClashControl() {
    * 而控制面明明是通的。这一层是唯一能发现它的地方。
    */
   const mismatches = [];
+  const modes = new Map();
   for (const r of ok) {
-    const actual = await readMixedPort(r.bridge);
+    // 读不到 /configs 时两项都按未知处理：端口不当作不一致，mode 由下方按 rule 兜底。
+    const runtime = await r.controller.runtimeConfig().catch(() => ({ mode: null, mixedPort: null }));
+    modes.set(r.bridge.id, runtime.mode);
+    const actual = runtime.mixedPort;
     if (actual !== null && actual !== r.bridge.localProxyPort) {
       mismatches.push(`${r.bridge.id}: 配置写 ${r.bridge.localProxyPort},内核实际 ${actual}`);
     }
@@ -542,9 +543,13 @@ async function layerClashControl() {
   /*
    * 报**择优结果**，而不只是"几个能连"。
    *
-   * 判据复用 `core/proxy/clash/select.ts` 的 `selectBridge` —— 与转发路径
-   * 同一份逻辑。doctor 自己再实现一遍会是第三份并行真相（纪律 #4），
+   * 判据复用 `core/proxy/clash/select.ts` 的 `selectBridge` —— 与批量探测
+   * 第 0 段同一份逻辑。doctor 自己再实现一遍会是又一份并行真相（纪律 #4），
    * 而分叉的症状最难查：doctor 说"内核 A 可用"而网关实际在用 B。
+   *
+   * 转发路径本身不探活：它用 `pool.ts` 的 `pickBridge` 按配置取内核（auto
+   * 模式优先 `activeBridgeId`）。所以这里的择优结果是"探活后应当用谁"，
+   * 与转发当下所用的内核一致的前提是 `activeBridgeId` 已被写回。
    *
    * 这一层也顺带回答多内核时"现在到底走哪个"。
    */
@@ -588,13 +593,13 @@ async function layerClashControl() {
   const selectedBridge = bridges.find((b) => b.id === selection.bridgeId);
   if (selectedBridge !== undefined) {
     try {
-      const controller = new ClashController(selectedBridge);
+      const controller = new ClashController(selectedBridge, { timeoutMs: CONTROL_TIMEOUT_MS });
       /*
        * 读不到 mode 时按 `rule` 处理 —— 那是内核默认值，也是**保守**的一侧：
        * rule 模式下才做这项检查，误判成 rule 最坏只是多一条可核对的警告，
        * 而误判成 global 会漏掉真正的故障。
        */
-      const mode = (await readClashMode(selectedBridge)) ?? "rule";
+      const mode = (modes.has(selectedBridge.id) ? modes.get(selectedBridge.id) : await readMode(controller)) ?? "rule";
       if (mode !== "global") {
         const routed = await controller.routedGroups();
         const group = selectedBridge.selectorGroup;
@@ -823,7 +828,7 @@ async function layerEgress() {
     const byProxy = new Map(results.map((r) => [r.proxyId, r.outcome]));
 
     const entries = usable.map((w) => {
-      const outcome = byProxy.get(w.proxyId ?? "__direct__");
+      const outcome = byProxy.get(w.proxyId ?? DIRECT_EGRESS_ID);
       return {
         workerId: w.id,
         proxyId: w.proxyId,
@@ -833,7 +838,7 @@ async function layerEgress() {
 
     const report = buildIsolationReport(entries);
     const lines = entries.map((e) => {
-      const outcome = byProxy.get(e.proxyId ?? "__direct__");
+      const outcome = byProxy.get(e.proxyId ?? DIRECT_EGRESS_ID);
       const where = e.proxyId ?? "(本机直连)";
       return outcome?.ok
         ? `${e.workerId} → ${where}: ${outcome.egressIp} (${humanMs(outcome.latencyMs)}, via ${outcome.via})`
@@ -878,40 +883,10 @@ async function layerEgress() {
  * 辅助
  * ------------------------------------------------------------------ */
 
-function ensureSlash(base) {
-  const u = new URL(base);
-  u.search = "";
-  u.hash = "";
-  if (!u.pathname.endsWith("/")) u.pathname = `${u.pathname}/`;
-  return u.href;
-}
-
-/** 从 Controller 的 `/configs` 读选路模式。读不到返回 null。 */
-async function readClashMode(bridge) {
+/** 读选路模式；读不到返回 null。选中内核未参与混合端口核对时才需要单独读。 */
+async function readMode(controller) {
   try {
-    const res = await fetch(new URL("configs", ensureSlash(bridge.apiBase)).href, {
-      ...(bridge.apiSecret === "" ? {} : { headers: { authorization: `Bearer ${bridge.apiSecret}` } }),
-      signal: AbortSignal.timeout(3000),
-    });
-    if (!res.ok) return null;
-    const body = await res.json();
-    return typeof body?.mode === "string" ? body.mode.toLowerCase() : null;
-  } catch {
-    return null;
-  }
-}
-
-/** 从 Controller 的 `/configs` 读混合端口。读不到返回 null(不当作不一致)。 */
-async function readMixedPort(bridge) {
-  try {
-    const res = await fetch(new URL("configs", ensureSlash(bridge.apiBase)).href, {
-      ...(bridge.apiSecret === "" ? {} : { headers: { authorization: `Bearer ${bridge.apiSecret}` } }),
-      signal: AbortSignal.timeout(3000),
-    });
-    if (!res.ok) return null;
-    const body = await res.json();
-    const port = body?.["mixed-port"];
-    return typeof port === "number" && port > 0 ? port : null;
+    return (await controller.runtimeConfig()).mode;
   } catch {
     return null;
   }

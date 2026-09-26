@@ -24,8 +24,10 @@ export const FAILURE_KINDS = [
   /** 鉴权失败。短退避 —— 配错的 key 应该反复暴露,而不是安静消失 15 分钟。 */
   "auth",
   /**
-   * 403。比 auth 更短的冷却:上游的免费闸门(`FreeTierError`)按客户端请求形态
-   * 返回 403,且先于密钥校验,所以它多半说明的是请求形态而不是这个 Worker 坏了。
+   * 403。比 auth 更短的冷却，且换 Worker 重试:上游既用 403 表示免费闸门
+   * (`FreeTierError`,按客户端请求形态、先于密钥校验)，也用它表示地区限制
+   * (取决于出口)。不读 body 无法区分；后者换一个出口就可能成功，前者多试
+   * 几次只多花 maxAttempts 以内的往返，最后一次的 403 仍原样交给客户端。
    */
   "forbidden",
   /** 上游 5xx。可重试。 */
@@ -91,6 +93,7 @@ export function classifyStatus(facts: ResponseFacts): FailureKind | null {
 export function isRetryable(kind: FailureKind): boolean {
   return (
     kind === "rate_limit" ||
+    kind === "forbidden" ||
     kind === "upstream_error" ||
     kind === "transport" ||
     kind === "timeout"

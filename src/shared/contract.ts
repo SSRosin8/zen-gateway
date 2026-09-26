@@ -192,7 +192,7 @@ export const OverviewSchema = z.object({
       }),
     ),
   }),
-  /** 代理数量概览。完整列表在 ProxyPool 页（下一批）。 */
+  /** 代理数量概览。完整列表由 `/api/proxies` 提供。 */
   proxies: z.object({
     total: z.number().int().nonnegative(),
     enabled: z.number().int().nonnegative(),
@@ -345,7 +345,7 @@ export const WorkerCreateSchema = z.strictObject({
 });
 export type WorkerCreate = z.infer<typeof WorkerCreateSchema>;
 
-/** 网关设置的可改字段。`port` 不在这里 —— 改它要重启，属于 Gateway 页（下一批）。 */
+/** 网关设置的可改字段。`port` 不在这里 —— 改它要重启，只能改配置文件。 */
 export const GatewayPatchSchema = z.strictObject({
   maxAttempts: z.number().int().min(1).max(10).optional(),
   headersTimeoutMs: z.number().int().min(1_000).max(600_000).optional(),
@@ -353,7 +353,7 @@ export const GatewayPatchSchema = z.strictObject({
   relayToken: SecretPatchSchema.optional(),
 });
 
-/** 模型规则的可改字段。对应 Models 页（下一批做 UI，端点先立起来）。 */
+/** 模型规则的可改字段。Models 页编辑其中的后缀、名单与交集开关。 */
 export const ModelRulesPatchSchema = z.strictObject({
   freeSuffix: z.string().min(1).max(32).optional(),
   extraFreeIds: z.array(z.string().min(1).max(128)).max(256).optional(),

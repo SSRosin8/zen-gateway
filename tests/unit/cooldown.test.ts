@@ -329,3 +329,28 @@ describe("cooldownUntil 对非有限 now 返回 null", () => {
     expect(until).toBeGreaterThan(1_000_000);
   });
 });
+
+describe("冷却时长要断言**确切值**,不只是形态", () => {
+  it("NaN 失败计数按 1 算,产出恰好等于基准值", () => {
+    /*
+     * 原断言只查 `Number.isFinite` —— 而把 `normalizeFails` 的 NaN 兜底从
+     * 1 改成 **0** 同样产出有限值(0 会让指数项变成 2^-1 = 0.5,即基准的一半)。
+     */
+    const exact = cooldownMs({
+      kind: "transport", retryAfter: null, consecutiveFails: Number.NaN,
+      config: config, now: NOW, jitter: 0,
+    });
+    expect(exact).toBe(config.transportBaseMs);
+  });
+
+  it("抖动用 Math.ceil 向上取整,不是 floor", () => {
+    /*
+     * 原断言只查"是整数",而 floor 同样产出整数。
+     * 2000 * (1 + 0.25 * 0.333) = 2166.5 → ceil 2167,floor 2166。
+     */
+    expect(cooldownMs({
+      kind: "transport", retryAfter: null, consecutiveFails: 1,
+      config: config, now: NOW, jitter: 0.333,
+    })).toBe(2167);
+  });
+});

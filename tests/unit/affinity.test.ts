@@ -564,3 +564,91 @@ describe("AffinityMap.prune", () => {
     expect(map.sizes()).toEqual({ sessions: 0, blobs: 0 });
   });
 });
+
+describe("LRU 刷新(重绑已有键,不只插新键)", () => {
+  it("重新绑定把条目移到队尾,淘汰的不是它", () => {
+    /*
+     * `bindSession`/`learnBlobs` 靠"先 delete 再 set"维持
+     * 「Map 插入顺序 = LRU 顺序」。变异验证:去掉那个 delete 后全绿,
+     * 因为没有任何用例在容量压力下重绑一个已存在的键。
+     */
+    const map = new AffinityMap();
+    // 填到接近上限。
+    for (let i = 0; i < 10_000; i += 1) map.bindSession(`h${i}`, "w1", NOW + i, TTL);
+    // 重绑最老的那个 —— 它应当移到队尾。
+    map.bindSession("h0", "w2", NOW + 20_000, TTL);
+    // 再插一个,触发淘汰:被淘汰的该是 h1(现在最老),不是 h0。
+    map.bindSession("fresh", "w1", NOW + 20_001, TTL);
+
+    expect(map.lookupSession("h0", NOW + 20_001, TTL, always)).toBe("w2");
+    expect(map.lookupSession("h1", NOW + 20_001, TTL, always)).toBeNull();
+  });
+});
+
+describe("指纹长度边界(界内外两端各差一)", () => {
+  const pad = (n: number): string => "z".repeat(n);
+
+  it("恰好 16 字符被收集,15 字符不被收集", () => {
+    expect(extractBlobHashes({ a: { signature: pad(16) } })).toHaveLength(1);
+    expect(extractBlobHashes({ a: { signature: pad(15) } })).toHaveLength(0);
+  });
+
+  it("恰好 16384 字符被收集,16385 字符不被收集", () => {
+    expect(extractBlobHashes({ a: { signature: pad(16_384) } })).toHaveLength(1);
+    expect(extractBlobHashes({ a: { signature: pad(16_385) } })).toHaveLength(0);
+  });
+});
+
+describe("遍历预算不得误伤真实负载", () => {
+  it("30 轮对话的推理块必须**全部**收满", () => {
+    /*
+     * 与"恶意宽扁体"那条成对:预算修复(压栈也计数)不能把正常多轮对话
+     * 的指纹提取砍掉。变异验证:把预算改成 50 后这条会红。
+     */
+    const body = {
+      messages: Array.from({ length: 30 }, (_u, i) => ({
+        role: "assistant",
+        reasoning: { encrypted_content: `encrypted-blob-${i}-not-real-content` },
+      })),
+    };
+    expect(extractBlobHashes(body)).toHaveLength(30);
+  });
+
+  it("恶意「宽而扁」体:预算在**压栈阶段**就耗尽,提取结果为空", () => {
+    /*
+     * 先前 `visited` 只数出栈,而数组分支在一次 pop 里压入全部元素 ——
+     * 实测 355 万元素的扁平数组让 heap 涨 222MB、耗时 141ms,而提取到的
+     * 指纹是 0 个(开销换来的信息量为零)。
+     *
+     * ## 为什么用行为断言而不是内存断言
+     *
+     * 断言"heap 增长 < 60MB"不成立:把压栈计数改回去之后测试**依然全绿** ——
+     * 为了让测试跑得快,数组从 355 万缩到 50 万,而那个规模的内存增长
+     * 恰好落在阈值内。内存与耗时断言的阈值
+     * 天生要靠猜,猜松了就是空壳。
+     *
+     * 改用一个由修复**直接导致**的行为差异:
+     *
+     * - 压栈计数(修复后):预算在压栈阶段耗尽 → 一个指纹都提不到
+     * - 不计数(缺陷):5 万个元素全部入栈,随后逐个出栈 → 提取满 64 个
+     *
+     * 0 vs 64 没有阈值可猜。
+     */
+    const body = {
+      messages: Array.from({ length: 50_000 }, (_u, i) => ({
+        signature: `encrypted-blob-${i}-not-real-content`,
+      })),
+    };
+    expect(extractBlobHashes(body)).toEqual([]);
+  });
+
+  it("恰好在预算内的宽数组仍然能提取", () => {
+    // 边界的另一侧:预算是保护而不是"宽数组一律放弃"。
+    const body = {
+      messages: Array.from({ length: 200 }, (_u, i) => ({
+        signature: `encrypted-blob-${i}-not-real-content`,
+      })),
+    };
+    expect(extractBlobHashes(body)).toHaveLength(64); // 到 MAX_BLOB_VALUES 上限
+  });
+});

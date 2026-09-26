@@ -67,8 +67,9 @@ HTTP 回环地址。
 
 - 网关页编辑最多尝试的 Worker 数（`maxAttempts`），并按 OpenCode 1.x/2.x 生成
   客户端配置片段（Relay Token 为占位符）。
-- Worker 新增、编辑、删除；编辑时留空凭证表示保留旧值，清空必须显式操作。删除
-  前弹出确认框；Worker 可在列表内直接编辑，出口从代理下拉框选择。
+- Worker 新增、编辑、删除；编辑时留空 key 表示保留旧值。认证 Worker 必须有 key，
+  界面不单独提供“清空 key”，要去掉 key 就改为匿名 Worker。删除前弹出确认框；
+  Worker 可在列表内直接编辑，出口从代理下拉框选择。
 - 模型免费后缀、显式免费名单、目录交集开关的编辑。
 - 代理分页、批量探测、按 IP 回显目标的实测公网 IP 分组的视图。
 - 订阅刷新、探测进度、统计和运行期 Worker 状态查看；启动批量探测前需要确认。
@@ -119,7 +120,8 @@ OpenCode 2.x 使用复数 `providers`/`settings`。只覆盖已有 `opencode` pr
 占位符，仍需填入真实值。不要把具体模型或 SDK package 从 OpenCode 配置复制到这里，
 否则会覆盖 OpenCode 自己维护的目录。
 
-转发面用 `Authorization: Bearer <Relay Token>` 鉴权；`/v1/messages` 另外接受
+转发面用 `Authorization: Bearer <Relay Token>` 鉴权；`/v1/messages`（及无前缀的
+`/messages`）另外接受
 `x-api-key: <Relay Token>`，便于 Anthropic 形态的客户端直接使用；两者同时出现时以
 Bearer 为准，其余路径只认 Bearer。客户端的 `x-api-key` 不会转发到上游。
 
@@ -227,9 +229,9 @@ opencode run --model opencode/big-pickle "Reply with exactly: OK"
 | 字段 | 默认值 | 含义 |
 |---|---|---|
 | `strategy` | `anonymous_first` | 就绪 Worker 的排序：`anonymous_first` 匿名优先、`authenticated_first` 认证优先、`mixed` 按配置顺序；同类内保持配置顺序，会话亲和命中优先于策略 |
-| `cooldown.rateLimitMs` | 900000 | 429 冷却；上游给了 `Retry-After` 时以它为准 |
-| `cooldown.authFailMs` | 60000 | 401 的固定短冷却 |
-| `cooldown.forbiddenMs` | 5000 | 403 的短冷却（范围 1000–600000，附最多 25% 抖动）；免费闸门按请求形态返回 403，不代表 Worker 故障 |
+| `cooldown.rateLimitMs` | 900000 | 429 冷却；上游给了 `Retry-After` 时以它为准，但不短于 `transportBaseMs`；不加抖动 |
+| `cooldown.authFailMs` | 60000 | 401 的固定短冷却（附最多 25% 抖动），不按失败次数翻倍 |
+| `cooldown.forbiddenMs` | 5000 | 403 的短冷却（范围 1000–600000，附最多 25% 抖动），并换下一个 Worker 重试；免费闸门按请求形态返回 403、地区限制按出口返回 403，都不代表 Worker 故障 |
 | `cooldown.transportBaseMs` | 2000 | 传输、超时、上游 5xx 指数退避的起点 |
 | `cooldown.transportMaxMs` | 120000 | 上述指数退避的上限 |
 | `affinityTtlMs` | 3600000 | 会话亲和的滑动闲置时长，范围 60000–86400000 |
@@ -291,9 +293,15 @@ rule 模式下可能不参与选路，在 global 模式下则会影响本机其�
 分组参与选路还不够，上游域名自己也要命中这个分组。企业 DNS 会把 `opencode.ai`
 解析到内网地址，这时排在前面的私网 `IPCIDR,10.0.0.0/8,DIRECT` 之类规则先命中，
 所有 Worker 的 Zen 请求直连、共用一个出口，而回显报告仍显示各自独立。
-`npm run doctor` 第 5 层会用内核自己的 DNS 解析上游域名，按规则顺序找出首条
-命中；不经过所选分组时给出告警。处理方式是在 Clash 规则最前面加
+`npm run doctor` 第 5 层（Clash 控制面）会用内核自己的 DNS 解析上游域名，按规则
+顺序找出首条命中；不经过所选分组时给出告警。处理方式是在 Clash 规则最前面加
 `DOMAIN-SUFFIX,opencode.ai,<selectorGroup>`，或让内核用公网 DNS 解析该域名。
+
+规则要加在订阅更新后仍会保留的位置。Clash Verge 这类客户端会用“订阅 + 用户扩展”
+重新生成内核实际加载的运行配置：写在订阅对应的规则扩展（prepend 规则）或全局扩展
+脚本里的规则会在每次订阅更新、重新生成后保留；直接编辑生成出来的运行配置只在当次
+生效，下一次重新生成时会被覆盖。改完后在 Controller 的 `/rules` 确认该规则位于私网
+`IPCIDR` 规则之前，再运行 `npm run doctor`。
 
 `manual` 严格使用 `activeBridgeId`，不会因为它失联而悄悄切换；`auto` 在有健康的
 当前内核时保持粘滞，否则按 priority 选择。转发路径不会逐请求探活或自动切换。
@@ -320,8 +328,9 @@ rule 模式下可能不参与选路，在 global 模式下则会影响本机其�
 
 ## 订阅和批量探测
 
-订阅刷新会尝试多种 User-Agent，解析 Clash YAML/JSON、SIP008、分享链接列表及
-多层 Base64，取能解析出最多节点的结果。节点 id 由订阅 id 与节点名派生，重复
+订阅刷新依次尝试多种 User-Agent，解析 Clash YAML/JSON、SIP008、分享链接列表及
+多层 Base64：拿到含节点的 Clash/SIP008 结构化结果即停止，否则在总时长上限内取
+节点最多的结果。节点 id 由订阅 id 与节点名派生，重复
 刷新不会重复添加；用户改过的 `enabled` 与已测 `egressIp` 会保留。订阅 URL 是
 凭证，界面、API 和错误消息都会脱敏。
 
@@ -356,22 +365,26 @@ npm run doctor
 npm run status
 ```
 
-doctor 按配置、服务、统计库、Worker、Clash、模型目录、出口的顺序检查，只报告
-第一个失败层。常见响应：
+doctor 按 1 配置、2 服务、3 统计库、4 Worker、5 Clash 控制面、6 模型目录、
+7 回显出口实测（仅 `--deep`）的顺序检查，只报告第一个失败层；警告不中断后续层。
+常见响应：
 
 | 症状 | 方向 |
 |---|---|
 | 401 | Relay Token 缺失或不匹配；也可能是上游返回的认证失败，结合响应头与日志判断 |
 | 403 `model_not_allowed` | 不符合免费规则，或符合规则但目录显示已下架 |
-| 403 `FreeTierError` | 上游免费额度闸门，取决于请求形态；Worker 只短暂冷却 |
+| 403 `FreeTierError` | 上游免费额度闸门，取决于请求形态；网关会换 Worker 重试，全部失败时返回最后一次的 403 |
+| 403 `not available in your country` | 出口所在地区不可用该模型；网关会换 Worker 重试，全部失败时检查各 Worker 的出口地区 |
 | 400 `Model is unavailable` | 上游目录已变化或账号看不到该模型 |
 | 502 `upstream_unreachable` | 上游、出口、DNS 或 TLS 不可达 |
+| 503 `no_worker_available` | 没有可用 Worker（未配置、全部停用或认证 Worker 缺 key）；全员冷却时仍会尝试最早恢复的一个，响应头 `x-zen-gateway-route: all_cooling` |
 | 503 `egress_unavailable` | 代理停用、Clash 不可用、selector 或 secret 配置错误 |
 | 启动退出 | schema、引用完整性或端口冲突 |
 
 响应头 `x-zen-gateway-worker`、`x-zen-gateway-route` 和
 `x-zen-gateway-attempts` 只在请求实际到达上游后描述承接 Worker、路由来源和尝试
-次数。网关在选 Worker 前拒绝的请求没有这些头，应查看 `GET /api/stats` 的拒绝
+次数；目录缺失、按后缀或名单放行未经在架核验时另有 `x-zen-gateway-free`
+（`suffix_unverified` / `extra_unverified`）。网关在选 Worker 前拒绝的请求没有这些头，应查看 `GET /api/stats` 的拒绝
 计数和日志。
 
 ### 企业 CA
