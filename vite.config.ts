@@ -18,26 +18,37 @@ import { resolvePort } from "./src/store/port.ts";
  *
  * 用 `fileURLToPath(new URL("."))` 而不是 cwd：vite 可能从别处被调起。
  */
-const SERVER_PORT = resolvePort(fileURLToPath(new URL(".", import.meta.url)));
+/** 与 service.mjs 相同：ZG_DATA_DIR 存在时由 paths.ts 读取它指定的 config。 */
+export function resolveViteServerPort(): number {
+  return resolvePort(
+    process.env.ZG_DATA_DIR ? undefined : fileURLToPath(new URL(".", import.meta.url)),
+  );
+}
 
-export default defineConfig({
-  root: fileURLToPath(new URL("src/admin", import.meta.url)),
-  plugins: [react(), tailwindcss()],
-  build: {
-    outDir: fileURLToPath(new URL("dist/admin", import.meta.url)),
-    emptyOutDir: true,
-    sourcemap: true,
-  },
-  server: {
-    port: 5173,
-    strictPort: true,
-    // 管理面仅 loopback：dev server 也不对外监听。
-    host: "127.0.0.1",
-    // `/health` 是 doctor.mjs 与 service.mjs 健康等待所用的同一个路径，
-    // 不加 /api 前缀，dev 下需单独转发。
-    proxy: {
-      "/health": { target: `http://127.0.0.1:${SERVER_PORT}`, changeOrigin: false },
-      "/api": { target: `http://127.0.0.1:${SERVER_PORT}`, changeOrigin: false },
+/** 导出构造函数，让测试能在临时 ZG_DATA_DIR 下验证真正的代理 target。 */
+export function createViteConfig() {
+  const serverPort = resolveViteServerPort();
+  return defineConfig({
+    root: fileURLToPath(new URL("src/admin", import.meta.url)),
+    plugins: [react(), tailwindcss()],
+    build: {
+      outDir: fileURLToPath(new URL("dist/admin", import.meta.url)),
+      emptyOutDir: true,
+      sourcemap: true,
     },
-  },
-});
+    server: {
+      port: 5173,
+      strictPort: true,
+      // 管理面仅 loopback：dev server 也不对外监听。
+      host: "127.0.0.1",
+      // `/health` 是 doctor.mjs 与 service.mjs 健康等待所用的同一个路径，
+      // 不加 /api 前缀，dev 下需单独转发。
+      proxy: {
+        "/health": { target: `http://127.0.0.1:${serverPort}`, changeOrigin: false },
+        "/api": { target: `http://127.0.0.1:${serverPort}`, changeOrigin: false },
+      },
+    },
+  });
+}
+
+export default createViteConfig();

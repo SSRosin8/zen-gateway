@@ -1,13 +1,16 @@
 import { readFileSync } from "node:fs";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { createServer, type Server } from "node:http";
+import { Response as UndiciResponse } from "undici";
 import { mkdtemp, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { Hono } from "hono";
 import { createApp } from "../../src/server/app.ts";
 import { EgressService } from "../../src/core/proxy/egress.ts";
-import { ModelCatalog } from "../../src/core/models/catalog.ts";
+import { ModelCatalog, catalogIdentityOf } from "../../src/core/models/catalog.ts";
+import { DispatcherPool } from "../../src/core/proxy/dispatcher.ts";
+import { SelectorLockRegistry } from "../../src/core/proxy/selectorLock.ts";
 import { Scheduler } from "../../src/core/routing/scheduler.ts";
 import { ConfigSchema, CONFIG_VERSION, type Config } from "../../src/shared/schema.ts";
 import {
@@ -174,7 +177,7 @@ function makeApp(
     },
   });
 
-  return { app, scheduler, getConfig: () => current, seenSinceDay: seen };
+  return { app, scheduler, catalog, getConfig: () => current, seenSinceDay: seen };
 }
 
 async function get(app: Hono, path: string) {
@@ -1321,6 +1324,66 @@ describe("/api/models", () => {
     expect(parsed.models).toEqual([]);
     // 规则照常给出 —— 那来自配置，与目录无关。
     expect(parsed.rules.freeSuffix).toBe("-free");
+  });
+
+  it("把配置中的缺失显式免费项列为 retired，并保留 listed=false", async () => {
+    const config = makeConfig({
+      models: { extraFreeIds: ["missing-free"], enforceCatalog: true },
+    });
+    for (const worker of config.workers) worker.proxyId = null;
+    const { app, catalog } = makeApp(config);
+    const response = new UndiciResponse(
+      JSON.stringify({ data: [{ id: "listed-free" }, { id: "paid-model" }] }),
+      { status: 200, headers: { "content-type": "application/json" } },
+    );
+    const pool = new DispatcherPool({ headersTimeoutMs: 1000, bodyTimeoutMs: 1000 });
+    await catalog.ensure(catalogIdentityOf(config), config, () => ({
+      config,
+      dispatchers: pool,
+      locks: new SelectorLockRegistry(),
+      controllerFor: () => null,
+      fetchImpl: async () => response,
+    }));
+
+    const parsed = ModelListSchema.parse((await get(app, "/api/models")).body);
+    expect(parsed.models.find((m) => m.id === "missing-free")).toMatchObject({
+      free: false,
+      reason: "retired",
+      listed: false,
+    });
+    expect(parsed.models.find((m) => m.id === "listed-free")).toMatchObject({
+      free: true,
+      listed: true,
+    });
+    await pool.close();
+  });
+
+  it("关闭目录交集时，缺失显式免费项仍可用而不是误称 retired", async () => {
+    const config = makeConfig({
+      models: { extraFreeIds: ["missing-free"], enforceCatalog: false },
+    });
+    for (const worker of config.workers) worker.proxyId = null;
+    const { app, catalog } = makeApp(config);
+    const response = new UndiciResponse(JSON.stringify({ data: [{ id: "listed-free" }] }), {
+      status: 200,
+      headers: { "content-type": "application/json" },
+    });
+    const pool = new DispatcherPool({ headersTimeoutMs: 1000, bodyTimeoutMs: 1000 });
+    await catalog.ensure(catalogIdentityOf(config), config, () => ({
+      config,
+      dispatchers: pool,
+      locks: new SelectorLockRegistry(),
+      controllerFor: () => null,
+      fetchImpl: async () => response,
+    }));
+
+    const parsed = ModelListSchema.parse((await get(app, "/api/models")).body);
+    expect(parsed.models.find((m) => m.id === "missing-free")).toMatchObject({
+      free: true,
+      reason: "extra",
+      listed: false,
+    });
+    await pool.close();
   });
 });
 

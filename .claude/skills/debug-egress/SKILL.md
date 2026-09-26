@@ -1,6 +1,6 @@
 ---
 name: debug-egress
-description: 出口隔离异常、代理桥接失败、Clash 分组切换不生效、模型目录缺失或模型接口返回 502 时使用。按依赖顺序检查配置、服务、统计库、Worker、控制面、目录和出口，核对企业 CA、实际代理端口、规则分组与真实转发链路，避免把历史本机观察当作当前配置。
+description: 出口隔离异常、代理桥接失败、Clash 分组切换不生效、模型目录缺失或模型接口返回 502 时使用。按依赖顺序检查配置、服务、统计库、Worker、控制面、目录和出口，核对信任库、实际代理端口、规则分组与真实转发链路，不把某台机器的观察当作通用默认值。
 ---
 
 # 排查出口与桥接
@@ -9,20 +9,19 @@ description: 出口隔离异常、代理桥接失败、Clash 分组切换不生�
 后面的层在它修好之前给不出有意义的答案。加 `--deep` 会实测每个出口的公网 IP
 （会真发请求并切 Clash 节点）。
 
-下面是这台机器上**实测过**的陷阱，按发生频率排。
+下面是常见且可复核的陷阱，按排查顺序列出。
 
-## 1. 企业 CA 中间人 —— 症状是 `/v1/models` 返回 502
+## 1. 自定义 CA 或信任库 —— 症状是 `/v1/models` 返回 502
 
-历史排查时，`opencode.ai` 被内网 DNS 解析到内网地址，证书由企业 CA 签发。
+某些企业网络会改写上游 DNS 和证书链，服务进程的信任库可能与交互式 shell 不同。
 
-**关键的不对称：`curl` 能过，Node 不能。** curl 读系统 CA 库
-（`/etc/ssl/certs/ca-certificates.crt`，已含该 CA），而 **Node 用编译进
-二进制的 CA 集合，默认不读取该系统库**。显式启用系统 CA 或额外 CA 后行为会不同。
+**关键的不对称：`curl` 能过，Node 不能。** curl 与 Node 可能使用不同信任库。
+显式启用额外 CA 后行为会不同。
 
 所以「我 curl 验过上游是通的」对网关**完全不成立**（纪律 #8）。修法：
 
 ```bash
-NODE_EXTRA_CA_CERTS=/etc/ssl/certs/ca-certificates.crt npm start
+NODE_EXTRA_CA_CERTS=/path/to/your/ca-bundle.pem npm start
 ```
 
 **症状是 502 `upstream_unreachable`，不是"200 加空列表"。**
@@ -34,7 +33,7 @@ NODE_EXTRA_CA_CERTS=/etc/ssl/certs/ca-certificates.crt npm start
 
 ## 2. `GLOBAL` 分组在 rule 模式下切了不生效
 
-本机 Clash Verge 是 `mode: rule`，而 **rule 模式下 `GLOBAL` 分组不参与选路**。
+在 `mode: rule` 下，`GLOBAL` 分组可能不参与选路。
 把它当 selectorGroup 会让所有 Worker 共用一个公网 IP，而**不报任何错** ——
 切换请求成功返回，`now` 却仍是 `DIRECT`。
 
@@ -47,8 +46,7 @@ NODE_EXTRA_CA_CERTS=/etc/ssl/certs/ca-certificates.crt npm start
 
 ## 3. `mixed-port` 与配置不一致 —— 控制面通而数据面全挂
 
-本机混合端口**不是**文档默认的 7890，且随内核而变（0dcloud 是 17891，
-Clash Verge 是 7897），`port`/`socks-port` 还可能都是 0。
+混合端口不是稳定的文档默认值，且随内核而变；`port`/`socks-port` 还可能都是 0。
 
 配置里的 `localProxyPort` 与内核实际监听的不一致时，桥接会连到一个
 **没人监听的端口**：所有桥接代理传输失败，而控制面明明是通的。
@@ -68,9 +66,7 @@ doctor 第 5 层会核对。**注意一个已登记的盲区**：它只读 `mixe
 出口隔离报告在它们跑过之前**没有数据来源** —— 概览页会显示"还不知道"
 而不是报错。看到空的隔离视图先想到这一条，别去怀疑分组逻辑。
 
-> 这个缺口是 Phase 9 接后台时才暴露的：`applyProbeResult()` 零生产调用点，
-> 而七轮审核都没查到 —— 每一层单独看都是对的（纯函数有单测、探测真在跑、
-> 分组逻辑有测试），缺的是把它们接起来的那根线。
+> 如果报告为空，先确认是否已经执行过探测，以及服务是否成功写回配置。
 
 ## 5. 隔离判定按**实测 IP** 分组，不按代理 id
 
@@ -86,7 +82,7 @@ doctor 第 5 层会核对。**注意一个已登记的盲区**：它只读 `mixe
 
 探测打 `api.ipify.org` 而转发打 `opencode.ai` —— 两者可能命中**不同的
 路由规则**，于是测出的"出口不同"与实际转发无关。本项目真实踩到过：
-探测走代理而转发因内网劫持走 DIRECT。
+探测可能走代理而转发命中另一条规则。
 
 证明"流量走了哪个出口"的可靠办法是读 Clash 的 `/connections`
 （直接给 `chains` 与命中的 `rule`）。

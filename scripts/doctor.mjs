@@ -24,9 +24,9 @@
  * ## 为什么目录那一层**问服务**,而不是自己去打上游
  *
  * 这是第七轮审核那条纪律(#8)的直接应用:**验证工具必须与产品代码共享
- * 同一套信任/配置**。本机 `opencode.ai` 被企业 CA 中间人,而 Node 不读系统
- * CA 库 —— 于是 `curl` 通而 `node` 不通。若 doctor 自己 fetch 上游,它拿到的
- * 结果反映的是 **doctor 进程**的 CA 环境,而真正要诊断的是**服务进程**的。
+ * 同一套信任/配置**。服务进程与诊断进程可能使用不同 CA、代理或环境变量。
+ * 若 doctor 自己 fetch 上游,它拿到的结果反映的是 **doctor 进程**，而真正要
+ * 诊断的是**服务进程**。
  * 两者可以不同(服务由 `npm start` 启动时带了 `NODE_EXTRA_CA_CERTS`,
  * 而用户手敲 `npm run doctor` 时没带),那样 doctor 会给出一个与现实相反的结论。
  *
@@ -74,8 +74,7 @@ const DEEP = process.argv.includes("--deep");
  * 规划特别标注过这一条:先前这里写的诊断命令是从 `npm run status` 的输出里
  * grep 端口,而**服务没在跑时它只打印「未在运行」**,grep 拿不到数字、
  * curl 拼出畸形 URL。`resolvePort()` 与服务是否在跑无关,所以它才是该用的。
- * 更要紧的是:本机 9876 曾被另一个服务占着而本网关是 9877,照抄默认值会拿到
- * **另一个进程**的 `{"ok":true}`,于是第 2 层「通过」而实际问的是别人。
+ * 不要照抄默认端口，否则可能误问同机另一个进程并得到误导性的健康响应。
  */
 let PORT;
 try {
@@ -508,7 +507,7 @@ async function layerClashControl() {
       detail: lines.join("\n"),
       nextStep:
         "确认 Clash 正在运行且开了 External Controller。\n" +
-        "若 apiSecret 不对:从 Clash 的配置里取 secret 填进 clash.bridges[].apiSecret。\n" +
+        "若 apiSecret 不对:从 Clash 的配置或管理界面取得 secret，填进 clash.bridges[].apiSecret。\n" +
         "或跑 npm run setup 重新探测。",
     };
   }
@@ -517,7 +516,7 @@ async function layerClashControl() {
    * 顺带核对**混合端口**。
    *
    * 这是规划特别标注的一条:本机的混合端口**不是**文档默认的 7890,
-   * 且实测值随内核而变(0dcloud 是 17891,Clash Verge 是 7897)。
+   * 且随内核配置而变，不能使用固定默认值。
    * 配置里的 `localProxyPort` 若与内核实际监听的 `mixed-port` 不一致,
    * 桥接会静默连到一个**没人监听的端口** —— 症状是所有桥接代理都传输失败,
    * 而控制面明明是通的。这一层是唯一能发现它的地方。
@@ -713,7 +712,7 @@ async function layerCatalog() {
       detail: `${caHint}\n服务端日志里有被脱敏的具体原因(形如 fetch failed ← unable to get local issuer certificate)。`,
       nextStep:
         serverCa === undefined
-          ? `重启并带上 CA:\n  npm stop && NODE_EXTRA_CA_CERTS=/etc/ssl/certs/ca-certificates.crt npm start\n（本机 opencode.ai 被企业 CA 中间人,而 Node 不读系统 CA 库 —— curl 通不代表 Node 通。）`
+          ? `重启并带上 CA:\n  npm stop && NODE_EXTRA_CA_CERTS=/path/to/your/ca-bundle.pem npm start\n（服务与 curl 可能使用不同信任库，curl 通不代表服务通。）`
           : `查出口与网络:\n  grep 目录拉取 ${join(DATA_DIR, "zen-gateway.log")} | tail -5\n  npm run doctor -- --deep   # 实测各出口的公网 IP`,
     };
   }
