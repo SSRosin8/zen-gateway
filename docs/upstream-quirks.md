@@ -104,21 +104,22 @@ key 的目录槽位。不能由少量样本推断完整目录按某个单一维�
 ## 真实 OpenCode CLI 与多出口
 
 **观察日期**：2026-09-26。
-**客户端**：OpenCode CLI v2.0.12，使用原生 `opencode run --standalone --format json`；
-当时的隔离验收夹具显式写入了每模型的 `settings.baseURL`、Relay Token 和 SDK package；
-这只是当时的测试配置，不代表接入所需字段。当前推荐配置只覆盖内置 `opencode` provider
-的 Base URL 和 API key，保留 OpenCode 自己的 SDK package 和模型目录。
-**范围**：3 个未绑定到当前 Worker 的临时 Clash 出口、3 把已配置认证 key 和一个
-临时构造的不发送 key 的匿名 Worker、4 个免费模型，共 48 次经网关请求。测试没有
-输出 key、出口名称或公网 IP；每次请求都在 Clash `/connections` 中核对到
-`opencode.ai`、所选临时出口链路且不是 `DIRECT`。
+**客户端**：OpenCode CLI v2.0.12，使用原生 `opencode run --standalone --format json`。
+隔离 mock 确认 `providers.opencode.settings` 足以覆盖 Base URL 和 API key；当前推荐配置
+只覆盖这两个连接设置，保留 OpenCode 自己的 SDK package 和模型目录。客户端模型目录中
+没有的模型会在 CLI 侧报 `Model unavailable`，不应归因于网关。
+**历史范围**：当时的验收夹具显式补了逐模型 package/settings，覆盖 3 个未绑定到当前
+Worker 的临时 Clash 出口、3 把已配置认证 key 和一个临时构造的不发送 key 的匿名 Worker、
+4 个免费模型，共 48 次经网关请求。它证明了网关转发能力，但不能推出客户端必须覆盖
+模型目录；当前接入仍只使用 provider 连接设置。测试没有输出 key、出口名称或公网 IP；
+每次请求都在 Clash `/connections` 中核对到 `opencode.ai`、所选临时出口链路且不是
+`DIRECT`。
 
 结果按上游响应分类：
 
-- `mimo-v2.6-flash-free`、`big-pickle`、`space-bunny-free` 的 Chat Completions：
-  36 个组合全部返回 `OK`。
-- `muse-spark-1.3-contributor-free` 的 Responses：12 个组合全部返回 `OK`。
-  这说明本次临时出口和当前上游策略允许该样本；其他出口仍可能受地域限制。
+- `mimo-v2.6-flash-free`、`big-pickle`、`space-bunny-free` 的 Chat Completions，以及
+  `muse-spark-1.3-contributor-free` 的 Responses：该历史夹具中的请求均返回 `OK`。这只
+  说明当时的临时出口和上游策略允许该样本；其他出口仍可能受地域限制。
 - 当前没有可用于 Messages 真实验收的免费模型。
 
 用户在默认 OpenCode 会话中观察到 Muse Spark 受地域限制，而经网关的本轮出口样本
@@ -131,6 +132,15 @@ key 的目录槽位。不能由少量样本推断完整目录按某个单一维�
 矩阵曾得到 403；逐变量控制实验显示关键变量是该权限规则，空的 XDG 目录本身不构成
 失败原因，因此旧矩阵不作为上游可用性的结论。Messages 仍只有本地协议级验证，
 等待上游提供可验模型。
+
+同日后续的匿名专项复核改用三个真实出口，每次只启动一个匿名 Worker，并为每个 CLI
+进程设置 `PWD`、绝对 `OPENCODE_CONFIG`、隔离 XDG 目录和全新会话。三个出口上的
+Big Pickle、Space Bunny Chat 请求均返回 `200`；MiMo 在该隔离客户端目录中未注册，
+CLI 直接报 `Model unavailable`，没有发出网关请求；Muse Spark Responses 均因当前地域策略
+返回 `403`。三个临时运行库都只出现对应的匿名 Worker，未出现认证 Worker。另行对匿名 `/v1/models` 做 CA
+对照：服务进程未设置 `NODE_EXTRA_CA_CERTS` 时返回 `502 upstream_unreachable`，带上
+服务使用的 CA 后返回 `200`，响应中的目录槽位为 `keyless`。这两类结果分别属于出口/上游
+策略与服务信任库条件，不能互相归因。
 
 ## 重新测量的边界
 

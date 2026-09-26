@@ -44,6 +44,11 @@ Clash selector；它不单独证明 Zen 实际请求的出口。
 Token。后台网关页可选择 1.x 或 2.x 格式生成对应配置块；两种格式都只覆盖 Base URL
 和 API Key，Relay Token 仍是占位符，模型与 SDK 继续由 OpenCode 自己管理。
 
+OpenCode 2.0.12 的隔离实测确认，`providers.opencode.settings` 会把已在客户端模型
+目录中的模型请求指向本地网关；不要为了补齐客户端目录而在这里复制 `package` 或
+`models`。若 CLI 报 `Model unavailable`，先检查它自己的模型目录，不能据此判断网关
+没有接管 Base URL。
+
 用真实 OpenCode CLI 验证当前可用的 Chat Completions 模型：
 
 ```bash
@@ -55,6 +60,12 @@ Messages 路由已完成网关级实现，但当前没有可验的免费上游�
 客户端的请求头和请求体可能不同，某一种请求得到的 403 或 500 不能推广为所有
 客户端的结论。停止网关后重复同一条 CLI 命令应连接失败，重启后恢复，这可以
 确认请求确实经过网关。
+验收匿名 Worker 时必须使用新的 OpenCode 会话和隔离状态目录；已有会话的亲和绑定优先
+于 `anonymous_first`，会继续使用原认证 Worker，这是保持上游推理连续性的设计。
+临时网关的运行库和 `x-zen-gateway-worker` 响应头才是判断实际 Worker 的依据，官方
+控制台记录不能单独证明本机中继使用了哪个 Worker。`/v1/models` 若返回 502，先核对
+服务进程的 `NODE_EXTRA_CA_CERTS` 和日志中的证书链错误；这表示目录从未成功取得，
+不表示匿名请求带上了认证 key。
 
 ## 主要能力
 
