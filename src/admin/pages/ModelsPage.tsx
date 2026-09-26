@@ -112,7 +112,7 @@ export function ModelsPage({
     /*
      * 目录拿不到 —— 与「目录里一个模型都没有」必须分开报。
      *
-     * 前者的下一步是查网络/CA（`npm run doctor` 第 6 层会直接指出），
+     * 前者的下一步是查网络/CA（诊断页的目录层会直接指出），
      * 后者是查 freeSuffix。显示一个空表会把用户引向错误方向。
      */
     return (
@@ -123,8 +123,11 @@ export function ModelsPage({
           「一个免费模型都没有」。
         </p>
         <p className="mt-2 text-text-muted">
-          跑 <Mono>npm run doctor</Mono>，它的第 6 层会区分「上游不可达」与
-          「目录可达但免费集为空」，并给出下一步。最常见的成因是企业网络下
+          到{" "}
+          <a href="#diagnostics" className="text-accent-fg underline">
+            诊断页
+          </a>{" "}
+          看目录层，它会区分「上游不可达」与「目录可达但免费集为空」，并给出下一步。最常见的成因是企业网络下
           缺 <Mono>NODE_EXTRA_CA_CERTS</Mono>（Node 不读系统 CA 库，
           而 <Mono>curl</Mono> 读 —— 所以 curl 通不代表网关通）。
         </p>

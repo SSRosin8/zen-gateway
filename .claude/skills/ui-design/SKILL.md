@@ -16,7 +16,7 @@ paths:
 - 禁用态换实色（`disabled:bg-border-strong` 等），不用 `disabled:opacity-*`（源码扫描会拦）。
 - `accent-fill` 只做填充，唯一前景是 `on-accent-fill`；不做整行或大面积背景。
 - 状态用 `StatusIndicator`（图标 + 文字，空值会抛），行状态用 `RowMark` 左边框，不用背景色块。
-- 每个视图最多一个 `PrimaryButton`；行内编辑打开时，页头按钮退为描边。
+- 每个视图最多一个 `PrimaryButton`；行内编辑打开时，页头按钮退为描边；嵌入别的页面的共用流程只用描边按钮。
 - 视图状态（页面、标签、搜索、筛选、页码）进 hash URL，筛选组件受控。
 - JSX 里不写 markdown，强调用 `Strong`。
 
@@ -37,11 +37,16 @@ paths:
 - 表格行高 36px（`--spacing-row`，`ROW_HEIGHT`），正文 14px，`PAGE_SIZE = 16`；三者一起改。
 - 独立控件（按钮、输入框、筛选片、导航、标签）最小 44px；表格行内按钮用 `SecondaryButton compact`（32px，≥24px）。
 - 单元格内容单行（`whitespace-nowrap`）；需要第二个信息就加列或同行排。
-- 页面宽 `max-w-5xl`：1280 宽下所有表格无横向溢出，加宽没有收益。
+- 外壳 `Shell`：md 及以上左侧栏 220px 常驻（品牌、`Nav`、底部配色），内容区流式铺满剩余宽度，不设 `max-w-*`；长段落在面板内用 `max-w-3xl` 限行长。
+- md 以下侧栏收成顶栏 + 展开式抽屉（同一个 `<aside>`，不渲染两份导航）：打开时焦点进第一个导航项，Esc 关闭并还焦点给菜单按钮，点导航项自动收起。
 
 ## 组件索引
 
 - `Panel`：页面内的一块内容，标题 + 可选操作；`Metric`：面板顶部 2–4 个关键数字。
+- `StaleBanner` / `FallbackView`（`StatusViews.tsx`）：断连横幅与首次加载三态。
+- `ClashImportFlow`（快速开始与代理池共用）、`OpenCodeConfigCard`（快速开始与网关页共用）：同一流程只有一个组件。
+- `SecretField`：已保存凭证的三态编辑（留空不改 / 设置新值 / 清空），必填凭证 `allowClear={false}`。
+- `WorkerEditor`、`BulkImportDialog`：Worker 新增编辑与从 Clash 节点批量导入（一次 `workers.create`）。
 - `PrimaryButton` / `SecondaryButton`（`danger`、`compact`）：唯一主操作 / 其余操作。
 - `FilterChip`：互斥筛选或时间范围（`aria-pressed`）。
 - `DataTable`：分页 + 行内展开；`SimpleTable`：不分页小表；`TableFilters`：搜索 + 状态筛选。
@@ -72,7 +77,8 @@ paths:
 
 ## 交互与可访问性
 
-- 导航与标签是真实 `<a href="#...">`（导航 `aria-current`，标签 tablist / `aria-selected` / `aria-controls`）。
+- 导航与标签是真实 `<a href="#...">`（导航 `aria-current` + 3px 左边框，标签 tablist / `aria-selected` / `aria-controls`）。
+- 首启未完成且 URL 没指定页面时落到快速开始（判据等 `/api/opencode` 到齐）；侧栏徽标显示进度，完成后消失。
 - 截断必须可找回：用 `Truncate`，不要裸写 `truncate` 类（测试扫描）。
 - 骨架 `aria-hidden`，加载文字给读屏；打开行内表单时焦点移到第一个字段；焦点环 2px `accent-fg`。
 
@@ -82,8 +88,8 @@ paths:
 
 ## 凭证展示
 
-- 已保存凭证只显示 `{present, fingerprint}`；订阅 URL 只显示 `redactUrl` 结果。
-- 新 key 在密码框输入，保存后清空；复制的客户端配置用 Relay Token 占位符。
+- 已保存凭证只显示 `{present, fingerprint}`；订阅 URL 只显示 `redactUrl` 结果，编辑时不回填。
+- 新 key 在密码框输入，保存后清空；`opencode.json` 由服务端写入真实 token，复制的片段只用占位符。
 
 ## 不引入的依赖
 

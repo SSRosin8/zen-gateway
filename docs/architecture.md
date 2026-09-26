@@ -10,13 +10,13 @@ zen-gateway 是本机单用户 HTTP 网关。请求经过 Relay Token 鉴权、�
 
 ## 模块
 
-- shared：schema.ts 是配置唯一契约，contract.ts 是 HTTP 契约，redact.ts 集中处理脱敏，ip.ts 提供浏览器可移植的 IP 解析，batchProbe.ts 是批量探测 reducer。
+- shared：schema.ts 是配置唯一契约，contract.ts 是 HTTP 契约，redact.ts 集中处理脱敏，ip.ts 提供浏览器可移植的 IP 解析，batchProbe.ts 是批量探测 reducer，openCodeConfig.ts 是 opencode.json 形状（服务端写文件与后台片段共用）。
 - core/protocols：注册 chat、responses、messages 三个协议面，负责路径、会话键、流式意图、协议专属请求头和 usage 形状。
 - core/models：免费判定、keyed/keyless 目录缓存、token usage 解析。
 - core/routing：WorkerPool、Scheduler、稳定选择、分级冷却、会话和推理指纹亲和。
 - core/upstream：请求头、undici fetch、重试、流式透传和旁路扫描。
-- core/proxy：dispatcher 池、Clash Controller、selector 锁、出口探测、订阅解析和导入。
-- server：启动装配、Hono 路由、Relay/loopback 守卫、配置补丁、管理投影和批量探测执行。
+- core/proxy：dispatcher 池、Clash Controller、selector 锁、出口探测、订阅解析和导入；clash/setupImport.ts 是 Controller 发现与合并（setup 与管理面共用），clash/diagnose.ts 是 Clash 层诊断（doctor 与管理面共用）。
+- server：启动装配、Hono 路由、Relay/loopback 守卫、配置补丁（patch.ts 与 patchSections.ts）、管理投影、批量探测执行、进程内诊断和 opencode.json 读写；routes/admin/ 下按功能拆分 clash、diagnostics、opencode 等管理路由。
 - store：配置读写、端口解析、SQLite 迁移、统计和亲和持久化。
 - admin：React/Vite 管理后台，包括概览、网关、代理池、Worker、模型、用量和首启向导。
 
@@ -25,6 +25,8 @@ shared 不能导入 node:*，因为它会被浏览器构建。Node 专属能力�
 ## 启动、热更新和关闭
 
 server/index.ts 先加载严格校验的 config.json，再尝试打开 SQLite，随后创建唯一的 EgressService、Scheduler 和 ModelCatalog，恢复亲和与批量探测状态，组装路由并监听 loopback。已创建的 store 会把写入失败累计到 /health 的 storeWriteFailures；数据库在启动时打不开则停用统计、亲和持久化和批量探测并记录日志，转发仍可用，这种情况不计入该计数（排查方式见 [usage.md](usage.md#日志和数据库)）。
+
+首次启动（本次新建了 config.json）且项目根没有 opencode.json 时，监听后异步生成它；项目根取服务工作目录（ZG_PROJECT_ROOT 可覆盖，供测试），与 ZG_DATA_DIR 无关。新建用临时文件加 link 独占落位，文件在检查后被别人创建时不会被覆盖。
 
 启动监听后异步预热目录。预热失败不阻止服务；模型路由会报告“从未成功取得目录”的上游不可达。
 
@@ -94,7 +96,11 @@ Clash 支持 manual 和 auto。转发路径由 pickBridge 按配置取内核、�
 
 管理 API 只接受 loopback TCP 对端地址，不信任 X-Forwarded-For。管理体上限 1 MiB，转发体上限 64 MiB，均边读边限。端点清单见 [usage.md 的管理 API](usage.md#管理-api)。
 
-凭证投影只返回存在性和短指纹。secret 补丁是缺席不动、set 替换、clear 清空三态。响应返回前再次过契约 schema。
+凭证投影只返回存在性和短指纹。secret 补丁是缺席不动、set 替换、clear 清空三态；Relay Token 另有 rotate，由服务端用首启同一个生成器生成。响应返回前再次过契约 schema。
+
+补丁合并顺序为 gateway → routing → models → workers → clash → subscriptions → proxies：Worker 先改绑，之后再删除其原代理是合法的；删除内核或订阅连带删除其导入的代理，其中仍被引用的则整个请求失败。全部合并完成后再过一次全量 ConfigSchema。
+
+Clash 发现与导入和 setup 共用 setupImport.ts；导入经 applyConfig 热更新，合并基于发现完成后重读的配置。进程内诊断（server/admin/diagnostics.ts）与 doctor 共用 Worker 和 Clash 层实现，目录层走 /v1/models 同一条 ensureCatalog 路径并报告服务进程自身的 NODE_EXTRA_CA_CERTS；各层独立运行，不在首个失败处停止。深度诊断复用 /api/probe 的探测与写回，并通过 BatchProbeRunner.runExclusive 与批量探测共享同一把互斥锁，避免两者同时切换 selector。
 
 批量探测由 reducer、SQLite 状态和 BatchProbeRunner 组成，状态为 idle、screening、running、paused、cancelling、done；两段进度分开显示，同一时刻只允许一批运行，进程重启会收尾遗留任务。前端轮询以服务端状态为准，并用 generation 防止旧响应覆盖取消后的状态；轮询失败时保留上次数据并提示可能过期。
 

@@ -3,7 +3,7 @@ import { DatabaseSync } from "node:sqlite";
 import { join } from "node:path";
 import { configExists, loadConfig, ConfigError } from "../../../src/store/config.ts";
 import { HealthSchema } from "../../../src/shared/contract.ts";
-import { isUsable } from "../../../src/core/routing/workerPool.ts";
+import { diagnoseWorkers } from "../../../src/core/routing/diagnose.ts";
 import { safeErrorMessage } from "../../../src/shared/redact.ts";
 import { humanMs } from "../report.mjs";
 
@@ -158,77 +158,11 @@ export async function layerStore(ctx) {
   return { status: "pass", text: "统计写入正常(0 次失败)", detail: dbInfo };
 }
 
-/** 第 4 层：至少一个可用 Worker。判定复用调度器的 `isUsable()`。 */
+/** 第 4 层：至少一个可用 Worker。判定与管理面诊断共用 `diagnoseWorkers`。 */
 export async function layerWorkers(ctx) {
-  const workers = ctx.config.workers;
-  const usable = workers.filter(isUsable);
-
-  if (workers.length === 0) {
-    return {
-      status: "fail",
-      text: "没有配置任何 Worker",
-      nextStep: `在 ${join(ctx.dataDir, "config.json")} 的 workers 数组里加一个:\n  { "id": "w1", "kind": "authenticated", "apiKey": "<你的 Zen key>", "proxyId": null }\n或显式添加免 key 的匿名 Worker。`,
-    };
-  }
-
-  if (usable.length === 0) {
-    return {
-      status: "fail",
-      text: `${workers.length} 个 Worker 全部不可用(已停用或认证 Worker 缺 apiKey)`,
-      detail: workers
-        .map((w) => `${w.id}: ${!w.enabled ? "已停用" : w.kind === "authenticated" && w.apiKey.trim() === "" ? "认证 Worker 的 apiKey 为空" : "不可用"}`)
-        .join("\n"),
-      nextStep: "把 enabled 改为 true；认证 Worker 还要确认 apiKey 非空。",
-    };
-  }
-
-  const bound = usable.filter((w) => w.proxyId !== null).length;
-  const shape = `其中 ${bound} 个绑定了出口代理,${usable.length - bound} 个走本机直连。`;
-
   // 就绪态问服务而不是自己算冷却（纪律 #4）；拿不到时降级为只报配置形态。
   const runtime = await workerRuntime(ctx.instance);
-
-  if (runtime === null) {
-    return {
-      status: usable.length < workers.length ? "warn" : "pass",
-      text: `${usable.length}/${workers.length} 个 Worker 可用(仅配置形态)`,
-      detail:
-        `${shape}\n` +
-        `⚠️ 没能从 /api/overview 拿到运行期状态,所以「是否就绪(不在冷却中)」这一项未检查。\n` +
-        `   doctor 刻意不自己算一遍冷却:那会是第二份并行真相,且必然与调度器分叉。`,
-    };
-  }
-
-  const ready = runtime.filter((w) => w.ready);
-  const cooling = runtime.filter((w) => w.inPool && !w.ready);
-  const coolingLines = cooling.map(
-    (w) =>
-      `   ${w.id}: 冷却中 ${humanMs(w.cooldownRemainingMs)}` +
-      `${w.lastFailure === null ? "" : `(${w.lastFailure})`}` +
-      `${w.consecutiveFails > 0 ? ` · 连续失败 ${w.consecutiveFails} 次` : ""}`,
-  );
-
-  // 全员冷却时转发此刻不可用（all_cooling 只会打到最早恢复者），所以是 fail；部分冷却是 warn。
-  const status =
-    ready.length === 0 && runtime.some((w) => w.inPool)
-      ? "fail"
-      : cooling.length > 0 || usable.length < workers.length
-        ? "warn"
-        : "pass";
-
-  return {
-    status,
-    text: `${ready.length}/${usable.length} 个 Worker 就绪(共配置 ${workers.length} 个)`,
-    detail: [shape, ...coolingLines].join("\n"),
-    ...(ready.length === 0 && runtime.some((w) => w.inPool)
-      ? {
-          nextStep:
-            "全部 Worker 都在冷却 —— 此刻转发会打到最早恢复的那个。\n" +
-            "若冷却类别是 auth,那是 key 配错了(固定 60 秒短退避,会反复暴露);\n" +
-            "若是 rate_limit,那是上游限流,等它过去。",
-        }
-      : {}),
-  };
+  return diagnoseWorkers(ctx.config.workers, runtime, `在 ${join(ctx.dataDir, "config.json")} 的 workers 数组里加一个`);
 }
 
 /** 从 `/api/overview` 取 Worker 运行期状态；null 表示拿不到（第 2 层已确认健康，多半是恰好在重启）。 */

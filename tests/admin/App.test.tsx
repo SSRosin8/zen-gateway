@@ -15,6 +15,7 @@ import type { Overview } from "../../src/shared/contract.ts";
 
 afterEach(() => {
   vi.unstubAllGlobals();
+  window.location.hash = "";
 });
 
 /** 一份最小但**合法**的 Overview —— 必须过 `OverviewSchema`,否则测的是回退路径。 */
@@ -26,12 +27,19 @@ export function fakeOverview(overrides: Partial<Overview> = {}): Overview {
       baseUrl: "https://example.invalid/zen/v1",
       relayToken: { present: true, fingerprint: "abcd1234" },
       maxAttempts: 3,
+      headersTimeoutMs: 60_000,
+      bodyTimeoutMs: 300_000,
+    },
+    routing: {
+      strategy: "anonymous_first",
+      affinityTtlMs: 3_600_000,
+      cooldown: { rateLimitMs: 900_000, authFailMs: 60_000, forbiddenMs: 5_000, transportBaseMs: 2_000, transportMaxMs: 120_000 },
     },
     pool: { ready: 0, total: 0, health: "empty" },
     workers: [],
     isolation: { groups: [], unknownWorkerIds: [], sharedGroups: [], isolated: false },
     catalog: { slots: [], freeCount: null },
-    clash: { enabled: false, activeBridgeId: null, bridges: [] },
+    clash: { enabled: false, selectionMode: "auto", activeBridgeId: null, bridges: [] },
     proxies: { total: 0, enabled: 0, withEgressIp: 0 },
     ...overrides,
   };
@@ -47,18 +55,18 @@ function stubOverview(body: unknown, ok = true) {
 describe("App 首次启动", () => {
   it("空 Worker 池显示「尚未配置」而非「全部就绪」", async () => {
     stubOverview(fakeOverview());
+    window.location.hash = "#overview";
     render(<App />);
 
-    // 等到真正拿到数据（向导出现），而不是停在加载态上断言。
-    await waitFor(() => {
-      expect(screen.getByText("先把它跑起来")).toBeInTheDocument();
-    });
+    // 等到真正拿到数据（概览面板出现），而不是停在加载态上断言。
+    await screen.findByRole("heading", { name: "概览" });
     expect(screen.getAllByText("尚未配置 Worker").length).toBeGreaterThan(0);
     expect(screen.queryByText("全部就绪")).not.toBeInTheDocument();
   });
 
   it("空池用中性色调,不用成功色", async () => {
     stubOverview(fakeOverview());
+    window.location.hash = "#overview";
     const { container } = render(<App />);
 
     await waitFor(() => {
@@ -124,8 +132,9 @@ describe("App 首次启动", () => {
     stubOverview(fakeOverview());
     render(<App />);
 
+    // 版本在侧栏底部与概览指标里都有；这里只要求它出现。
     await waitFor(() => {
-      expect(screen.getByText(/v9\.9\.9/)).toBeInTheDocument();
+      expect(screen.getAllByText(/v9\.9\.9/).length).toBeGreaterThan(0);
     });
   });
 });

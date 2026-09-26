@@ -7,7 +7,6 @@ import { ModelsPage } from "../../src/admin/pages/ModelsPage.tsx";
 import { UsagePage } from "../../src/admin/pages/UsagePage.tsx";
 import { GatewayPage } from "../../src/admin/pages/GatewayPage.tsx";
 import { WorkersPage } from "../../src/admin/pages/WorkersPage.tsx";
-import { Wizard } from "../../src/admin/pages/Wizard.tsx";
 import { PAGE_SIZE } from "../../src/admin/components/DataTable.tsx";
 import type {
   ModelList,
@@ -60,7 +59,7 @@ function proxy(overrides: Partial<ProxyView> = {}): ProxyView {
 function proxyList(proxies: ProxyView[], overrides: Partial<ProxyList> = {}): ProxyList {
   return {
     proxies,
-    clash: { enabled: false, activeBridgeId: null, bridges: [] },
+    clash: { enabled: false, selectionMode: "auto", activeBridgeId: null, bridges: [] },
     isolation: { groups: [], unknownWorkerIds: [], sharedGroups: [], isolated: false },
     subscriptions: [],
     ...overrides,
@@ -171,7 +170,8 @@ describe("代理池页", () => {
     stubIdleBatch();
     render(<ProxyPage data={proxyList([])} view={view} navigate={noop} />);
     expect(screen.getByText(/还没有代理/)).toBeInTheDocument();
-    expect(screen.getByText(/npm run setup/)).toBeInTheDocument();
+    // 下一步在界面里完成，不再指向命令行。
+    expect(screen.getByRole("link", { name: "Clash 标签" })).toHaveAttribute("href", "#proxy?tab=clash");
   });
 
   it("搜索无结果时的措辞与「没有代理」不同", () => {
@@ -452,6 +452,8 @@ describe("网关页", () => {
         baseUrl: "https://example.invalid/zen/v1",
         relayToken: { present: true, fingerprint: "abcd1234" },
         maxAttempts: 3,
+        headersTimeoutMs: 60_000,
+        bodyTimeoutMs: 300_000,
       },
     });
     const { container } = render(<GatewayPage data={data} />);
@@ -466,15 +468,15 @@ describe("网关页", () => {
 
   it("提醒保留 OpenCode 自己的模型目录并说明模型可用性边界", () => {
     render(<GatewayPage data={fakeOverview()} />);
-    expect(screen.getByText(/OpenCode 配置格式/)).toBeInTheDocument();
+    expect(screen.getByText(/片段格式/)).toBeInTheDocument();
     expect(screen.getByText(/模型和 SDK 由 OpenCode 自己管理/)).toBeInTheDocument();
     expect(screen.getByText(/模型仍受上游权限与免费规则约束/)).toBeInTheDocument();
   });
 
   it("切换 OpenCode 1.x 后复制单数 provider 配置", async () => {
     const user = userEvent.setup();
-    render(<GatewayPage data={fakeOverview({ gateway: { port: 9877, baseUrl: "https://example.invalid/zen/v1", relayToken: { present: true, fingerprint: "abcd1234" }, maxAttempts: 3 } })} />);
-    await user.selectOptions(screen.getByRole("combobox", { name: "OpenCode 版本" }), "1");
+    render(<GatewayPage data={fakeOverview({ gateway: { port: 9877, baseUrl: "https://example.invalid/zen/v1", relayToken: { present: true, fingerprint: "abcd1234" }, maxAttempts: 3, headersTimeoutMs: 60_000, bodyTimeoutMs: 300_000 } })} />);
+    await user.selectOptions(screen.getByRole("combobox", { name: "片段格式" }), "1");
     await user.click(screen.getByRole("button", { name: "复制" }));
     const copied = await navigator.clipboard.readText();
     expectLocalOpenCodeProvider(copied, 9877, "1");
@@ -482,25 +484,29 @@ describe("网关页", () => {
     expect(copied).not.toContain('"npm"');
   });
 
-  it("Clash 已启用时提醒两条实测出来的坑", () => {
+  it("代理池 Clash 标签提醒两条实测出来的坑", () => {
     const data = fakeOverview({
       clash: {
         enabled: true,
+        selectionMode: "auto",
         activeBridgeId: "b1",
         bridges: [
           {
             id: "b1",
             name: "verge",
             enabled: true,
+            priority: 100,
             apiBase: "http://127.0.0.1:9097",
             apiSecret: { present: true, fingerprint: "aaaa1111" },
+            localProxyHost: "127.0.0.1",
             localProxyPort: 7897,
             selectorGroup: "Proxy",
           },
         ],
       },
     });
-    render(<GatewayPage data={data} />);
+    stubIdleBatch();
+    render(<ProxyPage data={proxyList([], { clash: data.clash })} view={parseHash("#proxy?tab=clash")} navigate={noop} />);
     // 混合端口不一致 → 桥接静默失败；GLOBAL 在 rule 模式下切了不生效。
     expect(screen.getByText(/mixed-port/)).toBeInTheDocument();
     expect(screen.getByText(/GLOBAL/)).toBeInTheDocument();
@@ -532,7 +538,7 @@ describe("Worker 页", () => {
     render(<WorkersPage data={fakeOverview()} view={parseHash("#workers")} navigate={noop} />);
 
     await user.click(screen.getByRole("button", { name: "新增 Worker" }));
-    await user.type(screen.getByLabelText("ID"), "anon-1");
+    await user.selectOptions(screen.getByLabelText("类型"), "authenticated");
     await user.type(screen.getByLabelText("API key（认证必填）"), "fake-stale-key-not-real");
     await user.selectOptions(screen.getByLabelText("类型"), "anonymous");
 
@@ -600,58 +606,6 @@ describe("Worker 页", () => {
 });
 
 /* ================================================================== *
- * 首启向导
- * ================================================================== */
-
-describe("首启向导", () => {
-  it("四步都有，且已完成的打勾", () => {
-    const data = fakeOverview({
-      catalog: { slots: [], freeCount: 10 },
-      proxies: { total: 3, enabled: 3, withEgressIp: 3 },
-    });
-    const { container } = render(<Wizard data={data} onCreateWorker={noop} />);
-
-    expect(container.querySelectorAll("[data-step]")).toHaveLength(4);
-    // 目录与代理都齐了 → 前两步打勾。
-    expect(screen.getByText("上游目录能拉到")).toBeInTheDocument();
-    expect(screen.getByText(/已拉到 10 个免费模型/)).toBeInTheDocument();
-  });
-
-  it("给出的配置只覆盖网关地址与凭证占位符", () => {
-    const data = fakeOverview();
-    data.gateway.port = 19876;
-    render(<Wizard data={data} onCreateWorker={noop} />);
-    const snippet = screen.getByText(/"providers":/, { selector: "pre" }).textContent ?? "";
-    expectLocalOpenCodeProvider(snippet, 19876);
-    expect(screen.getByText(/OpenCode 配置格式/)).toBeInTheDocument();
-    expect(screen.getByText(/你选择的模型不保证都能被上游接受/)).toBeInTheDocument();
-  });
-
-  it("向导切换 OpenCode 1.x 后展示单数 provider 配置", async () => {
-    const user = userEvent.setup();
-    const data = fakeOverview();
-    data.gateway.port = 19876;
-    render(<Wizard data={data} onCreateWorker={noop} />);
-    await user.selectOptions(screen.getByRole("combobox", { name: "OpenCode 版本" }), "1");
-    const snippet = screen.getByText(/"provider":/, { selector: "pre" }).textContent ?? "";
-    expectLocalOpenCodeProvider(snippet, 19876, "1");
-  });
-
-  it("每一步都给可直接跑的命令", () => {
-    const { container } = render(<Wizard data={fakeOverview()} onCreateWorker={noop} />);
-    // 空状态的价值在于下一步 —— 与 doctor 的分层同一个理由。
-    expect(container.textContent).toContain("npm run setup");
-    expect(container.textContent).toContain("opencode run");
-    expect(container.textContent).toContain("NODE_EXTRA_CA_CERTS");
-  });
-
-  it("说明匿名与认证 Worker 的 key 要求不同", () => {
-    render(<Wizard data={fakeOverview()} onCreateWorker={noop} />);
-    expect(screen.getByText(/匿名 Worker 可以不填 key/)).toBeInTheDocument();
-  });
-});
-
-/* ================================================================== *
  * 文案不渲染字面 markdown
  * ================================================================== */
 
@@ -689,7 +643,6 @@ describe("文案不渲染字面 markdown", () => {
     ["Worker", () => <WorkersPage data={fakeOverview()} view={parseHash("#workers")} navigate={noop} />],
     ["模型", () => <ModelsPage data={modelList()} view={parseHash("#models")} navigate={noop} />],
     ["用量", () => <UsagePage data={stats()} days="30" onDays={noop} />],
-    ["向导", () => <Wizard data={fakeOverview()} onCreateWorker={noop} />],
   ];
 
   for (const [name, mount] of pages) {
@@ -789,8 +742,8 @@ describe("订阅标签", () => {
       />,
     );
     expect(screen.getByText(/还没有订阅/)).toBeInTheDocument();
-    // 眼下没有"添加订阅"的表单，所以必须告诉用户去哪加。
-    expect(screen.getByText(/subscriptions/)).toBeInTheDocument();
+    // 下一步在界面里：添加订阅的按钮就在面板上。
+    expect(screen.getByRole("button", { name: "添加订阅" })).toBeInTheDocument();
   });
 
   it("刷新按钮在请求在途时禁用 —— 否则重复点会得到 409", async () => {

@@ -35,7 +35,8 @@ npm run doctor
 npm run doctor -- --deep
 ```
 
-`doctor` 默认只读。`--deep` 会真实探测 IP 回显目标，桥接探测期间会切换 Clash
+服务在运行时，后台诊断页（`GET /api/diagnostics`）给出同样的配置、统计库、Worker、
+Clash 和目录几层结果；`doctor` 在服务停止时仍然可用。`doctor` 默认只读。`--deep` 会真实探测 IP 回显目标，桥接探测期间会切换 Clash
 selector，结束后 selector 可能停在最后一个节点；结果的含义见
 [回显 IP 的测量范围](#回显-ip-的测量范围)。
 
@@ -43,7 +44,17 @@ selector，结束后 selector 可能停在最后一个节点；结果的含义�
 service 脚本和 Vite 代理使用同一解析逻辑。数据目录可用 `ZG_DATA_DIR` 指定，
 适合测试或运行多个隔离实例。
 
+首次启动（数据目录中还没有 `config.json`）时，如果项目根没有 `opencode.json`，服务会
+在项目根生成一份，写入实际端口和真实 Relay Token（文件权限 0600，已被 `.gitignore`
+忽略）。项目根是服务的工作目录，`npm start` 下即仓库根；`ZG_DATA_DIR` 不改变它。已有
+`opencode.json` 时绝不自动覆盖；可用 `POST /api/opencode/write` 更新，已有文件只改
+opencode provider 的 `baseURL` 与 `apiKey`，含注释或尾逗号的文件不会被改写。形状按
+`opencode --version` 的主版本选择（1 → `provider`，≥2 → `providers`），探测不到时用 2.x 形状。
+
 ### 导入 Clash 出口
+
+服务运行时也可以用 `POST /api/clash/import`（见[管理 API](#管理-api)）导入，写入即时生效、
+无需重启。命令行方式：
 
 ```bash
 npm run setup -- --dry-run   # 只显示探测和合并结果
@@ -61,36 +72,41 @@ npm run setup -- --dry-run --api http://127.0.0.1:<端口> --secret '<secret>'
 
 API 地址必须是本机 HTTP 回环地址。
 
-运行中的服务不会重新读取外部修改的配置文件。setup 写入后到重启完成前，不要在
-管理后台保存任何配置：后台保存会把进程内的旧配置整份写回磁盘，覆盖刚导入的代理
-和 Clash 内核。
+运行中的服务不会重新读取外部修改的配置文件。用 `npm run setup` 写入后到重启完成前，
+不要在管理后台保存任何配置：后台保存会把进程内的旧配置整份写回磁盘，覆盖刚导入的
+代理和 Clash 内核。经管理 API 导入没有这个问题。
 
 ## 管理后台
 
-启动方式见[安装和运行](#安装和运行)。后台包含概览、网关、代理池、Worker、模型和
-用量六页。候选池里没有 Worker（未配置、全部停用或认证 Worker 缺 key）时会显示首启向导；全部冷却不算。
+启动方式见[安装和运行](#安装和运行)。后台使用左侧导航，包含快速开始、概览、网关、
+代理池、Worker、模型、用量和诊断页。引导未完成时首次打开落在快速开始页，依次检查
+目录可达、导入 Clash 出口、创建 Worker、OpenCode 项目配置和验证命令。
 
-当前 UI 支持：
+当前 UI 支持（每项都对应上面[管理 API](#管理-api)中的端点）：
 
-- 网关页编辑最多尝试的 Worker 数（`maxAttempts`），并按 OpenCode 1.x/2.x 生成
-  客户端配置片段（Relay Token 为占位符）。
+- 网关页编辑最多尝试的 Worker 数、两个超时和调度设置（策略、亲和时长、各类冷却），
+  轮换 Relay Token，查看并一键写入项目根 `opencode.json`，按 OpenCode 1.x/2.x 复制
+  客户端配置片段（片段里的 Relay Token 为占位符）。
+- 代理池页探测并导入本机 Clash Controller，编辑 Clash 内核（含 secret 三态）、启用
+  模式与当前内核；代理启停、改名与删除（被 Worker 引用的不能删）；订阅的新建、编辑、
+  删除与刷新；分页、批量探测和按 IP 回显目标的实测公网 IP 分组的视图。
 - Worker 新增、编辑、删除；编辑时留空 key 表示保留旧值。认证 Worker 必须有 key，
-  界面不单独提供“清空 key”，要去掉 key 就改为匿名 Worker。删除前弹出确认框；
-  Worker 可在列表内直接编辑，出口从代理下拉框选择。
+  要去掉 key 就改为匿名 Worker。可从未被引用的 Clash 节点一次批量创建匿名 Worker。
 - 模型免费后缀、显式免费名单、目录交集开关的编辑。
-- 代理分页、批量探测、按 IP 回显目标的实测公网 IP 分组的视图。
-- 订阅刷新、探测进度、统计和运行期 Worker 状态查看；启动批量探测前需要确认。
-- 深色主题：默认跟随系统，页头可切换“跟随系统 / 浅色 / 深色”。
-- 轮询失败时保留上次数据，页头提示连接中断及数据的时效，而不是清空页面。
+- 诊断页显示进程内分层诊断，可运行深度诊断（回显出口实测，批量探测进行中时不可用）。
+- 探测进度、统计和运行期 Worker 状态查看；启动批量探测前需要确认。
+- 深色主题：默认跟随系统，可切换“跟随系统 / 浅色 / 深色”。
+- 轮询失败时保留上次数据，并提示连接中断及数据的时效，而不是清空页面。
 
-代理和 Clash 内核的增删改仍通过 `data/config.json` 完成，保存后重启网关。后台
-不会伪造一个管理端点来覆盖这些配置；Models 页中的 `defaultSurfaces` 与
-`surfaceOverrides` 只影响展示提示，不是转发放行条件。
+`defaultSurfaces` 与 `surfaceOverrides` 仍只能手工编辑配置文件，它们只影响展示提示，
+不是转发放行条件。
 
 ## 客户端接入
 
 首次启动时没有任何 Worker，这时客户端请求会得到 503 `no_worker_available`。先在后台
-Worker 页（或用 `PATCH /api/config`）至少建一个 Worker，再接入客户端。
+Worker 页（或用 `PATCH /api/config`）至少建一个 Worker，再接入客户端。在本仓库目录里
+运行 OpenCode 时，首启生成的项目级 `opencode.json` 已指向本网关；在其他目录使用时按下文
+手工配置。
 
 运行 `npm run status` 取得服务实际端口。后台网关页可以选择 OpenCode 主版本并
 复制对应片段。OpenCode 1.x 使用单数 `provider`/`options`：
@@ -364,11 +380,34 @@ rule 模式下可能不参与选路，在 global 模式下则会影响本机其�
 | `GET /api/stats?days=N\|all` | 用量与拒绝统计 | 否 |
 | `GET /api/proxies` | 代理列表、引用者和解析失败原因 | 否 |
 | `GET /api/models` | 含付费模型的目录与判定理由 | 否 |
-| `PATCH /api/config` | 网关设置（`maxAttempts`、两个超时、Relay Token）、模型规则、Worker CRUD | 是 |
+| `PATCH /api/config` | 严格补丁：`gateway`、`routing`、`models`、`workers`、`clash`、`proxies`、`subscriptions` | 是 |
 | `POST /api/probe` | 探测在用出口并写回 IP | 是 |
 | `GET /api/batch-probe` | 查看批量探测进度 | 否 |
 | `POST /api/batch-probe` | `start`、`pause`、`resume`、`cancel` | 可能 |
 | `POST /api/subscriptions/:id/refresh` | 拉取、解析并合并一个订阅 | 是 |
+| `POST /api/clash/discover` | 探测本机 Controller（`{ apiBase?, secret? }`） | 否 |
+| `POST /api/clash/import` | 导入 Controller 的内核与节点（`{ apiBase, secret?, dryRun }`） | `dryRun: false` 时 |
+| `GET /api/diagnostics` | 进程内分层诊断：配置、统计库、Worker、Clash、模型目录 | 否 |
+| `POST /api/diagnostics/deep` | 实测 IP 回显出口并写回，与批量探测互斥（进行中得 409） | 是 |
+| `GET /api/opencode` | 项目根 `opencode.json` 的状态与检测到的 OpenCode 版本 | 否 |
+| `POST /api/opencode/write` | 创建或更新项目根 `opencode.json`（`{ version?: "1" \| "2" }`） | 写 `opencode.json` |
+
+`PATCH /api/config` 各节的规则：
+
+- 凭证字段（Worker `apiKey`、内核 `apiSecret`、订阅 `url`、`gateway.relayToken`）是三态：
+  缺席不动、`{ "set": "…" }` 替换、`{ "clear": true }` 清空；`gateway.relayToken` 另可
+  `{ "rotate": true }`，由服务端生成新 token，响应不回显。轮换后客户端和
+  `opencode.json` 里的旧 token 立即失效，需要重写。
+- `workers`、`clash.bridges`、`subscriptions` 支持 `create`/`update`/`delete`；`proxies`
+  只开放 `update`（`enabled`、`name`）与 `delete`，连接信息来自导入。未知 id 得 404。
+- 被 Worker 引用的代理不能删除；删除 Clash 内核或订阅会连带删除它们导入的代理，
+  其中有被引用的则整个请求失败（422，消息点名 Worker）。同一请求里先改绑 Worker
+  再删除是允许的。
+- `workers.create` 一次最多 512 条，与配置中 Worker 总数上限相同。
+
+Clash 导入与 `npm run setup` 使用同一份探测和合并逻辑，`apiBase` 必须是本机 HTTP
+回环地址（否则 400，且不会发出请求）；Controller 要求 secret 时得 401
+`auth_required`。导入经热更新路径写入，无需重启。
 
 ## 诊断和故障排查
 

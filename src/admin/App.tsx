@@ -1,77 +1,68 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import {
   HealthSchema,
   ModelListSchema,
+  OpenCodeViewSchema,
   ProxyListSchema,
   StatsViewSchema,
   type ModelList,
+  type OpenCodeView,
   type Overview,
   type ProxyList,
   type StatsView,
 } from "../shared/contract.ts";
-import { StatusIndicator } from "./components/StatusIndicator.tsx";
-import { Skeleton } from "./components/Panel.tsx";
-import { TableSkeleton } from "./components/DataTable.tsx";
-import { Nav } from "./components/Nav.tsx";
+import { Shell } from "./components/Shell.tsx";
+import { FallbackView, StaleBanner } from "./components/StatusViews.tsx";
 import { OverviewPage } from "./pages/OverviewPage.tsx";
 import { GatewayPage } from "./pages/GatewayPage.tsx";
 import { ProxyPage } from "./pages/ProxyPage.tsx";
 import { WorkersPage } from "./pages/WorkersPage.tsx";
 import { ModelsPage } from "./pages/ModelsPage.tsx";
 import { UsagePage } from "./pages/UsagePage.tsx";
-import { Wizard, WizardNotice } from "./pages/Wizard.tsx";
-import { useEndpoint, useOverview, type FetchState, type StaleInfo } from "./lib/api.ts";
-import { useViewState, type PageId } from "./lib/router.ts";
-import { THEME_OPTIONS, useTheme, type ThemePreference } from "./lib/theme.ts";
-import { humanMs } from "./lib/format.ts";
+import { StartPage, onboardingProgress } from "./pages/StartPage.tsx";
+import { DiagnosticsPage } from "./pages/DiagnosticsPage.tsx";
+import { useEndpoint, useOverview, type Polled } from "./lib/api.ts";
+import { useViewState } from "./lib/router.ts";
 
 /**
  * 应用外壳。
  *
- * ## 六页 + 首启向导
+ * ## 侧栏 + 快速开始
  *
  * 导航从 `PAGES` 推导（那份清单也是路由分派的真相），URL 是视图状态的
- * **唯一来源** —— 页面、标签、搜索词、筛选、页码全部在 hash 里，
- * 刷新与分享都还原同一视图。
+ * **唯一来源** —— 页面、标签、搜索词、筛选、页码全部在 hash 里。
+ * 首启未完成且 URL 没有指定页面时落到快速开始；指定了页面就尊重 URL。
  *
- * ## `overview` 始终在轮询，其余页按需拉
+ * ## `overview` 与 OpenCode 状态常驻轮询，其余页按需拉
  *
- * Overview 的数据（健康、Worker 状态、隔离）是每一页都要的 —— 断连横幅、
- * 向导的判据都读它，所以它常驻。代理列表、模型列表、统计只在对应页面打开时
- * 才拉：没人看的页面不该让后台一直查库。
+ * 断连横幅与快速开始的进度都读这两个端点，所以它们常驻。代理列表、模型列表、
+ * 统计、诊断只在对应页面打开时才拉：没人看的页面不该让后台一直查库。
  *
  * ## 断连时保留页面
  *
  * 首次加载之后的轮询失败不卸载页面，只在顶部显示一条横幅（见 `StaleBanner`），
  * 否则网关重启的几秒里未保存的表单会随页面一起丢失。
  */
-
-/** 向导在这些页面完整显示；其余页面只给一行提示，不把正文往下推。 */
-const WIZARD_PAGES: ReadonlySet<PageId> = new Set(["overview", "workers", "gateway"]);
-
 export function App() {
   const { view, navigate } = useViewState();
   const overview = useOverview();
+  const opencode = useEndpoint<OpenCodeView>("/api/opencode", OpenCodeViewSchema, 10_000);
   const { state } = overview;
 
+  const progress = state.status === "ready" ? onboardingProgress(state.data, opencode.state) : null;
+  useLandOnStart(progress, opencode.state.status === "loading", () => navigate({ page: "start" }));
+
   return (
-    <main className="mx-auto max-w-5xl px-4 py-8 sm:px-6 sm:py-10">
-      <header className="mb-6 flex flex-wrap items-end justify-between gap-4">
-        <div>
-          {/* wordmark 是衬线真能生效的地方之一（纯拉丁）。 */}
-          <h1 className="font-serif text-display-30 tracking-tight">zen-gateway</h1>
-          <p className="mt-2 text-text-muted">OpenCode Zen 免费模型本地网关</p>
-        </div>
-        <ThemeSelect />
-      </header>
-
-      <Nav current={view.page} />
-
+    <Shell
+      current={view.page}
+      badge={progress === null || progress.complete ? null : `${progress.done}/${progress.total}`}
+      version={state.status === "ready" ? state.data.health.version : null}
+    >
       <StaleBanner stale={overview.stale} />
-
       {state.status === "ready" ? (
         <Body
           data={state.data}
+          opencode={opencode}
           view={view}
           navigate={navigate}
           refresh={overview.refresh}
@@ -80,117 +71,75 @@ export function App() {
       ) : (
         <FallbackView state={state} />
       )}
-    </main>
+    </Shell>
   );
-}
-
-function ThemeSelect() {
-  const { preference, setPreference } = useTheme();
-  return (
-    <label className="flex items-center gap-2 text-text-muted">
-      <span>配色</span>
-      <select
-        value={preference}
-        onChange={(e) => setPreference(e.target.value as ThemePreference)}
-        className="min-h-[44px] rounded-sm border border-border-strong bg-bg px-3 text-text"
-      >
-        {THEME_OPTIONS.map((opt) => (
-          <option key={opt.value} value={opt.value}>
-            {opt.label}
-          </option>
-        ))}
-      </select>
-    </label>
-  );
-}
-
-/** 当前时刻，每秒更新一次；只在需要显示「N 秒前」时挂载。 */
-function useNow(): number {
-  const [now, setNow] = useState(() => Date.now());
-  useEffect(() => {
-    const timer = setInterval(() => setNow(Date.now()), 1000);
-    return () => clearInterval(timer);
-  }, []);
-  return now;
 }
 
 /**
- * 与网关的连接中断，但之前拿到过数据。
+ * 首次打开且 URL 没指定页面时，首启未完成就落到快速开始。
  *
- * 不阻断页面：数据仍然显示，表单仍然可填，只是用户要知道看到的不是现在。
- * `role="status"` 而不是 alert —— 每秒更新的秒数不该反复打断屏幕阅读器。
+ * 只判定一次：之后用户点到概览不该被拉回来。OpenCode 状态还在途时等它，
+ * 否则判据少一项，会把已完成的首启误判为未完成。
  */
-export function StaleBanner({ stale }: { stale: StaleInfo | null }) {
-  if (stale === null) return null;
-  return <StaleBannerInner stale={stale} />;
+function useLandOnStart(
+  progress: { complete: boolean } | null,
+  opencodePending: boolean,
+  goStart: () => void,
+) {
+  const pending = useRef(typeof window !== "undefined" && window.location.hash.replace(/^#\/?/, "") === "");
+  useEffect(() => {
+    if (!pending.current || progress === null || opencodePending) return;
+    pending.current = false;
+    // 等待期间用户可能已经点了导航，那时 URL 已有页面，尊重它。
+    if (window.location.hash.replace(/^#\/?/, "") !== "") return;
+    if (!progress.complete) goStart();
+  }, [progress, opencodePending, goStart]);
 }
 
-function StaleBannerInner({ stale }: { stale: StaleInfo }) {
-  const now = useNow();
-  const age = humanMs(Math.max(0, now - stale.lastSuccessAt));
-  return (
-    <div
-      role="status"
-      className="mb-4 rounded-md border border-warn bg-surface-accent px-4 py-3"
-    >
-      <StatusIndicator
-        tone="warn"
-        icon="!"
-        label={`与网关的连接中断，显示的是 ${age}前的数据`}
-      />
-      <p className="mt-1 text-text-muted">
-        {stale.failure.kind === "offline" ? (
-          <>
-            网关可能已停止。运行 <code className="font-mono text-accent-fg">npm start</code>{" "}
-            后会自动恢复；未保存的表单内容会保留。
-          </>
-        ) : (
-          <>最近一次请求失败：{stale.failure.message}</>
-        )}
-      </p>
-    </div>
-  );
-}
+type ViewProps = {
+  view: ReturnType<typeof useViewState>["view"];
+  navigate: ReturnType<typeof useViewState>["navigate"];
+};
 
 function Body({
   data,
+  opencode,
   view,
   navigate,
   refresh,
   overviewStale,
-}: {
+}: ViewProps & {
   data: Overview;
-  view: ReturnType<typeof useViewState>["view"];
-  navigate: ReturnType<typeof useViewState>["navigate"];
+  opencode: Polled<OpenCodeView>;
   refresh: () => void;
   /** 页头已经显示了断连横幅时，子页面不再重复显示自己的。 */
   overviewStale: boolean;
 }) {
-  /*
-   * 没有可用 Worker 时显示向导。
-   *
-   * 那时转发一定失败，所以引导比任何统计都重要。不做成可关闭的：一个能被
-   * 关掉的向导会在用户误关后再也找不回来 —— 而它的出现条件（`pool.total === 0`）
-   * 本身就是「配好了就消失」。只在与配置相关的页面完整显示，其他页面给一行提示。
-   */
-  const needsWizard = data.pool.total === 0;
   const [createRequest, setCreateRequest] = useState(0);
-  const openCreateWorker = () => {
-    setCreateRequest((n) => n + 1);
+  const [bulkRequest, setBulkRequest] = useState(0);
+  const openWorkers = (bulk: boolean) => {
+    if (bulk) setBulkRequest((n) => n + 1);
+    else setCreateRequest((n) => n + 1);
     navigate({ page: "workers" });
+  };
+  const refreshAll = () => {
+    refresh();
+    opencode.refresh();
   };
 
   return (
     <div className="space-y-4">
-      {needsWizard &&
-        (WIZARD_PAGES.has(view.page) ? (
-          <Wizard data={data} onCreateWorker={openCreateWorker} />
-        ) : (
-          <WizardNotice />
-        ))}
-
+      {view.page === "start" && (
+        <StartPage
+          data={data}
+          opencode={opencode.state}
+          refresh={refreshAll}
+          onCreateWorker={() => openWorkers(false)}
+          onBulkImport={() => openWorkers(true)}
+        />
+      )}
       {view.page === "overview" && <OverviewPage data={data} />}
-      {view.page === "gateway" && <GatewayPage data={data} refresh={refresh} />}
+      {view.page === "gateway" && <GatewayPage data={data} refresh={refreshAll} opencode={opencode.state} />}
       {view.page === "workers" && (
         <WorkersTab
           data={data}
@@ -198,17 +147,21 @@ function Body({
           navigate={navigate}
           refresh={refresh}
           createRequest={createRequest}
+          bulkRequest={bulkRequest}
         />
       )}
-      {view.page === "proxy" && <ProxyTab view={view} navigate={navigate} hideStale={overviewStale} />}
+      {view.page === "proxy" && (
+        <ProxyTab view={view} navigate={navigate} hideStale={overviewStale} refreshOverview={refresh} />
+      )}
       {view.page === "models" && <ModelsTab view={view} navigate={navigate} hideStale={overviewStale} />}
       {view.page === "usage" && <UsageTab hideStale={overviewStale} />}
+      {view.page === "diagnostics" && <DiagnosticsPage />}
     </div>
   );
 }
 
 /**
- * Worker 页额外拉代理列表，供出口下拉框使用。
+ * Worker 页额外拉代理列表，供出口下拉框与批量导入使用。
  *
  * 代理列表失败不挡住 Worker 页：Worker 数据来自 overview，编辑器在拿不到
  * 代理列表时退回文本输入并说明原因。
@@ -219,22 +172,21 @@ function WorkersTab({
   navigate,
   refresh,
   createRequest,
-}: {
-  data: Overview;
-  view: ReturnType<typeof useViewState>["view"];
-  navigate: ReturnType<typeof useViewState>["navigate"];
-  refresh: () => void;
-  createRequest: number;
-}) {
+  bulkRequest,
+}: ViewProps & { data: Overview; refresh: () => void; createRequest: number; bulkRequest: number }) {
   const proxies = useEndpoint<ProxyList>("/api/proxies", ProxyListSchema, 30_000);
   return (
     <WorkersPage
       data={data}
       view={view}
       navigate={navigate}
-      refresh={refresh}
+      refresh={() => {
+        refresh();
+        proxies.refresh();
+      }}
       proxies={proxies.state}
       createRequest={createRequest}
+      bulkRequest={bulkRequest}
     />
   );
 }
@@ -244,30 +196,27 @@ function ProxyTab({
   view,
   navigate,
   hideStale,
-}: {
-  view: ReturnType<typeof useViewState>["view"];
-  navigate: ReturnType<typeof useViewState>["navigate"];
-  hideStale: boolean;
-}) {
-  const { state, stale } = useEndpoint<ProxyList>("/api/proxies", ProxyListSchema);
+  refreshOverview,
+}: ViewProps & { hideStale: boolean; refreshOverview: () => void }) {
+  const { state, stale, refresh } = useEndpoint<ProxyList>("/api/proxies", ProxyListSchema);
   if (state.status !== "ready") return <FallbackView state={state} />;
   return (
     <>
       <StaleBanner stale={hideStale ? null : stale} />
-      <ProxyPage data={state.data} view={view} navigate={navigate} />
+      <ProxyPage
+        data={state.data}
+        view={view}
+        navigate={navigate}
+        refresh={() => {
+          refresh();
+          refreshOverview();
+        }}
+      />
     </>
   );
 }
 
-function ModelsTab({
-  view,
-  navigate,
-  hideStale,
-}: {
-  view: ReturnType<typeof useViewState>["view"];
-  navigate: ReturnType<typeof useViewState>["navigate"];
-  hideStale: boolean;
-}) {
+function ModelsTab({ view, navigate, hideStale }: ViewProps & { hideStale: boolean }) {
   /*
    * 模型目录以天为单位变化，所以 30s 一次够了。保存判定设置后立即刷新
    * 这个端点本身 —— 判定结果在这里，不在 overview 里。
@@ -298,78 +247,6 @@ function UsageTab({ hideStale }: { hideStale: boolean }) {
   );
 }
 
-/**
- * 首次加载的非就绪态。
- *
- * ## 三种失败必须分开，它们的下一步完全不同
- *
- * | 态 | 含义 | 下一步 |
- * |---|---|---|
- * | `loading` | 首次请求在途 | 等 |
- * | `offline` | 连接被拒 —— 网关没在跑 | `npm start` |
- * | `error` | 连上了但响应不对 | 多半是前后端版本不一致 → `npm run build` |
- *
- * 合成一句「加载失败」会让用户去猜。
- *
- * 这里**不替 Worker 池说话**：拿不到数据时不知道池的状态，显示「尚未配置
- * Worker」会让一个装好的系统看起来要重装；显示「全部就绪」则是把未知当成功。
- */
-function FallbackView({ state }: { state: FetchState<unknown> }) {
-  if (state.status === "loading") return <LoadingView />;
-  return (
-    <section className="rounded-lg border border-border-strong bg-surface p-5">
-      <h2 className="mb-4 text-heading-16 font-medium">服务</h2>
-      {state.status === "offline" && (
-        <>
-          <StatusIndicator tone="error" icon="✕" label="未连接到网关服务" />
-          <p className="mt-3 text-text-muted">
-            网关没在运行。跑 <code className="font-mono text-accent-fg">npm start</code> 启动它。
-          </p>
-        </>
-      )}
-      {state.status === "error" && (
-        <>
-          <StatusIndicator tone="error" icon="✕" label="响应异常" />
-          <p className="mt-3 text-text-muted">{state.message}</p>
-        </>
-      )}
-    </section>
-  );
-}
-
-/**
- * 首次加载：文字状态「检测中」立即显示（读屏只读它），骨架按最终布局占位 ——
- * 一个指标面板 + 一个表格面板，外框、内边距、行高与真实页面一致，数据到达时不跳。
- */
-function LoadingView() {
-  return (
-    <div className="space-y-4" data-loading="">
-      <section className="rounded-lg border border-border-strong bg-surface">
-        <header className="flex flex-wrap items-center justify-between gap-3 border-b border-border-strong px-4 py-3 sm:px-5">
-          <h2 className="text-heading-16 font-medium">服务</h2>
-          <StatusIndicator tone="neutral" icon="○" label="检测中" />
-        </header>
-        <div className="grid grid-cols-2 gap-6 px-4 py-4 sm:grid-cols-4 sm:px-5" aria-hidden="true">
-          {[0, 1, 2, 3].map((i) => (
-            <div key={i}>
-              <Skeleton className="h-3.5 w-16" />
-              <Skeleton className="mt-2 h-[30px] w-20" />
-              <Skeleton className="mt-2 h-3 w-24" />
-            </div>
-          ))}
-        </div>
-      </section>
-      <section className="rounded-lg border border-border-strong bg-surface">
-        <header className="border-b border-border-strong px-4 py-3 sm:px-5" aria-hidden="true">
-          <Skeleton className="h-4 w-24" />
-        </header>
-        <div className="px-4 py-4 sm:px-5">
-          <TableSkeleton columns={["30%", "25%", "25%", "20%"]} />
-        </div>
-      </section>
-    </div>
-  );
-}
-
 /** 供测试引用 —— 契约在 `shared/contract.ts`，这里只是转出。 */
 export { HealthSchema };
+export { StaleBanner };

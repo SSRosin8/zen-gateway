@@ -1,8 +1,9 @@
 import { randomBytes } from "node:crypto";
 import { constants as fsConstants } from "node:fs";
-import { access, chmod, mkdir, open, readFile, rename, stat, unlink } from "node:fs/promises";
-import { dirname, join } from "node:path";
+import { access, chmod, mkdir, readFile, stat } from "node:fs/promises";
+import { dirname } from "node:path";
 import { configPath, dataDir, DIR_MODE, FILE_MODE } from "./paths.ts";
+import { atomicWriteFile } from "./atomicWrite.ts";
 import { CONFIG_VERSION, ConfigSchema, type Config } from "../shared/schema.ts";
 import { safeErrorMessage } from "../shared/redact.ts";
 
@@ -214,12 +215,8 @@ async function ensurePermissions(file: string): Promise<void> {
   }
 }
 
-/**
- * 原子写：同目录临时文件（跨文件系统 rename 非原子）→ fsync（否则崩溃后可能
- * rename 出空文件）→ rename。临时文件创建即 0600，没有权限窗口。
- */
+/** 写盘前必过 schema，避免非法配置写盘后下次启动才炸。原子写见 `atomicWrite.ts`。 */
 export async function saveConfig(config: Config, root?: string): Promise<void> {
-  // 写之前必过 schema，避免非法配置写盘后下次启动才炸。
   const validated = ConfigSchema.parse(config);
 
   const file = configPath(root);
@@ -228,37 +225,10 @@ export async function saveConfig(config: Config, root?: string): Promise<void> {
   // mode 只在创建时生效；已存在且过松的目录要纠正。
   await chmod(dir, DIR_MODE).catch(() => {});
 
-  const temp = join(dir, `.config.json.${process.pid}.${randomBytes(6).toString("hex")}.tmp`);
-  const body = `${JSON.stringify(validated, null, 2)}\n`;
-
-  let handle: Awaited<ReturnType<typeof open>> | undefined;
   try {
-    handle = await open(temp, "wx", FILE_MODE);
-    await handle.writeFile(body, "utf8");
-    await handle.sync();
-    await handle.close();
-    handle = undefined;
-    await rename(temp, file);
+    await atomicWriteFile(file, `${JSON.stringify(validated, null, 2)}\n`);
   } catch (err) {
-    if (handle) await handle.close().catch(() => {});
-    await unlink(temp).catch(() => {});
     throw new ConfigError(`无法写入 ${file}：${safeErrorMessage(err)}`, "unreadable");
-  }
-
-  // 目录项也要落盘，否则崩溃后 rename 可能丢失。
-  await syncDir(dir);
-}
-
-async function syncDir(dir: string): Promise<void> {
-  try {
-    const handle = await open(dir, fsConstants.O_RDONLY);
-    try {
-      await handle.sync();
-    } finally {
-      await handle.close();
-    }
-  } catch {
-    // 某些文件系统不支持对目录 fsync；不是致命错误。
   }
 }
 

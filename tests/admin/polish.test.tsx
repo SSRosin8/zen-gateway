@@ -68,7 +68,7 @@ function proxy(overrides: Partial<ProxyView> = {}): ProxyView {
 function proxyList(proxies: ProxyView[]): ProxyList {
   return {
     proxies,
-    clash: { enabled: false, activeBridgeId: null, bridges: [] },
+    clash: { enabled: false, selectionMode: "auto", activeBridgeId: null, bridges: [] },
     isolation: { groups: [], unknownWorkerIds: [], sharedGroups: [], isolated: false },
     subscriptions: [],
   };

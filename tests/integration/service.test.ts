@@ -68,7 +68,7 @@ type RunResult = { code: number; stdout: string; stderr: string };
 async function run(args: string[]): Promise<RunResult> {
   try {
     const { stdout, stderr } = await execFileAsync(process.execPath, [SCRIPT, ...args], {
-      env: { ...process.env, ZG_DATA_DIR: dataDir, ZG_PORT: String(port) },
+      env: { ...process.env, ZG_DATA_DIR: dataDir, ZG_PROJECT_ROOT: dataDir, ZG_PORT: String(port) },
       cwd: PROJECT,
     });
     return { code: 0, stdout, stderr };
@@ -436,7 +436,7 @@ describe("端口解析与服务端一致", () => {
   /** 不注入 ZG_PORT 的 run —— 逼两处都从 config.json 解析端口。 */
   async function runWithoutEnvPort(args: string[]): Promise<RunResult> {
     // 显式标注为可选键的字典：字面量推导出的类型里没有 ZG_PORT，delete 会被拒。
-    const env: NodeJS.ProcessEnv = { ...process.env, ZG_DATA_DIR: dataDir };
+    const env: NodeJS.ProcessEnv = { ...process.env, ZG_DATA_DIR: dataDir, ZG_PROJECT_ROOT: dataDir };
     delete env["ZG_PORT"];
     try {
       const { stdout, stderr } = await execFileAsync(process.execPath, [SCRIPT, ...args], {
@@ -485,7 +485,7 @@ describe("端口解析与服务端一致", () => {
 
   it("ZG_PORT 非法时明确报错，不静默回落", async () => {
     // 静默回落会让「我明明设了 ZG_PORT」变成一个查不出的问题。
-    const env = { ...process.env, ZG_DATA_DIR: dataDir, ZG_PORT: "not-a-port" };
+    const env = { ...process.env, ZG_DATA_DIR: dataDir, ZG_PROJECT_ROOT: dataDir, ZG_PORT: "not-a-port" };
     const r = await execFileAsync(process.execPath, [SCRIPT, "status"], { env, cwd: PROJECT }).then(
       () => ({ code: 0, stderr: "" }),
       (err: { code?: number; stderr?: string }) => ({ code: err.code ?? 1, stderr: err.stderr ?? "" }),

@@ -2,6 +2,7 @@ import { createHash } from "node:crypto";
 import type { Config, Proxy } from "../../shared/schema.ts";
 import type {
   ModelView,
+  Overview,
   ProxyView,
   SecretPresence,
   SubscriptionView,
@@ -109,28 +110,19 @@ export function proxySummary(proxies: readonly Proxy[]): {
  * Clash 配置的投影，`apiSecret` 换成指纹。`localProxyPort` 原样给出：不是凭证，
  * 且与内核实际 `mixed-port` 不一致时桥接会静默失败，界面必须能看到。
  */
-export function clashView(config: Config): {
-  enabled: boolean;
-  activeBridgeId: string | null;
-  bridges: Array<{
-    id: string;
-    name: string;
-    enabled: boolean;
-    apiBase: string;
-    apiSecret: SecretPresence;
-    localProxyPort: number;
-    selectorGroup: string;
-  }>;
-} {
+export function clashView(config: Config): Overview["clash"] {
   return {
     enabled: config.clash.enabled,
+    selectionMode: config.clash.selectionMode,
     activeBridgeId: config.clash.activeBridgeId,
     bridges: config.clash.bridges.map((b) => ({
       id: b.id,
       name: b.name,
       enabled: b.enabled,
+      priority: b.priority,
       apiBase: b.apiBase,
       apiSecret: displayFingerprint(b.apiSecret),
+      localProxyHost: b.localProxyHost,
       localProxyPort: b.localProxyPort,
       selectorGroup: b.selectorGroup,
     })),

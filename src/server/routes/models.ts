@@ -2,7 +2,13 @@ import { Hono, type Context } from "hono";
 import type { Config } from "../../shared/schema.ts";
 import { judgeFree } from "../../core/models/free.ts";
 import type { UpstreamDeps } from "../../core/upstream/fetch.ts";
-import { ModelCatalog, catalogIdentitiesOf, slotOf } from "../../core/models/catalog.ts";
+import {
+  ModelCatalog,
+  catalogIdentitiesOf,
+  slotOf,
+  type CatalogIdentity,
+  type CatalogSnapshot,
+} from "../../core/models/catalog.ts";
 import { gatewayError } from "../middleware/errorMap.ts";
 import { MODELS_PATHS } from "../../core/protocols/chat.ts";
 
@@ -29,20 +35,31 @@ export function createModelsRoutes(deps: ModelsDeps): Hono {
 }
 
 /**
+ * 按身份顺序取第一份可用目录。`/v1/models` 与管理面诊断共用：诊断看到的必须是
+ * 客户端查询时同一条路径的结果（纪律 #8）。
+ */
+export async function ensureCatalog(
+  config: Config,
+  catalog: ModelCatalog,
+  upstreamOf: (config: Config) => UpstreamDeps,
+): Promise<{ identity: CatalogIdentity; snapshot: CatalogSnapshot | null }> {
+  const identities = catalogIdentitiesOf(config);
+  let identity = identities[0]!;
+  for (const candidate of identities) {
+    identity = candidate;
+    const snapshot = await catalog.ensure(candidate, config, upstreamOf);
+    if (snapshot !== null) return { identity, snapshot };
+  }
+  return { identity, snapshot: null };
+}
+
+/**
  * 身份选择见 `catalogIdentityOf`。这里用 `ensure` 而非 `refreshIfStale`：
  * 用户主动查询目录时可以等一次上游请求，转发路径则不行。
  */
 async function handleModels(c: Context, deps: ModelsDeps): Promise<Response> {
   const config = deps.configOf();
-  const identities = catalogIdentitiesOf(config);
-  let identity = identities[0]!;
-  let snapshot = null;
-
-  for (const candidate of identities) {
-    identity = candidate;
-    snapshot = await deps.catalog.ensure(candidate, config, deps.upstreamOf);
-    if (snapshot !== null) break;
-  }
+  const { identity, snapshot } = await ensureCatalog(config, deps.catalog, deps.upstreamOf);
   if (snapshot === null) {
     // 从未拉到过目录时报 502 而非空列表：空列表会让用户去翻自己的模型配置。
     return c.json(gatewayError("upstream_unreachable", "无法获取上游模型目录"), 502);

@@ -1,24 +1,27 @@
-import { Hono, type Context } from "hono";
+import { Hono } from "hono";
 import type { Config } from "../../shared/schema.ts";
 import {
   BatchProgressSchema,
   ConfigPatchSchema,
   ModelListSchema,
   OverviewSchema,
-  ProbeReportSchema,
   ProxyListSchema,
   StatsViewSchema,
   SubscriptionRefreshSchema,
   type Overview,
   type StatsView,
-  AdminErrorSchema,
-  type AdminErrorType,
 } from "../../shared/contract.ts";
 import { poolHealth } from "../../shared/contract.ts";
 import { buildIsolationReport } from "../../core/proxy/probe.ts";
-import { applyProbeResults, type EgressService } from "../../core/proxy/egress.ts";
+import type { EgressService } from "../../core/proxy/egress.ts";
 import { judgeFree } from "../../core/models/free.ts";
-import { catalogIdentityOf, slotOf, type ModelCatalog } from "../../core/models/catalog.ts";
+import { catalogIdentityOf, slotOf, type CatalogSnapshot, type ModelCatalog } from "../../core/models/catalog.ts";
+import type { VersionProbe } from "../admin/opencode.ts";
+import { createClashRoutes } from "./admin/clash.ts";
+import { createDiagnosticsRoutes } from "./admin/diagnostics.ts";
+import { createOpenCodeRoutes } from "./admin/opencode.ts";
+import { probeUsedEgress } from "./admin/probe.ts";
+import { adminError, issuesText, MAX_ADMIN_BODY_BYTES } from "./admin/common.ts";
 import { safeErrorMessage } from "../../shared/redact.ts";
 import { dayKey } from "../../store/db/stats.ts";
 import { applyConfigPatch } from "../admin/patch.ts";
@@ -36,7 +39,6 @@ import {
   type RuntimeWorkerState,
 } from "../admin/project.ts";
 import type { BatchProbeRunner } from "../admin/batchRunner.ts";
-import { usedProxyIds } from "../../core/routing/workerPool.ts";
 import { fetchSubscription, type FetchDeps } from "../../core/proxy/subscription/fetch.ts";
 import { importSubscriptionNodes } from "../../core/proxy/subscription/import.ts";
 
@@ -47,9 +49,6 @@ import { importSubscriptionNodes } from "../../core/proxy/subscription/import.ts
  * 3. 写入原子且可回退：合并结果先全量过 `ConfigSchema`，再经 `saveConfig` 原子写。
  * 每个读 body 的端点都必须过 1 MiB 闸门；转发面的 64 MiB 是为多模态留的。
  */
-
-/** 管理请求体上限。与 relay 的 64 MiB 刻意不同 —— 见文件头。 */
-const MAX_ADMIN_BODY_BYTES = 1024 * 1024;
 
 /** 统计默认回看天数。全量扫是唯一随行数线性变慢的聚合，所以默认带 sinceDay。 */
 const DEFAULT_STATS_DAYS = 30;
@@ -83,28 +82,26 @@ export type AdminDeps = {
   readonly batch?: BatchProbeRunner;
   readonly health: () => Overview["health"];
   readonly stats?: AdminStatsSource;
+  /** 只读重读磁盘配置并返回权限问题，供诊断；不传则诊断的配置层只报内存状态。 */
+  readonly diskConfigCheck?: () => Promise<readonly string[]>;
+  /** 按 `/v1/models` 同一路径取目录，供诊断；不传则目录层跳过。 */
+  readonly ensureCatalog?: () => Promise<CatalogSnapshot | null>;
+  /** 项目根与 opencode 版本探测；不传则 `/opencode*` 报不可用。测试注入临时目录与假探测。 */
+  readonly openCode?: { readonly root: string; readonly probeVersion: VersionProbe };
   /** 订阅拉取注入点。生产走 `globalThis.fetch`，刻意不经出口 dispatcher 池。 */
   readonly subscriptionFetch?: FetchDeps;
   readonly log?: (message: string) => void;
 };
-
-function adminError(c: Context, type: AdminErrorType, message: string) {
-  const status = {
-    invalid_request: 400,
-    invalid_config: 422,
-    write_failed: 500,
-    not_found: 404,
-    internal_error: 500,
-  }[type] as 400 | 404 | 422 | 500;
-  // 经 `AdminErrorSchema` 构造，避免 schema 与手写形状各存一份。
-  return c.json(AdminErrorSchema.parse({ error: { type, message } }), status);
-}
 
 export function createAdminRoutes(deps: AdminDeps): Hono {
   const app = new Hono();
 
   /** 正在刷新的订阅 id，按 id 进程内互斥：不同订阅并发刷新是安全的。 */
   const refreshing = new Set<string>();
+
+  app.route("/", createClashRoutes(deps));
+  app.route("/", createDiagnosticsRoutes(deps));
+  app.route("/", createOpenCodeRoutes(deps));
 
   /** 探针；`assertEveryRouteGuarded` 的测试依赖它。 */
   app.get("/ping", (c) => c.json({ ok: true }));
@@ -134,6 +131,13 @@ export function createAdminRoutes(deps: AdminDeps): Hono {
         baseUrl: config.gateway.baseUrl,
         relayToken: displayFingerprint(config.gateway.relayToken),
         maxAttempts: config.gateway.maxAttempts,
+        headersTimeoutMs: config.gateway.headersTimeoutMs,
+        bodyTimeoutMs: config.gateway.bodyTimeoutMs,
+      },
+      routing: {
+        strategy: config.routing.strategy,
+        affinityTtlMs: config.routing.affinityTtlMs,
+        cooldown: { ...config.routing.cooldown },
       },
       pool: { ...counts, health: poolHealth(counts) },
       workers: views,
@@ -211,14 +215,7 @@ export function createAdminRoutes(deps: AdminDeps): Hono {
 
     const patch = ConfigPatchSchema.safeParse(parsed);
     if (!patch.success) {
-      return adminError(
-        c,
-        "invalid_request",
-        patch.error.issues
-          .slice(0, 10)
-          .map((i) => `${i.path.map(String).join(".") || "(根)"}: ${i.message}`)
-          .join("; "),
-      );
+      return adminError(c, "invalid_request", issuesText(patch.error.issues));
     }
 
     const result = applyConfigPatch(deps.configOf(), patch.data);
@@ -247,58 +244,7 @@ export function createAdminRoutes(deps: AdminDeps): Hono {
    * 只探测不写回则隔离永远无法成立。探测走服务自己的 `EgressService`（不变量 #7 的延伸）。
    * 同步返回，只探在用出口；几十个节点的批测走 `/batch-probe`。
    */
-  app.post("/probe", async (c) => {
-    if (deps.egress === undefined) {
-      return adminError(c, "internal_error", "出口服务不可用");
-    }
-
-    const config = deps.configOf();
-    const proxyIds = usedProxyIds(config);
-    if (proxyIds.length === 0) {
-      return adminError(c, "invalid_config", "没有可用的 Worker,无从探测出口");
-    }
-
-    let results;
-    try {
-      results = await deps.egress.probeAll(config, proxyIds);
-    } catch (err) {
-      deps.log?.(`出口探测失败: ${safeErrorMessage(err)}`);
-      return adminError(c, "internal_error", `探测失败:${safeErrorMessage(err)}`);
-    }
-
-    /*
-     * 合并前必须重读配置：探测耗时数秒，用开始前的快照写回会覆盖用户期间的改动。
-     * 订阅刷新与 `batchRunner.#persist` 同样防了这个，三处须一致（纪律 #4）。
-     * 失败不清空已有 IP；`applyProbeResults` 同时处理直连（`__direct__` → `gateway.directEgressIp`）。
-     */
-    const byProxy = new Map(results.map((r) => [r.proxyId, r.outcome] as const));
-    const fresh = deps.configOf();
-    const merged = applyProbeResults(fresh, byProxy);
-    const changed = merged.changed;
-
-    if (changed) {
-      try {
-        await deps.applyConfig(merged.config, fresh);
-      } catch (err) {
-        deps.log?.(`探测结果写入失败: ${safeErrorMessage(err)}`);
-        return adminError(c, "write_failed", `探测成功但写入失败:${safeErrorMessage(err)}`);
-      }
-    }
-
-    // 返回每个出口的结果（含失败原因）；过 schema 防将来新增字段被无意带出。
-    return c.json(
-      ProbeReportSchema.parse({
-      ok: true,
-      changed,
-      results: results.map((r) => ({
-        proxyId: r.proxyId,
-        ...(r.outcome.ok
-          ? { ok: true as const, egressIp: r.outcome.egressIp, latencyMs: r.outcome.latencyMs, via: r.outcome.via }
-          : { ok: false as const, failureKind: r.outcome.failureKind, reason: r.outcome.reason }),
-      })),
-      }),
-    );
-  });
+  app.post("/probe", async (c) => await probeUsedEgress(c, deps));
 
   /**
    * 刷新一个订阅：`fetchSubscription`（多 UA 协商）→ `parseSubscription` → `importSubscriptionNodes`，这里只接线并写盘。
@@ -315,7 +261,7 @@ export function createAdminRoutes(deps: AdminDeps): Hono {
 
     if (refreshing.has(id)) {
       // 409：与批量探测的并发 start 同一个语义 —— 不排队，让调用方重试。
-      return c.json({ error: { type: "conflict", message: "该订阅正在刷新中" } }, 409);
+      return adminError(c, "conflict", "该订阅正在刷新中");
     }
     refreshing.add(id);
 

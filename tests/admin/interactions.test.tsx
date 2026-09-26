@@ -8,8 +8,8 @@ import { ModelsPage } from "../../src/admin/pages/ModelsPage.tsx";
 import { OverviewPage } from "../../src/admin/pages/OverviewPage.tsx";
 import { ProxyPage, subscriptionStatus } from "../../src/admin/pages/ProxyPage.tsx";
 import { UsagePage } from "../../src/admin/pages/UsagePage.tsx";
-import { Wizard } from "../../src/admin/pages/Wizard.tsx";
 import { Nav } from "../../src/admin/components/Nav.tsx";
+import { ClashSection } from "../../src/admin/components/ClashSection.tsx";
 import { PAGES } from "../../src/admin/lib/router.ts";
 import { parseHash } from "../../src/admin/lib/router.ts";
 import { formatLocalTime } from "../../src/admin/lib/format.ts";
@@ -82,7 +82,7 @@ function proxy(overrides: Partial<ProxyView> = {}): ProxyView {
 function proxyList(proxies: ProxyView[], overrides: Partial<ProxyList> = {}): ProxyList {
   return {
     proxies,
-    clash: { enabled: false, activeBridgeId: null, bridges: [] },
+    clash: { enabled: false, selectionMode: "auto", activeBridgeId: null, bridges: [] },
     isolation: { groups: [], unknownWorkerIds: [], sharedGroups: [], isolated: false },
     subscriptions: [],
     ...overrides,
@@ -105,26 +105,28 @@ describe("表格在窄屏内部横向滚动", () => {
       ["概览", () => <OverviewPage data={withWorkers([worker()])} />],
       ["Worker", () => <WorkersPage data={withWorkers([worker()])} view={parseHash("#workers")} navigate={noop} />],
       [
-        "网关",
+        "Clash 内核",
         () => (
-          <GatewayPage
-            data={fakeOverview({
-              clash: {
-                enabled: true,
-                activeBridgeId: "b1",
-                bridges: [
-                  {
-                    id: "b1",
-                    name: "verge",
-                    enabled: true,
-                    apiBase: "http://127.0.0.1:9097",
-                    apiSecret: { present: false, fingerprint: null },
-                    localProxyPort: 7897,
-                    selectorGroup: "Proxy",
-                  },
-                ],
-              },
-            })}
+          <ClashSection
+            refresh={noop}
+            clash={{
+              enabled: true,
+              selectionMode: "auto",
+              activeBridgeId: "b1",
+              bridges: [
+                {
+                  id: "b1",
+                  name: "verge",
+                  enabled: true,
+                  priority: 100,
+                  apiBase: "http://127.0.0.1:9097",
+                  apiSecret: { present: false, fingerprint: null },
+                  localProxyHost: "127.0.0.1",
+                  localProxyPort: 7897,
+                  selectorGroup: "Proxy",
+                },
+              ],
+            }}
           />
         ),
       ],
@@ -366,7 +368,7 @@ describe("保存结果区分成功与失败", () => {
     const user = userEvent.setup();
     vi.spyOn(adminApi, "patchConfig").mockResolvedValue(undefined);
     render(<GatewayPage data={fakeOverview()} />);
-    await user.click(screen.getByRole("button", { name: "保存" }));
+    await user.click(screen.getByRole("button", { name: "保存运行参数" }));
     const ok = await screen.findByText("已保存");
     expect(ok.closest("[data-tone]")).toHaveAttribute("data-tone", "success");
     expect(ok.closest('[aria-live="polite"]')).not.toBeNull();
@@ -377,7 +379,7 @@ describe("保存结果区分成功与失败", () => {
     const user = userEvent.setup();
     vi.spyOn(adminApi, "patchConfig").mockRejectedValue(new Error("配置写入失败"));
     render(<GatewayPage data={fakeOverview()} />);
-    await user.click(screen.getByRole("button", { name: "保存" }));
+    await user.click(screen.getByRole("button", { name: "保存运行参数" }));
     const alert = await screen.findByRole("alert");
     expect(alert).toHaveTextContent("配置写入失败");
     expect(alert.querySelector("[data-tone]")).toHaveAttribute("data-tone", "error");
@@ -390,7 +392,7 @@ describe("保存结果区分成功与失败", () => {
     const input = screen.getByRole("spinbutton", { name: "最多尝试 Worker 数" });
     await user.clear(input);
     if (raw !== "") await user.type(input, raw);
-    await user.click(screen.getByRole("button", { name: "保存" }));
+    await user.click(screen.getByRole("button", { name: "保存运行参数" }));
     expect(patch).not.toHaveBeenCalled();
     expect(screen.getByRole("alert")).toHaveTextContent("1 到 10 的整数");
   });
@@ -406,7 +408,7 @@ describe("保存结果区分成功与失败", () => {
     vi.spyOn(adminApi, "patchConfig").mockRejectedValue(new Error("Worker id 已存在:w1"));
     render(<WorkersPage data={withWorkers([worker()])} view={parseHash("#workers")} navigate={noop} />);
     await user.click(screen.getByRole("button", { name: "新增 Worker" }));
-    await user.type(screen.getByLabelText("ID"), "w1");
+    await user.selectOptions(screen.getByLabelText("类型"), "authenticated");
     await user.type(screen.getByLabelText("API key（认证必填）"), "fake-key-not-real");
     await user.click(screen.getByRole("button", { name: "保存" }));
     expect(await screen.findByRole("alert")).toHaveTextContent("Worker id 已存在");
@@ -519,7 +521,7 @@ describe("代理池标签", () => {
     render(<ProxyPage data={proxyList([proxy()])} view={parseHash("#proxy?tab=isolation")} navigate={navigate} />);
     const tablist = screen.getByRole("tablist", { name: "代理池视图" });
     const tabs = within(tablist).getAllByRole("tab");
-    expect(tabs.map((t) => t.textContent)).toEqual(["列表", "回显出口", "订阅"]);
+    expect(tabs.map((t) => t.textContent)).toEqual(["列表", "回显出口", "订阅", "Clash"]);
     const selected = within(tablist).getByRole("tab", { selected: true });
     expect(selected).toHaveTextContent("回显出口");
     expect(selected).toHaveAttribute("href", "#proxy?tab=isolation");
@@ -566,11 +568,11 @@ describe("每个视图最多一个主操作", () => {
     expect(primaries[0]).toHaveTextContent("开始批量探测");
   });
 
-  it("向导与 Worker 页同屏时仍只有一个主操作", async () => {
+  it("App 里的 Worker 页只有一个主操作", async () => {
     vi.stubGlobal("fetch", vi.fn(() => Promise.resolve({ ok: true, status: 200, json: () => Promise.resolve(fakeOverview()) })));
     window.location.hash = "#workers";
     const { container } = render(<App />);
-    await screen.findByText("先把它跑起来");
+    await screen.findByRole("heading", { name: "Worker（0/0）" });
     const primaries = primaryButtons(container);
     expect(primaries).toHaveLength(1);
     expect(primaries[0]).toHaveTextContent("新增 Worker");
@@ -642,54 +644,5 @@ describe("概览不重复网关页与分组", () => {
     expect(within(panel).getAllByText("198.51.100.1")).toHaveLength(1);
     expect(within(items[0]!).getByText("共用")).toBeInTheDocument();
     expect(within(items[1]!).queryByText("共用")).not.toBeInTheDocument();
-  });
-});
-
-/* ================================================================== *
- * 向导
- * ================================================================== */
-
-describe("向导", () => {
-  it("Worker 在 Worker 页创建，不再要求编辑 config.json 或重启", () => {
-    const { container } = render(<Wizard data={fakeOverview()} onCreateWorker={noop} />);
-    const text = container.textContent ?? "";
-    expect(text).not.toContain("data/config.json");
-    expect(text).not.toMatch(/编辑.*workers/);
-    expect(text).toContain("匿名 Worker 可以不填 key");
-    expect(screen.getByRole("button", { name: "去新增 Worker" })).toBeInTheDocument();
-    // setup 只导入出口，不创建 Worker。
-    expect(text).toMatch(/不创建 Worker/);
-  });
-
-  it("点「去新增 Worker」跳到 Worker 页并打开新增表单", async () => {
-    const user = userEvent.setup();
-    vi.stubGlobal("fetch", vi.fn(() => Promise.resolve({ ok: true, status: 200, json: () => Promise.resolve(fakeOverview()) })));
-    render(<App />);
-    await user.click(await screen.findByRole("button", { name: "去新增 Worker" }));
-    expect(window.location.hash).toBe("#workers");
-    expect(await screen.findByRole("form", { name: "新增 Worker" })).toBeInTheDocument();
-    expect(screen.getByLabelText("ID")).toHaveFocus();
-  });
-
-  it.each(["#proxy", "#models", "#usage"])("%s 页只显示一行提示并链接到概览", async (hash) => {
-    vi.stubGlobal(
-      "fetch",
-      vi.fn(() => Promise.resolve({ ok: true, status: 200, json: () => Promise.resolve(fakeOverview()) })),
-    );
-    window.location.hash = hash;
-    render(<App />);
-    expect(await screen.findByText("还没有可用的 Worker，转发会失败。")).toBeInTheDocument();
-    expect(screen.queryByText("先把它跑起来")).not.toBeInTheDocument();
-    expect(screen.getByRole("link", { name: "去概览页查看首启步骤" })).toHaveAttribute("href", "#overview");
-  });
-
-  it.each(["#overview", "#workers", "#gateway"])("%s 页完整显示向导", async (hash) => {
-    vi.stubGlobal(
-      "fetch",
-      vi.fn(() => Promise.resolve({ ok: true, status: 200, json: () => Promise.resolve(fakeOverview()) })),
-    );
-    window.location.hash = hash;
-    render(<App />);
-    expect(await screen.findByText("先把它跑起来")).toBeInTheDocument();
   });
 });

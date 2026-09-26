@@ -1,6 +1,19 @@
 import { z } from "zod";
 import { BATCH_STATES } from "./batchProbe.ts";
-import { GatewaySchema, ModelRulesSchema, ProxySourceSchema, WorkerKindSchema } from "./schema.ts";
+import {
+  ClashBridgeSchema,
+  ClashConfigSchema,
+  CooldownConfigSchema,
+  GatewaySchema,
+  IdSchema,
+  ModelRulesSchema,
+  ProxySourceSchema,
+  RoutingConfigSchema,
+  RoutingStrategySchema,
+  SubscriptionSchema,
+  WorkerKindSchema,
+  MAX_WORKERS,
+} from "./schema.ts";
 
 /** server ⇄ admin ⇄ CLI 的唯一契约；三端都从这里推导类型。配置 schema 在 `schema.ts`。 */
 
@@ -99,6 +112,20 @@ export const OverviewSchema = z.object({
     baseUrl: z.string(),
     relayToken: SecretPresenceSchema,
     maxAttempts: z.number().int(),
+    headersTimeoutMs: z.number().int(),
+    bodyTimeoutMs: z.number().int(),
+  }),
+  /** 调度设置的当前值，供网关页表单回填。 */
+  routing: z.object({
+    strategy: RoutingStrategySchema,
+    affinityTtlMs: z.number().int(),
+    cooldown: z.object({
+      rateLimitMs: z.number().int(),
+      authFailMs: z.number().int(),
+      forbiddenMs: z.number().int(),
+      transportBaseMs: z.number().int(),
+      transportMaxMs: z.number().int(),
+    }),
   }),
   pool: z.object({
     ready: z.number().int().nonnegative(),
@@ -114,14 +141,17 @@ export const OverviewSchema = z.object({
   }),
   clash: z.object({
     enabled: z.boolean(),
+    selectionMode: z.enum(["manual", "auto"]),
     activeBridgeId: z.string().nullable(),
     bridges: z.array(
       z.object({
         id: z.string(),
         name: z.string(),
         enabled: z.boolean(),
+        priority: z.number().int(),
         apiBase: z.string(),
         apiSecret: SecretPresenceSchema,
+        localProxyHost: z.string(),
         localProxyPort: z.number().int(),
         selectorGroup: z.string(),
       }),
@@ -188,6 +218,10 @@ export const AdminErrorSchema = z.object({
       "write_failed",
       /** 要改的东西不存在（未知 Worker id 等）。 */
       "not_found",
+      /** 与进行中的操作冲突（批量探测、订阅刷新），不排队，稍后重试。 */
+      "conflict",
+      /** Clash Controller 连得上但要求 secret。 */
+      "auth_required",
       "internal_error",
     ]),
     message: z.string(),
@@ -241,7 +275,84 @@ export const GatewayPatchSchema = z.strictObject({
   maxAttempts: GatewaySchema.shape.maxAttempts.unwrap().optional(),
   headersTimeoutMs: GatewaySchema.shape.headersTimeoutMs.unwrap().optional(),
   bodyTimeoutMs: GatewaySchema.shape.bodyTimeoutMs.unwrap().optional(),
-  relayToken: SecretPatchSchema.optional(),
+  /** 除三态外还可 `{ rotate: true }`：服务端用首启同一个生成器换新 token，响应不回显。 */
+  relayToken: z.union([SecretPatchSchema, z.strictObject({ rotate: z.literal(true) })]).optional(),
+});
+
+/** 调度设置的可改字段；取值范围沿用 `RoutingConfigSchema`。 */
+export const RoutingPatchSchema = z.strictObject({
+  strategy: RoutingStrategySchema.optional(),
+  affinityTtlMs: RoutingConfigSchema.shape.affinityTtlMs.unwrap().optional(),
+  cooldown: z
+    .strictObject({
+      rateLimitMs: CooldownConfigSchema.shape.rateLimitMs.unwrap().optional(),
+      authFailMs: CooldownConfigSchema.shape.authFailMs.unwrap().optional(),
+      forbiddenMs: CooldownConfigSchema.shape.forbiddenMs.unwrap().optional(),
+      transportBaseMs: CooldownConfigSchema.shape.transportBaseMs.unwrap().optional(),
+      transportMaxMs: CooldownConfigSchema.shape.transportMaxMs.unwrap().optional(),
+    })
+    .optional(),
+});
+
+const bridge = ClashBridgeSchema.shape;
+
+/** Clash 内核的可改字段。不含 `id`：代理的 `bridgeId` 按 id 引用。`apiSecret` 走凭证三态。 */
+export const BridgePatchSchema = z.strictObject({
+  name: bridge.name.optional(),
+  enabled: bridge.enabled.unwrap().optional(),
+  priority: bridge.priority.unwrap().optional(),
+  apiBase: bridge.apiBase.optional(),
+  apiSecret: SecretPatchSchema.optional(),
+  localProxyHost: bridge.localProxyHost.unwrap().optional(),
+  localProxyPort: bridge.localProxyPort.optional(),
+  selectorGroup: bridge.selectorGroup.unwrap().optional(),
+});
+
+export const ClashPatchSchema = z.strictObject({
+  enabled: z.boolean().optional(),
+  selectionMode: ClashConfigSchema.shape.selectionMode.unwrap().optional(),
+  activeBridgeId: IdSchema.nullable().optional(),
+  bridges: z
+    .strictObject({
+      /** 直接用存储 schema：默认值与校验只有一处。 */
+      create: z.array(ClashBridgeSchema).max(32).optional(),
+      update: z.record(z.string(), BridgePatchSchema).optional(),
+      /** 连带删除该内核导入的代理；其中有被 Worker 引用的则整个请求失败。 */
+      delete: z.array(z.string()).max(32).optional(),
+    })
+    .optional(),
+});
+
+/** 代理只开放启停与改名；连接信息来自导入，手改会与下次导入冲突。 */
+export const ProxiesPatchSchema = z.strictObject({
+  update: z
+    .record(
+      z.string(),
+      z.strictObject({ enabled: z.boolean().optional(), name: z.string().min(1).max(200).optional() }),
+    )
+    .optional(),
+  /** 被 Worker 引用的代理拒绝删除：Worker 会静默退回直连，破坏出口隔离。 */
+  delete: z.array(z.string()).max(2048).optional(),
+});
+
+export const SubscriptionsPatchSchema = z.strictObject({
+  create: z
+    .array(SubscriptionSchema.pick({ id: true, name: true, url: true, enabled: true }))
+    .max(64)
+    .optional(),
+  /** `url` 是凭证，走三态写入且永不回显。 */
+  update: z
+    .record(
+      z.string(),
+      z.strictObject({
+        name: SubscriptionSchema.shape.name.optional(),
+        url: SecretPatchSchema.optional(),
+        enabled: z.boolean().optional(),
+      }),
+    )
+    .optional(),
+  /** 连带删除该订阅导入的代理；其中有被 Worker 引用的则整个请求失败。 */
+  delete: z.array(z.string()).max(64).optional(),
 });
 
 /** 模型规则的可改字段。Models 页编辑其中的后缀、名单与交集开关。 */
@@ -260,12 +371,20 @@ export const ModelRulesPatchSchema = z.strictObject({
  * 补丁侧一律 `strictObject`：否则拼错的字段被静默丢弃，产出空 patch 却返回成功。
  * 响应侧投影保持 `z.object`，由 `admin/project.ts` 构造，加诊断字段不应是破坏性改动。
  */
+/** 一次 `workers.create` 的条数上限，与配置里 Worker 总数上限一致；后台批量导入按它分批提示。 */
+export const WORKER_CREATE_MAX = MAX_WORKERS;
+
 export const ConfigPatchSchema = z.strictObject({
   gateway: GatewayPatchSchema.optional(),
+  routing: RoutingPatchSchema.optional(),
   models: ModelRulesPatchSchema.optional(),
+  clash: ClashPatchSchema.optional(),
+  proxies: ProxiesPatchSchema.optional(),
+  subscriptions: SubscriptionsPatchSchema.optional(),
   workers: z
     .strictObject({
-      create: z.array(WorkerCreateSchema).max(64).optional(),
+      /** 上限与 `ConfigSchema.workers` 一致：从 Clash 节点批量建 Worker 要一次提交。 */
+      create: z.array(WorkerCreateSchema).max(WORKER_CREATE_MAX).optional(),
       /** 按 id 定位；id 不存在则整个请求失败（`not_found`），不静默跳过。 */
       update: z.record(z.string(), WorkerPatchSchema).optional(),
       delete: z.array(z.string()).max(512).optional(),
@@ -446,3 +565,88 @@ export const INITIAL_BATCH_VIEW: BatchProgressView = {
   failureKind: null,
   elapsedMs: null,
 };
+
+/* ---------------- Clash 发现与导入 ---------------- */
+
+/** 显式地址只接受本机 http 回环 —— 服务端另判，这里只限长度与形状。 */
+export const ClashDiscoverRequestSchema = z.strictObject({
+  apiBase: z.string().min(1).max(2048).optional(),
+  secret: z.string().max(512).optional(),
+});
+
+export const ClashControllerViewSchema = z.object({
+  apiBase: z.string(),
+  status: z.enum(["ok", "auth_required", "unreachable"]),
+  version: z.string().optional(),
+  mode: z.string().optional(),
+  mixedPort: z.number().int().nullable().optional(),
+  selectorGroup: z.string().optional(),
+  nodeCount: z.number().int().nonnegative().optional(),
+  /** 已脱敏的原因：连不上、要 secret，或连上了但不能配置（缺 mixed-port 等）。 */
+  reason: z.string().optional(),
+});
+export type ClashControllerView = z.infer<typeof ClashControllerViewSchema>;
+
+export const ClashDiscoverResponseSchema = z.object({
+  controllers: z.array(ClashControllerViewSchema),
+});
+export type ClashDiscoverResponse = z.infer<typeof ClashDiscoverResponseSchema>;
+
+export const ClashImportRequestSchema = z.strictObject({
+  apiBase: z.string().min(1).max(2048),
+  secret: z.string().max(512).optional(),
+  dryRun: z.boolean(),
+});
+
+export const ClashImportResponseSchema = z.object({
+  ok: z.literal(true),
+  dryRun: z.boolean(),
+  summary: z.object({
+    bridgesAdded: z.number().int().nonnegative(),
+    bridgesUpdated: z.number().int().nonnegative(),
+    proxiesAdded: z.number().int().nonnegative(),
+    proxiesUpdated: z.number().int().nonnegative(),
+    selectorGroup: z.string(),
+    mixedPort: z.number().int(),
+    warnings: z.array(z.string()),
+  }),
+});
+export type ClashImportResponse = z.infer<typeof ClashImportResponseSchema>;
+
+/* ---------------- 诊断 ---------------- */
+
+export const DIAGNOSTIC_LAYER_IDS = ["config", "store", "workers", "clash", "catalog"] as const;
+
+export const DiagnosticLayerSchema = z.object({
+  id: z.enum(DIAGNOSTIC_LAYER_IDS),
+  title: z.string(),
+  status: z.enum(["pass", "warn", "fail", "skip"]),
+  summary: z.string(),
+  details: z.array(z.string()),
+  nextStep: z.string().optional(),
+});
+export type DiagnosticLayer = z.infer<typeof DiagnosticLayerSchema>;
+
+export const DiagnosticsSchema = z.object({ layers: z.array(DiagnosticLayerSchema) });
+export type Diagnostics = z.infer<typeof DiagnosticsSchema>;
+
+/* ---------------- OpenCode 项目配置 ---------------- */
+
+export const OpenCodeViewSchema = z.object({
+  /** 相对项目根的路径，恒为 `opencode.json`；不给绝对路径（含用户主目录）。 */
+  path: z.string(),
+  exists: z.boolean(),
+  /** `opencode --version` 的输出；未安装或探测失败为 null。 */
+  detectedVersion: z.string().nullable(),
+  /** 文件里 opencode provider 的形状；文件不存在、无法解析或没有该 provider 为 null。 */
+  shape: z.enum(["v1", "v2"]).nullable(),
+  /** baseURL 指向本网关且 apiKey 与当前 Relay Token 一致。 */
+  pointsToGateway: z.boolean(),
+  /** 文件存在但不能安全改写（JSONC、注释、非对象）时的原因。 */
+  unwritableReason: z.string().nullable(),
+});
+export type OpenCodeView = z.infer<typeof OpenCodeViewSchema>;
+
+export const OpenCodeWriteRequestSchema = z.strictObject({
+  version: z.enum(["1", "2"]).optional(),
+});

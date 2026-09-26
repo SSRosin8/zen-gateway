@@ -1,23 +1,34 @@
-import type {
-  BatchProgressView,
-  ProxyList,
-  ProxyView,
-  SubscriptionRefresh,
-} from "../../shared/contract.ts";
+import type { BatchProgressView, ProxyList, ProxyView } from "../../shared/contract.ts";
 import { isActive, percentages } from "../../shared/batchProbe.ts";
 import { useState } from "react";
 import { StatusIndicator, type StatusTone } from "../components/StatusIndicator.tsx";
-import { Metric, Mono, Panel, PrimaryButton, SecondaryButton, Strong, Truncate } from "../components/Panel.tsx";
+import {
+  FormStatus,
+  Metric,
+  Mono,
+  Panel,
+  PrimaryButton,
+  SecondaryButton,
+  Strong,
+  Truncate,
+  errorMessage,
+  type FormMessage,
+} from "../components/Panel.tsx";
 import { DataTable, TableFilters, type Column } from "../components/DataTable.tsx";
 import { ConfirmDialog } from "../components/ConfirmDialog.tsx";
 import { toHash, type ViewState } from "../lib/router.ts";
-import { useBatchProbe, useSubscriptionRefresh } from "../lib/api.ts";
-import { formatLocalTime, humanMs } from "../lib/format.ts";
+import { patchConfig, useBatchProbe } from "../lib/api.ts";
+import { humanMs } from "../lib/format.ts";
+import { SubscriptionTab } from "../components/SubscriptionTab.tsx";
+import { ClashSection } from "../components/ClashSection.tsx";
+
+export { subscriptionStatus } from "../components/SubscriptionTab.tsx";
 
 /**
  * 代理池页。
  *
- * 两个标签：**列表**（分页）与**回显出口**（不分页）。
+ * 标签：**列表**（分页，可启停与删除节点）、**回显出口**（不分页）、**订阅**、
+ * **Clash**（内核管理与探测导入）。
  *
  * 隔离视图刻意不分页：那个任务本身就是「一眼看全、找出共用出口的节点」，
  * 分页会破坏它的意义。数量大时靠浏览器原生滚动，而不是切成 6 页
@@ -296,174 +307,38 @@ function IsolationTab({ data }: { data: ProxyList }) {
   );
 }
 
-/**
- * 订阅标签。
- *
- * ## 为什么 URL 只显示脱敏串
- *
- * 订阅 URL 的 token 通常带在 query 或 path 里，它本身就是付费凭证 ——
- * 与 API key 同一条规则：界面要回答"这是哪个订阅"，不该让人从界面抄走 token。
- * 服务端的 `subscriptionViews` 已经过了 `redactUrl`，前端拿不到原值。
- *
- * ## 「从没拉过」与「拉过但失败了」要分开显示
- *
- * 两者的下一步完全不同：前者是"点一下刷新"，后者是"看看 token 过期了没"。
- * 合成一句"未就绪"会让用户从头猜 —— 与 doctor 分层同一个理由。
- */
-function SubscriptionTab({ data }: { data: ProxyList }) {
-  const { stateOf, refresh } = useSubscriptionRefresh();
-
-  if (data.subscriptions.length === 0) {
-    return (
-      <Panel title="订阅">
-        <p className="text-text-muted">
-          还没有订阅。订阅是批量导入节点的来源 —— 手工添加代理也可以，
-          但一个机场几十个节点逐个填不现实。
-        </p>
-        <p className="mt-2 text-text-muted">
-          眼下需要直接编辑 <Mono>data/config.json</Mono> 的{" "}
-          <Mono>subscriptions</Mono> 数组（<Mono>id</Mono> / <Mono>name</Mono> /{" "}
-          <Mono>url</Mono>），然后回到这里点刷新。
-        </p>
-      </Panel>
-    );
-  }
-
-  return (
-    <Panel title={`订阅（${data.subscriptions.length}）`}>
-      <ul className="space-y-3">
-        {data.subscriptions.map((s) => {
-          const state = stateOf(s.id);
-          const running = state.status === "running";
-          return (
-            <li
-              key={s.id}
-              className="rounded-md border border-border-strong p-4"
-              data-subscription={s.id}
-            >
-              <div className="flex flex-wrap items-center justify-between gap-3">
-                <div>
-                  <div className="font-medium">{s.name}</div>
-                  {/* 已脱敏 —— 服务端过了 redactUrl，这里只是显示。 */}
-                  <div className="text-text-muted">
-                    <Mono>{s.urlRedacted}</Mono>
-                  </div>
-                </div>
-                {/* 每行一个刷新按钮，用描边按钮：页面的主操作是批量探测。 */}
-                <SecondaryButton onClick={() => void refresh(s.id)} disabled={running}>
-                  {running ? "刷新中…" : "刷新"}
-                </SecondaryButton>
-              </div>
-
-              <div className="mt-3 flex flex-wrap items-center gap-4">
-                <span title={s.lastFetchedAt ?? undefined}>
-                  <StatusIndicator {...subscriptionStatus(s)} />
-                </span>
-                <span className="text-text-muted">
-                  当前 <Mono>{s.proxyCount}</Mono> 个节点
-                  {s.lastFormat === null ? null : (
-                    <>
-                      {" · 格式 "}
-                      <Mono>{s.lastFormat}</Mono>
-                    </>
-                  )}
-                </span>
-              </div>
-
-              <div aria-live="polite">
-                {state.status === "done" && <RefreshReport result={state.result} />}
-                {state.status === "error" && (
-                  <p role="alert" className="mt-2">
-                    <StatusIndicator tone="error" icon="✕" label={state.message} />
-                  </p>
-                )}
-              </div>
-            </li>
-          );
-        })}
-      </ul>
-    </Panel>
-  );
-}
-
-/**
- * 订阅的状态标签。
- *
- * 四态而不是两态 —— 见 `SubscriptionTab` 的说明。注意**停用**时也要把
- * 失败原因带上（如果有）：与 `proxyStatus` 同一个理由，一条 early return
- * 会让最常见的那类输入看不到原因。
- *
- * 拉取时间按本地时区显示；完整 ISO 串放在外层元素的 `title` 上。
- */
-export function subscriptionStatus(s: ProxyList["subscriptions"][number]): {
-  tone: StatusTone;
-  icon: string;
-  label: string;
-} {
-  if (!s.enabled) {
-    const suffix = s.lastErrorKind === null ? "" : ` · 上次失败（${s.lastErrorKind}）`;
-    return { tone: "neutral", icon: "○", label: `已停用${suffix}` };
-  }
-  if (s.lastErrorKind !== null) {
-    return { tone: "error", icon: "✕", label: `上次拉取失败（${s.lastErrorKind}）` };
-  }
-  if (s.lastFetchedAt === null) {
-    // 「从没拉过」不是错误 —— 但也绝不能显示成成功。
-    return { tone: "warn", icon: "?", label: "从未拉取" };
-  }
-  return { tone: "success", icon: "✓", label: `上次拉取 ${formatLocalTime(s.lastFetchedAt)}` };
-}
-
-/** 一次刷新的结果明细。 */
-function RefreshReport({ result }: { result: SubscriptionRefresh }) {
-  if (!result.ok) {
-    return (
-      <p role="alert" className="mt-2">
-        <StatusIndicator tone="error" icon="✕" label={`刷新失败（${result.failureKind}）：${result.reason}`} />
-      </p>
-    );
-  }
-  return (
-    <div className="mt-2">
-      <p>
-        新增 <Mono>{result.added}</Mono> · 更新 <Mono>{result.updated}</Mono> · 移除{" "}
-        <Mono>{result.removed}</Mono>
-        {result.skipped > 0 ? (
-          <>
-            {" · 跳过 "}
-            <Mono>{result.skipped}</Mono>
-          </>
-        ) : null}
-      </p>
-      {result.keptBecauseInUse > 0 && (
-        <p className="mt-1 text-text-muted">
-          有 <Mono>{result.keptBecauseInUse}</Mono> 个节点已不在订阅里，但仍被 Worker
-          绑着，所以<Strong>没有删除</Strong> —— 删了配置会过不了引用完整性校验。
-          先把那些 Worker 改绑到别的出口。
-        </p>
-      )}
-      {result.disabledNeedBridge > 0 && (
-        <p className="mt-1 text-text-muted">
-          有 <Mono>{result.disabledNeedBridge}</Mono> 个节点只能经 Clash 桥接，
-          而桥接当前未启用，所以它们以<Strong>停用</Strong>状态导入。
-          开启 Clash 桥接后再启用它们。
-        </p>
-      )}
-    </div>
-  );
+/** 被 Worker 引用的节点不能删：Worker 会静默退回直连，破坏出口隔离。 */
+export function deleteBlockedReason(p: ProxyView): string | null {
+  return p.usedBy.length === 0 ? null : `被 ${p.usedBy.join("、")} 引用，先改绑这些 Worker`;
 }
 
 export function ProxyPage({
   data,
   view,
   navigate,
+  refresh,
 }: {
   data: ProxyList;
   view: ViewState;
   navigate: (patch: Partial<ViewState>) => void;
+  refresh?: (() => void) | undefined;
 }) {
   const batch = useBatchProbe();
   const tab = view.tab ?? "list";
+  const [rowMessage, setRowMessage] = useState<FormMessage>(null);
+  const [busy, setBusy] = useState(false);
+  const [pendingDelete, setPendingDelete] = useState<ProxyView | null>(null);
+  const rowSave = (patch: Parameters<typeof patchConfig>[0], success: string) => {
+    setBusy(true);
+    setRowMessage(null);
+    void patchConfig(patch)
+      .then(() => {
+        setRowMessage({ tone: "success", text: success });
+        refresh?.();
+      })
+      .catch((err) => setRowMessage(errorMessage(err)))
+      .finally(() => setBusy(false));
+  };
 
   /*
    * 过滤与排序在前端做。
@@ -541,6 +416,32 @@ export function ProxyPage({
           <Truncate text={p.usedBy.join("、")} maxWidth="14rem" />
         ),
     },
+    {
+      key: "actions",
+      header: "操作",
+      render: (p) => {
+        const blocked = deleteBlockedReason(p);
+        return (
+          <span className="flex gap-2">
+            <SecondaryButton
+              compact
+              disabled={busy}
+              onClick={() =>
+                rowSave({ proxies: { update: { [p.id]: { enabled: !p.enabled } } } }, p.enabled ? `已停用 ${p.name || p.id}` : `已启用 ${p.name || p.id}`)
+              }
+            >
+              {p.enabled ? "停用" : "启用"}
+            </SecondaryButton>
+            {/* 禁用时原因放 title 与读屏描述：行高 36px 放不下第二行文字。 */}
+            <span title={blocked ?? undefined}>
+              <SecondaryButton compact danger disabled={busy || blocked !== null} onClick={() => setPendingDelete(p)}>
+                删除
+              </SecondaryButton>
+            </span>
+          </span>
+        );
+      },
+    },
   ];
 
   return (
@@ -589,9 +490,14 @@ export function ProxyPage({
       {tab === "isolation" ? (
         <IsolationTab data={data} />
       ) : tab === "subscriptions" ? (
-        <SubscriptionTab data={data} />
+        <SubscriptionTab data={data} refresh={refresh} />
+      ) : tab === "clash" ? (
+        <ClashSection clash={data.clash} refresh={() => refresh?.()} />
       ) : (
         <Panel title={`节点（${filtered.length}/${data.proxies.length}）`}>
+          <div className="mb-3">
+            <FormStatus message={rowMessage} />
+          </div>
           <TableFilters
             q={view.q}
             onQ={(next) => navigate({ q: next, page_: 1 })}
@@ -619,7 +525,11 @@ export function ProxyPage({
                 <>
                   <p className="text-heading-16 font-medium">还没有代理</p>
                   <p className="mt-1 text-text-muted">
-                    运行 <Mono>npm run setup</Mono> 自动探测本机 Clash 并导入节点。
+                    到{" "}
+                    <a href="#proxy?tab=clash" className="text-accent-fg underline">
+                      Clash 标签
+                    </a>{" "}
+                    探测本机 Clash 并导入节点，或添加订阅。
                   </p>
                 </>
               ) : (
@@ -630,6 +540,24 @@ export function ProxyPage({
         </Panel>
       )}
       </div>
+
+      <ConfirmDialog
+        open={pendingDelete !== null}
+        title="删除代理节点"
+        confirmLabel="确认删除"
+        destructive
+        onCancel={() => setPendingDelete(null)}
+        onConfirm={() => {
+          const p = pendingDelete;
+          setPendingDelete(null);
+          if (p !== null) rowSave({ proxies: { delete: [p.id] } }, `已删除 ${p.name || p.id}`);
+        }}
+      >
+        <p>
+          将删除节点 <Mono>{pendingDelete?.name || pendingDelete?.id || ""}</Mono>。
+        </p>
+        <p>来自订阅或 Clash 的节点在下次刷新、导入时可能会重新出现；只想暂时不用时选「停用」。</p>
+      </ConfirmDialog>
     </div>
   );
 }
@@ -638,6 +566,7 @@ const TABS = [
   { id: "list", label: "列表" },
   { id: "isolation", label: "回显出口" },
   { id: "subscriptions", label: "订阅" },
+  { id: "clash", label: "Clash" },
 ] as const;
 
 /**

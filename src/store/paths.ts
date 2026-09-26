@@ -25,3 +25,12 @@ export const DIR_MODE = 0o700;
 export function configPath(root?: string): string {
   return join(dataDir(root), "config.json");
 }
+
+/**
+ * 项目根：放 `opencode.json` 的目录。与 data/ 的默认位置同源（`service.mjs` 以仓库根为 cwd 启动）；
+ * `ZG_DATA_DIR` 只移走 data/，不移走项目根。`ZG_PROJECT_ROOT` 供测试指向临时目录。
+ */
+export function projectRoot(): string {
+  const override = process.env["ZG_PROJECT_ROOT"];
+  return override !== undefined && override !== "" ? resolve(override) : resolve(process.cwd());
+}
