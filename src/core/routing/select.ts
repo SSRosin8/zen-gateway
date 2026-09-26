@@ -33,29 +33,7 @@ import { AffinityMap, digestOf, normalizeSessionKey } from "./affinity.ts";
 /** 策略 → 优先的 Worker 类别;`null` 表示不排序(按配置顺序)。 */
 function preferredKind(strategy: RoutingStrategy): WorkerKind | null {
   switch (strategy) {
-    /*
-     * 三个取值都**真的生效**,产出三种不同的候选顺序。
-     *
-     * 我先前在这里(以及 `docs/architecture.md` 的缺口清单、plan)断言
-     * 「匿名 Worker 的定义就是没有 key,所以这个分支的输入集恒为空」。
-     * 第五轮审核证伪了它,两个独立 agent 从不同入口撞上同一条 —— 因为
-     * `WorkerSchema` 的 refine 是**单向**的:
-     *
-     * ```ts
-     * .refine((w) => w.kind === "anonymous" || w.apiKey.trim() !== "")
-     * ```
-     *
-     * 它只要求「authenticated 必须有 key」,对 anonymous **不作任何约束**。
-     * 所以 `{ kind: "anonymous", apiKey: "..." }` 既合法又可用(`isUsable`
-     * 只看 key 不看 kind),排序真的按 kind 生效,而且 `anonymous_first`
-     * 正是 schema 的默认值 —— 默认配置下就生效。
-     *
-     * 我那个错误推理正是纪律 #6 的形态:把一次测量(免 key 通道已关闭)
-     * 推广成一个结构性结论(这个分支不可能有输入)。空的是**实践**输入集
-     * (关闭免 key 通道后,没人有理由配一个 kind 为 anonymous 却带 key 的
-     * Worker),不是**合法**输入集。差别很实在:前者用户现在就能造出来看到
-     * 效果,后者意味着"改这个字段不会有可见变化"—— 而那句话是假的。
-     */
+    /* 匿名与认证是两种真实的候选类型；策略必须保留可观察的排序差异。 */
     case "anonymous_first":
       return "anonymous";
     case "authenticated_first":

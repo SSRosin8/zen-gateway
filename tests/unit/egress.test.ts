@@ -1,13 +1,22 @@
-import { afterEach, describe, expect, it } from "vitest";
-import { createServer, type Server } from "node:http";
+import { afterEach, describe, expect, it, vi } from "vitest";
+import { createServer, type Server, type ServerResponse } from "node:http";
+import { setImmediate } from "node:timers/promises";
 import { ConfigSchema, ProxySchema, type Config } from "../../src/shared/schema.ts";
 import { EgressService, applyProbeResult } from "../../src/core/proxy/egress.ts";
 import { isIpAddress, type IpEchoService } from "../../src/core/proxy/probe.ts";
+import { fetchUpstream } from "../../src/core/upstream/fetch.ts";
+import { runRetryChain } from "../../src/core/upstream/retry.ts";
 
 const TIMEOUTS = { headersTimeoutMs: 3_000, bodyTimeoutMs: 10_000 };
 
 const servers: Server[] = [];
 const services: EgressService[] = [];
+
+function deferred<T>() {
+  let resolve!: (value: T) => void;
+  const promise = new Promise<T>((done) => { resolve = done; });
+  return { promise, resolve };
+}
 
 async function serve(handler: Parameters<typeof createServer>[1]): Promise<string> {
   const server = createServer(handler);
@@ -305,6 +314,126 @@ describe("Controller 缓存", () => {
       });
 
     expect(svc.controllerFor(same(), "b1")).toBe(svc.controllerFor(same(), "b1"));
+  });
+});
+
+describe("出口池代际切换", () => {
+  it("旧依赖在下一次尝试时取新池，旧池立即开始释放", async () => {
+    const echo = await serve((_req, res) => res.writeHead(200).end("198.51.100.5"));
+    const svc = egress(echo);
+    const cfg = config();
+    const oldDeps = svc.upstreamDeps(cfg);
+    const oldPool = oldDeps.dispatchers;
+    const oldDispatcher = oldPool.get({ mode: "none" });
+    const close = vi.spyOn(oldDispatcher, "close");
+
+    svc.updateTimeouts({ headersTimeoutMs: 1_000, bodyTimeoutMs: 1_000 });
+
+    expect(close).toHaveBeenCalled();
+    expect(() => oldPool.get({ mode: "none" })).toThrow("已关闭");
+    expect(oldDeps.dispatchers).not.toBe(oldPool);
+    expect(oldDeps.config).toBe(cfg);
+
+    const response = await fetchUpstream(
+      {
+        url: echo,
+        method: "GET",
+        headers: {},
+        body: null,
+        proxyId: null,
+      },
+      oldDeps,
+    );
+    expect(response.status).toBe(200);
+    await expect(response.text()).resolves.toBe("198.51.100.5");
+  });
+
+  it("同一重试链中切换超时后第二个 Worker 仍能发出真实请求", async () => {
+    const seen: Array<string | undefined> = [];
+    const echo = await serve((req, res) => {
+      seen.push(req.headers.authorization);
+      res.writeHead(seen.length === 1 ? 503 : 200).end("198.51.100.5");
+    });
+    const svc = egress(echo);
+    const result = await runRetryChain({
+      targets: ["w1", "w2"].map((id) => ({ workerId: id, apiKey: `fake-key-${id}`, proxyId: null })),
+      maxAttempts: 2,
+      url: echo,
+      method: "POST",
+      body: new Uint8Array(),
+      buildHeaders: (target) => ({ authorization: `Bearer ${target.apiKey}` }),
+      deps: svc.upstreamDeps(config()),
+      onAttempt: (record) => {
+        if (record.failure !== null) {
+          svc.updateTimeouts({ headersTimeoutMs: 1_000, bodyTimeoutMs: 1_000 });
+        }
+      },
+    });
+    expect(result.ok).toBe(true);
+    expect(seen).toEqual(["Bearer fake-key-w1", "Bearer fake-key-w2"]);
+    await expect(result.response?.text()).resolves.toBe("198.51.100.5");
+  });
+
+  it("旧流继续读取，停机等待旧池并禁止创建新池", async () => {
+    const stream = deferred<ServerResponse>();
+    const echo = await serve((_req, res) => {
+      res.writeHead(200);
+      res.write("first-");
+      stream.resolve(res);
+    });
+    const svc = egress(echo);
+    const cfg = config();
+    const deps = svc.upstreamDeps(cfg);
+    const response = await fetchUpstream({ url: echo, method: "GET", headers: {}, body: null, proxyId: null }, deps);
+    const writer = await stream.promise;
+    try {
+      svc.updateTimeouts({ headersTimeoutMs: 1_000, bodyTimeoutMs: 1_000 });
+      const closing = svc.close();
+      let closed = false;
+      void closing.then(() => { closed = true; });
+      await setImmediate();
+      expect(closed).toBe(false);
+      expect(svc.close()).toBe(closing);
+      expect(() => svc.updateTimeouts(TIMEOUTS)).toThrow("已关闭");
+      await expect(svc.reset()).rejects.toThrow("已关闭");
+      expect(() => svc.upstreamDeps(cfg)).toThrow("已关闭");
+      expect(() => svc.controllerFor(cfg, "b1")).toThrow("已关闭");
+      await expect(svc.probeProxy(cfg, null)).rejects.toThrow("已关闭");
+      writer.end("last");
+      await expect(response.text()).resolves.toBe("first-last");
+      await closing;
+    } finally {
+      writer.end();
+    }
+  });
+
+  it.each(["转发", "探测"])("%s 等待 selector 时换池仍能发出请求", async (kind) => {
+    const selecting = deferred<void>();
+    const release = deferred<void>();
+    const api = await serve((_req, res) => {
+      selecting.resolve();
+      void release.promise.then(() => res.writeHead(204).end());
+    });
+    const echo = await serve((_req, res) => res.writeHead(200).end("198.51.100.5"));
+    const svc = egress(echo);
+    const cfg = config({
+      clash: {
+        enabled: true,
+        activeBridgeId: "b1",
+        bridges: [{ id: "b1", name: "假内核", apiBase: api, localProxyPort: Number(new URL(echo).port) }],
+      },
+      proxies: [{ id: "p1", name: "假节点", type: "vless", host: "proxy.invalid", port: 443, source: "controller", bridgeable: true, bridgeId: "b1" }],
+    });
+    const pending = kind === "转发"
+      ? fetchUpstream({ url: echo, method: "GET", headers: {}, body: null, proxyId: "p1" }, svc.upstreamDeps(cfg)).then(async (response) => ({ ok: response.ok, text: await response.text() }))
+      : svc.probeProxy(cfg, "p1").then(({ outcome }) => ({ ok: outcome.ok, text: outcome.ok ? outcome.egressIp : outcome.reason }));
+    try {
+      await selecting.promise;
+      await svc.reset();
+    } finally {
+      release.resolve();
+    }
+    expect(await pending).toEqual({ ok: true, text: "198.51.100.5" });
   });
 });
 

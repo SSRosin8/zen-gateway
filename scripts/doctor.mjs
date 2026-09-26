@@ -17,16 +17,16 @@
  *   4. Worker 配置可用      ← 转发的必要条件
  *   5. Clash 控制面        ← 桥接出口的必要条件
  *   6. 上游目录            ← 免费判定的依据
- *   7. 出口实测(--deep)   ← 要真发网络请求,默认不跑
+ *   7. 回显出口实测(--deep) ← 要真发网络请求,默认不跑
  *
  * `warn` 不阻断后面的层(它表示「能用但有问题」),`fail` 阻断。
  *
  * ## 为什么目录那一层**问服务**,而不是自己去打上游
  *
  * 这是第七轮审核那条纪律(#8)的直接应用:**验证工具必须与产品代码共享
- * 同一套信任/配置**。本机 `opencode.ai` 被企业 CA 中间人,而 Node 不读系统
- * CA 库 —— 于是 `curl` 通而 `node` 不通。若 doctor 自己 fetch 上游,它拿到的
- * 结果反映的是 **doctor 进程**的 CA 环境,而真正要诊断的是**服务进程**的。
+ * 同一套信任/配置**。服务进程与诊断进程可能使用不同 CA、代理或环境变量。
+ * 若 doctor 自己 fetch 上游,它拿到的结果反映的是 **doctor 进程**，而真正要
+ * 诊断的是**服务进程**。
  * 两者可以不同(服务由 `npm start` 启动时带了 `NODE_EXTRA_CA_CERTS`,
  * 而用户手敲 `npm run doctor` 时没带),那样 doctor 会给出一个与现实相反的结论。
  *
@@ -36,8 +36,8 @@
  * ## 只读
  *
  * doctor 绝不写任何东西:不建配置(缺配置就报缺)、不跑迁移
- * (库以 `readOnly` 打开)、不改权限、不切 selector。一个会改状态的诊断工具
- * 会让「跑一下 doctor 看看」本身变成一次变更。
+ * (库以 `readOnly` 打开)、不改权限。默认不切 selector；显式加 `--deep` 时
+ * 才会为回显探测切换节点，不写回网关配置。
  */
 
 import { DatabaseSync } from "node:sqlite";
@@ -63,7 +63,7 @@ const ENTRY = join(ROOT, "dist", "server", "server", "index.js");
 checkArgs({
   command: "npm run doctor",
   summary: "zen-gateway 分层诊断：只报第一个失败的层 + 下一步建议。",
-  flags: [{ flag: "--deep", help: "额外实测每个出口的公网 IP（会真发请求并切 Clash 节点）" }],
+  flags: [{ flag: "--deep", help: "额外实测 IP 回显目标的出口（会发请求并切 Clash 节点，不证明 Zen 实际出口）" }],
 });
 
 const DEEP = process.argv.includes("--deep");
@@ -74,8 +74,7 @@ const DEEP = process.argv.includes("--deep");
  * 规划特别标注过这一条:先前这里写的诊断命令是从 `npm run status` 的输出里
  * grep 端口,而**服务没在跑时它只打印「未在运行」**,grep 拿不到数字、
  * curl 拼出畸形 URL。`resolvePort()` 与服务是否在跑无关,所以它才是该用的。
- * 更要紧的是:本机 9876 曾被另一个服务占着而本网关是 9877,照抄默认值会拿到
- * **另一个进程**的 `{"ok":true}`,于是第 2 层「通过」而实际问的是别人。
+ * 不要照抄默认端口，否则可能误问同机另一个进程并得到误导性的健康响应。
  */
 let PORT;
 try {
@@ -319,12 +318,8 @@ async function layerStore() {
 /**
  * 第 4 层:至少有一个可用的 Worker。
  *
- * 判定用 `isUsable()` —— **调度器用的同一个函数**,不在这里另写一份
- * 「enabled 且 apiKey 非空」。两份并行判断必然分叉,而分叉后 doctor 会说
- * 「Worker 就绪」而调度器说「无可用 Worker」。
- *
- * 注意它按**有没有 key**判断而不按 `kind`:上游已于 2026-09-16 前后关闭
- * 免 key 的免费通道,所以一个空 key 的 Worker 发出去必定 403。
+ * 判定用 `isUsable()` —— **调度器用的同一个函数**,不在这里另写一份。
+ * 认证 Worker 需要 key，匿名 Worker 可以免 key；两种类型都应按配置进入候选池。
  */
 async function layerWorkers() {
   const workers = ctx.config.workers;
@@ -334,18 +329,18 @@ async function layerWorkers() {
     return {
       status: "fail",
       text: "没有配置任何 Worker",
-      nextStep: `在 ${join(DATA_DIR, "config.json")} 的 workers 数组里加一个:\n  { "id": "w1", "kind": "authenticated", "apiKey": "<你的 Zen key>", "proxyId": null }\n（免 key 的匿名通道已被上游关闭,必须用真实 key。）`,
+      nextStep: `在 ${join(DATA_DIR, "config.json")} 的 workers 数组里加一个:\n  { "id": "w1", "kind": "authenticated", "apiKey": "<你的 Zen key>", "proxyId": null }\n或显式添加免 key 的匿名 Worker。`,
     };
   }
 
   if (usable.length === 0) {
     return {
       status: "fail",
-      text: `${workers.length} 个 Worker 全部不可用(已停用或 apiKey 为空)`,
+      text: `${workers.length} 个 Worker 全部不可用(已停用或认证 Worker 缺 apiKey)`,
       detail: workers
-        .map((w) => `${w.id}: ${!w.enabled ? "已停用" : "apiKey 为空"}`)
+        .map((w) => `${w.id}: ${!w.enabled ? "已停用" : w.kind === "authenticated" && w.apiKey.trim() === "" ? "认证 Worker 的 apiKey 为空" : "不可用"}`)
         .join("\n"),
-      nextStep: "把 enabled 改为 true,并确认 apiKey 非空。",
+      nextStep: "把 enabled 改为 true；认证 Worker 还要确认 apiKey 非空。",
     };
   }
 
@@ -512,7 +507,7 @@ async function layerClashControl() {
       detail: lines.join("\n"),
       nextStep:
         "确认 Clash 正在运行且开了 External Controller。\n" +
-        "若 apiSecret 不对:从 Clash 的配置里取 secret 填进 clash.bridges[].apiSecret。\n" +
+        "若 apiSecret 不对:从 Clash 的配置或管理界面取得 secret，填进 clash.bridges[].apiSecret。\n" +
         "或跑 npm run setup 重新探测。",
     };
   }
@@ -521,7 +516,7 @@ async function layerClashControl() {
    * 顺带核对**混合端口**。
    *
    * 这是规划特别标注的一条:本机的混合端口**不是**文档默认的 7890,
-   * 且实测值随内核而变(0dcloud 是 17891,Clash Verge 是 7897)。
+   * 且随内核配置而变，不能使用固定默认值。
    * 配置里的 `localProxyPort` 若与内核实际监听的 `mixed-port` 不一致,
    * 桥接会静默连到一个**没人监听的端口** —— 症状是所有桥接代理都传输失败,
    * 而控制面明明是通的。这一层是唯一能发现它的地方。
@@ -588,8 +583,7 @@ async function layerClashControl() {
    * （`GLOBAL` 就是典型）切了什么都不改变 —— 所有 Worker 走本机直连、
    * 共用一个公网 IP，而控制面、切换请求、探测全都正常。
    *
-   * 实测本机：556 条规则里 `Proxy` 382 条、`DIRECT` 173 条、
-   * `GLOBAL` **零条**，MATCH 指向 `Proxy`。
+   * 诊断通过 Controller 的规则目标与 MATCH 兜底判断分组是否参与选路。
    */
   const routingWarnings = [];
   const selectedBridge = bridges.find((b) => b.id === selection.bridgeId);
@@ -610,7 +604,7 @@ async function layerClashControl() {
             `⚠️ 分组「${group}」**不出现在任何路由规则里** —— rule 模式下切它不会改变任何流量。`,
             `   规则实际导向:${[...routed.targets].map(([k, v]) => `${k}(${v} 条)`).join("、")}` +
               `${routed.fallback === null ? "" : `;兜底(MATCH)→ ${routed.fallback}`}`,
-            `   后果:所有 Worker 走本机直连、共用同一个公网 IP,而出口隔离是本项目存在的理由。`,
+            `   后果:所有 Worker 访问回显目标时共用同一个公网 IP；Zen 实际连接仍需核对。`,
           );
         } else if (routed.fallback !== null && routed.fallback !== group) {
           /*
@@ -621,7 +615,7 @@ async function layerClashControl() {
           routingWarnings.push(
             `! 分组「${group}」承载 ${routed.targets.get(group)} 条规则，而兜底(MATCH)指向「${routed.fallback}」。`,
             `   转发到上游与探测打 IP 回显服务可能命中**不同的规则分支** ——`,
-            `   那时实测出口与实际转发出口无关。用 --deep 按实测 IP 分组是唯一可靠的核对。`,
+            `   --deep 仅测 IP 回显目标；Zen 实际出口需在请求期间核对 /connections 的上游连接、chains 与 rule。`,
           );
         }
       }
@@ -717,8 +711,8 @@ async function layerCatalog() {
       detail: `${caHint}\n服务端日志里有被脱敏的具体原因(形如 fetch failed ← unable to get local issuer certificate)。`,
       nextStep:
         serverCa === undefined
-          ? `重启并带上 CA:\n  npm stop && NODE_EXTRA_CA_CERTS=/etc/ssl/certs/ca-certificates.crt npm start\n（本机 opencode.ai 被企业 CA 中间人,而 Node 不读系统 CA 库 —— curl 通不代表 Node 通。）`
-          : `查出口与网络:\n  grep 目录拉取 ${join(DATA_DIR, "zen-gateway.log")} | tail -5\n  npm run doctor -- --deep   # 实测各出口的公网 IP`,
+          ? `重启并带上 CA:\n  npm stop && NODE_EXTRA_CA_CERTS=/path/to/your/ca-bundle.pem npm start\n（服务与 curl 可能使用不同信任库，curl 通不代表服务通。）`
+          : `查出口与网络:\n  grep 目录拉取 ${join(DATA_DIR, "zen-gateway.log")} | tail -5\n  npm run doctor -- --deep   # 实测 IP 回显目标的出口`,
     };
   }
 
@@ -743,7 +737,7 @@ async function layerCatalog() {
         `免费集 = (后缀命中 ∪ extraFreeIds) ∩ 在架目录 —— 三者之一不对就会空。`,
       nextStep:
         "上游把带 -free 后缀的模型全下架了,或 freeSuffix 被改错。\n" +
-        `核对在架目录:curl -s https://opencode.ai/zen/v1/models | grep -o '"id":"[^"]*free[^"]*"' | head`,
+        "先刷新本机 /v1/models；如需外部对照，请使用配置中 gateway.baseUrl 对应的上游地址，并确认服务进程的 CA、代理和出口环境。",
     };
   }
 
@@ -758,7 +752,7 @@ async function layerCatalog() {
 }
 
 /**
- * 第 7 层(仅 `--deep`):实测每个出口的公网 IP。
+ * 第 7 层(仅 `--deep`):实测发往 IP 回显目标的公网出口。
  *
  * 默认不跑:它要对每个代理各发一次真实网络请求(经 Clash 时还要切 selector),
  * 一次完整探测可能几十秒。而 doctor 的常用场景是「刚才还好好的,怎么不行了」,
@@ -767,8 +761,8 @@ async function layerCatalog() {
  * ## 为什么这一层不可省
  *
  * 控制面的 `/delay` 只证明节点可用,**不证明我们的流量真的从那个节点出去**。
- * 出口隔离的全部价值在于「两个 Worker 的流量从不同公网 IP 出去」,
- * 而这件事只能由我们自己的请求实测回显 IP 来证明。
+ * 回显 IP 能发现探测链路共用出口，但回显服务与 Zen 可能命中不同规则。
+ * 因此本层不证明发往 Zen 的流量隔离，实际转发仍需核对上游连接。
  *
  * ## 这一层会切 Clash 的 selector —— 它是 doctor 唯一的副作用
  *
@@ -778,7 +772,7 @@ async function layerCatalog() {
  */
 async function layerEgress() {
   if (!DEEP) {
-    return { status: "skip", text: "出口实测已跳过(加 --deep 开启;它会真发网络请求并切换 Clash 节点)" };
+    return { status: "skip", text: "回显出口实测已跳过(加 --deep 开启;它会发网络请求并切换 Clash 节点)" };
   }
 
   const { EgressService } = await import("../src/core/proxy/egress.ts");
@@ -786,9 +780,10 @@ async function layerEgress() {
 
   const cfg = ctx.config;
   const usable = cfg.workers.filter(isUsable);
-  if (usable.length === 0) return { status: "skip", text: "没有可用 Worker,出口实测无意义" };
+  if (usable.length === 0) return { status: "skip", text: "没有可用 Worker,回显出口实测无意义" };
 
-  console.log("      (正在实测各出口的公网 IP,可能要几十秒…)");
+  console.log("      (正在实测 IP 回显目标的出口,可能要几十秒…)");
+  console.log("      结果仅反映回显目标；Zen 实际出口需核对发往 opencode.ai 的连接。");
   if (cfg.clash.enabled) {
     console.log("      ⚠️ 桥接探测会切换 Clash selector —— 跑完后选中节点是最后探测的那个。");
   }
@@ -827,14 +822,14 @@ async function layerEgress() {
     if (report.sharedGroups.length > 0) {
       return {
         status: "warn",
-        text: "出口**未**隔离:有多个 Worker 从同一个公网 IP 出去",
+        text: "回显出口共用:多个 Worker 访问 IP 回显目标时使用同一个公网 IP",
         detail:
           lines.join("\n") +
           "\n\n共用出口的组:\n" +
           report.sharedGroups.map((g) => `  ${g.egressIp}: ${g.workerIds.join(", ")}`).join("\n"),
         nextStep:
-          "把这些 Worker 分别绑到不同出口的代理上。\n" +
-          "注意两个不同代理可能 NAT 到同一个公网 IP —— 判据是上面实测的 IP,不是代理 id。",
+          "核对绑定的代理与回显目标命中的路由规则。\n" +
+          "两个不同代理可能 NAT 到同一个公网 IP；Zen 实际出口还需核对其上游连接。",
       };
     }
 
@@ -842,12 +837,16 @@ async function layerEgress() {
       return {
         status: "warn",
         text: `${report.unknownWorkerIds.length} 个 Worker 的出口未能探出`,
-        detail: lines.join("\n") + "\n\n「还不知道」与「确认不同」是两件事,所以不报告为已隔离。",
+        detail: lines.join("\n") + "\n\n尚未测出全部回显出口；这些结果也不证明 Zen 实际出口。",
         nextStep: "看上面失败的原因。桥接失败多半是混合端口不对(见第 5 层)或节点本身不通。",
       };
     }
 
-    return { status: "pass", text: `出口已隔离:${report.groups.length} 个 Worker 各自独占一个公网 IP`, detail: lines.join("\n") };
+    return {
+      status: "pass",
+      text: `回显出口独立:${report.groups.length} 个 Worker 访问 IP 回显目标时使用不同公网 IP`,
+      detail: lines.join("\n") + "\n\nZen 实际出口尚未验证；Clash 桥接需在请求期间核对 /connections 的上游连接、chains 与 rule。",
+    };
   } finally {
     // 关掉 dispatcher 池,否则 keep-alive 连接会把进程吊住。
     await egress.close().catch(() => {});
@@ -937,7 +936,7 @@ const LAYERS = [
   ["Worker", layerWorkers],
   ["Clash 控制面", layerClashControl],
   ["模型目录", layerCatalog],
-  ["出口实测", layerEgress],
+  ["回显出口实测", layerEgress],
 ];
 
 async function main() {
@@ -995,14 +994,14 @@ async function main() {
     /*
      * 告警**不影响退出码**。
      *
-     * 出口未隔离、部分 Worker 不可用都属于「能用但不理想」,而退出码是给
+     * 回显出口共用、部分 Worker 不可用都属于「能用但不理想」,而退出码是给
      * 脚本用的信号 —— 让它对「能用」返回非 0 会让任何 `npm run doctor &&  …`
      * 的串联在一个可用的系统上失败。
      */
     return;
   }
-  console.log("全部通过。");
-  if (!DEEP) console.log("出口隔离未实测 —— 要验证它跑:npm run doctor -- --deep");
+  console.log("已执行的诊断检查全部通过；不代表每个模型可调用或 Zen 实际出口已隔离。");
+  if (!DEEP) console.log("回显出口未实测 —— 可运行:npm run doctor -- --deep；Zen 实际出口仍需单独核对。");
 }
 
 await main();

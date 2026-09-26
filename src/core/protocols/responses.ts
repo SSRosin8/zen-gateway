@@ -54,6 +54,16 @@ export const responsesSurface: ProtocolSurface = {
     return id;
   },
 
+  responseIdFrom(payload: unknown): string | null {
+    if (!isRecord(payload)) return null;
+    const direct = payload["id"];
+    if (typeof direct === "string" && direct !== "") return direct;
+    const response = payload["response"];
+    if (!isRecord(response)) return null;
+    const id = response["id"];
+    return typeof id === "string" && id !== "" ? id : null;
+  },
+
   /** 本面无特有头;鉴权与 OpenCode 身份头由 upstream/headers.ts 统一加。 */
   extraUpstreamHeaders(): Record<string, string> {
     return {};

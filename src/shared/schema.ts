@@ -97,9 +97,9 @@ const HostSchema = z
 /**
  * 实测到的公网出口 IP。
  *
- * 必须是合法 IP 字面量:这个字段是**出口隔离的分组键**。
+ * 必须是合法 IP 字面量:这个字段是**回显出口报告的分组键**。
  * 若允许任意字符串,一段被劫持的回显响应或一次手工误编辑就会变成一个
- * 独立的「出口」,于是每个垃圾值自成一组、看起来全都不同 —— 误报已隔离。
+ * 独立的「回显出口」,于是每个垃圾值自成一组、看起来全都不同 —— 误报回显出口独立。
  * `null` 表示尚未探测出,与「确认不同」是两件事。
  */
 const EgressIpSchema = z
@@ -250,7 +250,7 @@ export const WorkerSchema = z
     id: IdSchema,
     name: z.string().max(200).default(""),
     kind: WorkerKindSchema,
-    /** Zen API key。匿名 Worker 为空串。是凭证。 */
+    /** Zen API key。匿名 Worker 归一化为空串；认证 Worker 必须提供。是凭证。 */
     apiKey: SecretSchema.default(""),
     enabled: z.boolean().default(true),
     /** 绑定的出口代理 id；null 表示直连本机网络出口。 */
@@ -258,7 +258,16 @@ export const WorkerSchema = z
   })
   .refine((w) => w.kind === "anonymous" || w.apiKey.trim() !== "", {
     message: "登录态 Worker 必须有 apiKey",
-  });
+  })
+  .transform((w) =>
+    w.kind === "anonymous"
+      ? {
+          ...w,
+          // 匿名身份不携带认证凭证；这里是配置归一化的唯一入口。
+          apiKey: "",
+        }
+      : w,
+  );
 export type Worker = z.infer<typeof WorkerSchema>;
 
 /* ------------------------------------------------------------------ *

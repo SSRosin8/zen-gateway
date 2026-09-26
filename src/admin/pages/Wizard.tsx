@@ -1,6 +1,8 @@
+import { useState } from "react";
 import type { Overview } from "../../shared/contract.ts";
 import { Mono, Panel, Strong } from "../components/Panel.tsx";
 import { StatusIndicator } from "../components/StatusIndicator.tsx";
+import { openCodeConfigSnippet, type OpenCodeVersion } from "../lib/openCodeConfig.ts";
 
 /**
  * 首启向导。
@@ -34,17 +36,8 @@ export function Wizard({ data }: { data: Overview }) {
   const hasUsableWorker = data.pool.total > 0;
   const hasCatalog = data.catalog.freeCount !== null && data.catalog.freeCount > 0;
 
-  const snippet = `{
-  "$schema": "https://opencode.ai/config.json",
-  "provider": {
-    "opencode": {
-      "options": {
-        "baseURL": "http://127.0.0.1:${data.gateway.port}/v1",
-        "apiKey": "<data/config.json 里的 gateway.relayToken>"
-      }
-    }
-  }
-}`;
+  const [openCodeVersion, setOpenCodeVersion] = useState<OpenCodeVersion>("2");
+  const snippet = openCodeConfigSnippet(data.gateway.port, openCodeVersion);
 
   const steps: Step[] = [
     {
@@ -57,9 +50,9 @@ export function Wizard({ data }: { data: Overview }) {
       ) : (
         <>
           <p className="text-text-muted">
-            目录拉不到的话免费判定没有依据，转发会被拒。最常见的成因是企业网络
-            对 <Mono>opencode.ai</Mono> 做 TLS 中间人，而 <Strong>Node 不读系统 CA 库</Strong>
-            （<Mono>curl</Mono> 读 —— 所以 curl 通不代表网关通）。
+            目录拉不到时页面无法确认在架模型，转发会按本地免费规则继续尝试，并在响应中标记
+            未核验。最常见的成因是企业网络对 <Mono>opencode.ai</Mono> 做 TLS 中间人，而
+            <Strong>Node 不读系统 CA 库</Strong>（<Mono>curl</Mono> 读 —— 所以 curl 通不代表网关通）。
           </p>
           <Cmd>NODE_EXTRA_CA_CERTS=/etc/ssl/certs/ca-certificates.crt npm start</Cmd>
           <p className="mt-2 text-text-muted">
@@ -74,13 +67,14 @@ export function Wizard({ data }: { data: Overview }) {
       title: "配出口代理",
       body: hasProxy ? (
         <p className="text-text-muted">
-          已有 {data.proxies.total} 个代理，{data.proxies.withEgressIp} 个已实测出口 IP。
+          已有 {data.proxies.total} 个代理，{data.proxies.withEgressIp} 个已实测回显出口 IP。
         </p>
       ) : (
         <>
           <p className="text-text-muted">
-            出口隔离是这个工具存在的理由 —— 多个 Zen 账号必须从<Strong>不同的公网 IP</Strong>
-            发出，否则有被上游判定关联的风险。一条命令自动探测本机 Clash 并导入节点：
+            为不同 Zen 账号配置不同的出口，并用 IP 回显目标检查是否共用公网 IP。
+            回显结果只反映该目标；Zen 实际请求需在发起期间核对上游连接。一条命令自动探测
+            本机 Clash 并导入节点：
           </p>
           <Cmd>npm run setup</Cmd>
         </>
@@ -99,16 +93,15 @@ export function Wizard({ data }: { data: Overview }) {
             {hasWorker
               ? "已有 Worker 条目，但没有一个在候选池里 —— 多半是缺 API key 或被停用了。"
               : "转发需要真实的 Zen API key。"}
-            <Strong>免 key 的匿名通道已被上游关闭</Strong>（403 <Mono>FreeTierError</Mono>），
-            所以没有 key 的条目一个都不能用。
+            匿名 Worker 可以不填 key；认证 Worker 必须填写真实的 Zen API key。
           </p>
           <p className="mt-2 text-text-muted">
             编辑 <Mono>data/config.json</Mono> 的 <Mono>workers</Mono> 数组，
             每个 key 一条，<Mono>proxyId</Mono> 绑不同的代理才有隔离意义：
           </p>
-          <Cmd>{`{ "id": "w1", "kind": "authenticated", "apiKey": "<你的 key>", "proxyId": "<代理 id>" }`}</Cmd>
+          <Cmd>{`{ "id": "w1", "kind": "authenticated", "apiKey": "<你的 key>", "proxyId": "<代理 id>" }\n{ "id": "anon-1", "kind": "anonymous", "proxyId": "<代理 id>" }`}</Cmd>
           <p className="mt-2 text-text-muted">
-            改完跑 <Mono>npm run restart</Mono>（或用「代理池」页的批量探测实测出口）。
+            改完跑 <Mono>npm run restart</Mono>（或用「代理池」页的批量探测实测回显出口）。
           </p>
         </>
       ),
@@ -119,17 +112,44 @@ export function Wizard({ data }: { data: Overview }) {
       body: (
         <>
           <p className="text-text-muted">
-            覆盖内置的 <Mono>opencode</Mono> provider。放在{" "}
+            选择你的 OpenCode 主版本，生成覆盖本地网关的 <Mono>opencode</Mono> provider 配置。放在{" "}
             <Mono>~/.config/opencode/opencode.json</Mono> 或项目根目录：
           </p>
+          <label className="mt-2 flex w-fit flex-col gap-1">
+            <span className="text-text-muted">OpenCode 配置格式</span>
+            <select
+              aria-label="OpenCode 版本"
+              value={openCodeVersion}
+              onChange={(event) => setOpenCodeVersion(event.target.value as OpenCodeVersion)}
+              className="min-h-[44px] rounded-sm border border-border-strong bg-bg px-3"
+            >
+              <option value="2">OpenCode 2.x（默认）</option>
+              <option value="1">OpenCode 1.x</option>
+            </select>
+          </label>
           <pre className="mt-2 overflow-x-auto rounded-md border border-border-strong bg-bg p-3 font-mono">
             {snippet}
           </pre>
           <p className="mt-2 text-text-muted">
-            然后验证 —— <Strong>只能用真实 OpenCode CLI，<Mono>curl</Mono> 不算</Strong>
-            （免费闸门查请求<Strong>形态</Strong>不查 key，手搓 curl 必得 403）：
+            {openCodeVersion === "1" ? (
+              <>
+                OpenCode 1.x 使用单数 <Mono>provider</Mono> 与 <Mono>options</Mono>，只覆盖已有
+                provider 的 <Mono>baseURL</Mono> 与 <Mono>apiKey</Mono>；模型和 SDK 由 OpenCode
+                自己管理。
+              </>
+            ) : (
+              <>
+                OpenCode 2.x 使用复数 <Mono>providers</Mono>，只覆盖已有 <Mono>opencode</Mono>{" "}
+                provider 的 <Mono>settings.baseURL</Mono> 与 <Mono>settings.apiKey</Mono>；模型和
+                SDK 由 OpenCode 自己管理。
+              </>
+            )}{" "}你选择的模型不保证都能被上游接受。
           </p>
-          <Cmd>opencode run --model opencode/mimo-v2.6-flash-free &quot;Reply with exactly: OK&quot;</Cmd>
+          <p className="mt-2 text-text-muted">
+            然后用真实 OpenCode CLI 验证当前可用的免费 Chat 模型。<Mono>curl</Mono>
+            的请求形态不同，不能替代客户端验收：
+          </p>
+          <Cmd>opencode run --model opencode/space-bunny-free &quot;Reply with exactly: OK&quot;</Cmd>
         </>
       ),
     },

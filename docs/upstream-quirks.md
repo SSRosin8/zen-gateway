@@ -1,259 +1,150 @@
-# 上游怪癖清单（OpenCode Zen）
+# OpenCode Zen 上游观察
 
-每条记录**日期 + 触发条件 + 上游原始响应**作为证据。可用
-`npm run discover:upstream` 随时重验（免 key 即可跑，上游行为一变就退出 1）。
+本文件记录在指定日期、指定请求形态和有限样本下观察到的行为。它们不是 Zen 的
+永久协议保证。需要重新测量时运行 `npm run discover:upstream`；脚本需要网络，
+因此不进入 `npm run validate`。
 
-不进 `npm test` / `validate`：需要网络，上游抖动不该让本地关卡变红。
+脚本默认使用免 key 请求。设置 `ZG_DISCOVER_KEY` 时只额外测试免费或不存在的
+模型，不发送付费模型请求，以免产生费用。真实客户端的兼容性必须用真实客户端
+验证，手工探针不能替代它。
 
----
+## 免费额度闸门
 
-## Phase 4 的范围比规划设想的窄，原因是实测出来的
+**观察日期**：2026-09-22 至 2026-09-23。
+**形态**：手工向免费模型发送 Chat Completions 请求，未运行完整 OpenCode CLI。
 
-规划里 Phase 4 是「经真实出口向 Zen 递进发请求，**逐字段**定位被拒原因」，
-用来逐字段定位这些已知怪癖（拒收 `client_metadata`、tools 上限、
-思考模型需重放 `reasoning_content`、effort-tier 别名拆分）。
+这类请求返回过：
 
-**那件事现在做不到，而且不是工程问题。** 见下面「闸门短路在请求体校验之前」。
-两条路都堵着：
-
-- **免费模型**永远停在 403，请求体从未被上游看过
-- **付费模型**能过体校验，但要真实计费，而本网关的前提就是只放行免费模型；
-  在付费模型上测出的怪癖也未必适用于免费模型
-
-所以字段级怪癖清单这一块**暂时无法交付**，不是被跳过。闸门若哪天放开，
-`discover-upstream.mjs` 的那条探针会变红，届时这项工作重新可做。
-
----
-
-## 1. 免费额度闸门对第三方客户端关闭
-
-**日期**：2026-09-16 前后收紧；09-22、09-23 两次复验仍在
-
-**触发**：`POST /zen/v1/chat/completions`，任何免费模型（`-free` 后缀或 `big-pickle`）
-
-```
+```text
 403 application/json
 {"type":"error","error":{"type":"FreeTierError",
  "message":"Error from provider (Console): OpenCode's free tier can only be used from within OpenCode"}}
 ```
 
-带有效 key 时消息**无** `Error from provider (Console): ` 前缀 —— 两条路不是
-同一段上游代码，但结论一致。
+同一请求形态下，语法合法但密钥错误的请求也会得到 403；付费模型则先进入
+密钥验证并返回 401。这说明该免费闸门在密钥验证之前短路，不能用 403 推断 key
+有效。真实 OpenCode CLI 的请求形态不同，不能由这组手工结果判断 CLI 是否可用。
 
-**与 key 无关**（见 §2 的顺序说明）。维护者明确表态是反滥用措施
-（anomalyco/opencode#49621）：*"We've been tightening our logic to fight abuse.
-You cannot use the free tier in other harnesses."*
+历史探针曾发送字面量 `Bearer public`，那是旧请求适配层的形态；当前匿名 Worker
+不生成该值，也不发送 `Authorization` 或 `x-api-key`。这条历史记录不属于当前
+配置要求。
 
-### 匿名通道（字面量 `Bearer public`）已关
+## 请求体检查顺序
 
-这里说的「匿名」**不是不带 key**，而是发字面量
-`Bearer public` —— `src/proxy/upstream.ts:97` 的 `effectiveApiKey()`：
-`kind === "anonymous_zen"` 时把 apiKey 替换成字符串 `"public"`。
+**观察日期**：2026-09-23。
+**形态**：免 key、免费模型；一份请求的 `messages` 故意是字符串并附带未知字段，
+另一份请求完全合法。
 
-它**曾经真的能用**：已知的成功使用早于 2026-09-16 前后的闸门收紧，
-收紧 —— 成功使用就在这条线之前（同一时间窗里 `union-alpha` 也从目录消失了）。
+两份响应逐字节相同，均为 403 `FreeTierError`。在该形态下无法据此判断上游是否
+接受某个请求字段，因为免费闸门先于请求体校验。`discover:upstream` 只把响应
+形状作为观察记录，不把它解释成字段级协议结论。
+
+## 模型存在性和鉴权
+
+**观察日期**：2026-09-22 至 2026-09-23。
+**样本**：一个虚构的不存在模型 id、一个免费模型和一个付费模型；分别用免 key、
+语法非法 key 和明显错误但形状合法的 key 测试。
 
-按真实形态复测（含 `synthesizeCliHeaders=true` 时的整套 CLI 身份头：
-`opencode-cli/1.0.0` + 四个 `x-opencode-*`）：**403**，通道已关。
-
-> 这条探针常驻的意义：它是「匿名通道是否重新打开」的唯一监测点。
-
----
-
-## 2. 闸门顺序是三段的：key 语法 → 免费闸门 → key 密钥验证
-
-**日期**：2026-09-23（`discover-upstream.mjs` 第一次运行就查出来的）
-
-| key 形态 | 免费模型 | 付费模型 |
-|---|---|---|
-| 语法非法（`bogus`） | 401 `Invalid API key` | 401 `AuthError` |
-| **语法合法但密钥全错**（`oc_sk_0000_wrong…`） | **403 `FreeTierError`** | 401 `Invalid credential` |
-| 真实 key | 403 `FreeTierError` | （未测 —— 会真实计费） |
-
-**一个形状对、密钥全错的假 key，在免费模型上照样拿 403。**
-
-> **这一条纠正了我先前的一个错误推理。** 我曾断言「有效 key 得 403 而虚构 key
-> 得 401，这个差异本身就证明 key 有效」，并据此省掉了付费模型验证。那是错的：
-> 403 不能证明 key 有效。
->
-> 但「闸门与 key 无关」这个结论反而更硬了 —— 同一个假 key 在付费模型上会走到
-> 密钥验证并失败，在免费模型上却没走到，证明闸门在密钥验证**之前**短路。
-> 既然它触发时密钥尚未被检查，结果就不可能取决于 key 是否有效。
-> 从「实测有效 key 也被拒」变成「任何 key 都到不了那一步」。
-
----
-
-## 3. 闸门短路在请求体校验之前
-
-**日期**：2026-09-23
-
-**触发**：免 key + 免费模型，请求体故意坏掉
-
-```jsonc
-// messages 是字符串而非数组，外加一个规划点名要发现的 client_metadata
-{"model":"big-pickle","messages":"not-an-array","client_metadata":{"x":1}}
-```
-
-响应与**完全合法**的请求**逐字节相同**（同一个 403 FreeTierError）。
-
-**直接后果**：请求体从未被上游看过，所以字段级怪癖一个都探不到 ——
-这正是 Phase 4 范围缩减的根据。`discover-upstream.mjs` 里有一条探针专门
-守着这个事实（它比对两次响应的字节是否相同）。
-
----
-
-## 4. 模型存在性检查先于鉴权（免 key 时）
-
-**日期**：2026-09-23
-
-**触发**：免 key（或语法非法的 key）+ 一个不存在的模型 id
-
-```
-401 text/plain;charset=UTF-8
-{"type":"error","error":{"type":"ModelError","message":"Model zzz-does-not-exist-free is not supported"}}
-```
-
-而免 key + **付费**模型是 `401 AuthError: Missing API key.` —— 两者状态码相同、
-`error.type` 不同。
-
-**对 Phase 6 有用**：这给「模型是否在架」提供了一条**免 key 即可用**的校验途径。
-
-**对本网关的风险提示**：上游把 401 同时用于「鉴权失败」与「模型不存在」，
-而 `classifyStatus` 把 401 归 `auth` → `shouldCooldown` 为真。若上游哪天在
-**带 key** 的请求上也这么返回，一个拼错的模型名就会把健康 Worker 逐个打进冷却。
-今天不成立（见 §5），Phase 6 补上目录交集正好消掉这个暴露面。
-
----
-
-## 5. 带 key 时不存在的模型是 400，不是 401
-
-**日期**：2026-09-22 首测，09-23 复验
-
-**触发**：有效 key + 已下架或不存在的模型 id
-
-```
-400
-{"error":{"type":"server_error","message":"Upstream request failed: Model is unavailable."}}
-```
-
-**这条对正确性有直接影响**：400 归 `bad_request` —— 不重试、不归咎 Worker
-（不变量 #4）。若它是 401 就会归 `auth` → 冷却健康 Worker。
-所以 `discover-upstream.mjs` 里那条探针实际在守护
-「坏模型名不会拖累 Worker 池」这个性质。
-
-> 这也纠正了我写在规划里的一个**推测**：我原先写「上游返回 404 → 归为 `auth`
-> → 换 Worker 重试后仍失败」。实测行为比推测的**更好**。
-
----
-
-## 6. 错误响应的 content-type 不一致，且 401 上是错的
-
-**日期**：2026-09-22 首测，09-23 复验
-
-| 状态码 | content-type | 体 |
-|---|---|---|
-| 401 | `text/plain;charset=UTF-8` | **JSON** ← 不一致 |
-| 403 | `application/json` | JSON |
-| 400 | `application/json` | JSON |
-
-**本网关原样透传，这是正确处置** —— 不替上游纠错，否则用户永远不知道上游
-实际发了什么。但客户端若按 content-type 决定解析方式，会在 401 上解析失败
-而在 403 上正常。这种「只有某些错误码解析不了」的症状极难归因。
-
----
-
-## 7. 模型目录**按账号**区分，但免费子集一致
-
-**日期**：2026-09-22（账号 A）、09-23（账号 B）、09-23 晚（三账号同测，**推翻了前两次的结论**）
-
-`GET /zen/v1/models` 免鉴权可读，但不同身份看到不同的目录。这条结论**被修正过两次**，
-两次都是"样本变大之后前一个结论站不住"，所以把过程完整记下来：
-
-| 轮次 | 样本 | 当时的结论 |
-|---|---|---|
-| 09-22 | 1 个账号 + 免 key | 目录是 **per-Worker** 的，缓存键必须含 Worker 身份 |
-| 09-23 | 2 个账号 + 免 key | 两个账号**差异项完全相同** → 不是账号个体差异，而是「带 key／免 key」两种**身份** |
-| 09-23 晚 | **3 个账号** + 免 key | **上一条也是错的** —— 账号个体差异真实存在 |
-
-第三轮的实测（三轮重复，数字稳定；且全部经**同一个本机出口**发出，排除地域差异）：
-
-| 身份 | 总数 | 免费集 |
-|---|---|---|
-| 免 key | 79 | 10 |
-| worker-11 | **41** | 9 |
-| worker-12 | **41** | 9 |
-| worker-13 | **79** | 9 |
-
-两个付费账号看到 41 个模型，第三个看到 79 —— 所以「差异只来自带 key／免 key」是假的。
-（前一轮之所以得出那个结论，是因为那两个账号恰好权限相同。**两个样本一致不足以
-排除个体差异**，而我当时把它写成了结构性结论。）
-
-**真正稳定的那条更窄**：差异**全在付费模型上**，免费子集三个账号
-**完全一致**（各 9 个，逐 id 相同）。免 key 多出的那个是 `deepseek-v4-flash-free`。
-
-总数在变（09-22 是 76，09-23 是 79/41），所以**任何硬编码的模型数字都会过期**，
-测试里不能断言总数。
-
-**对 Phase 6 的实际影响**：目录缓存按「带 key／免 key」**两个槽位**存，而依据是
-上面那条更窄的性质（本网关只放行免费模型，交集要的恰好是一致的那个子集），
-**不是**"目录按身份区分"。若免费子集哪天也按账号分化，两侧后果不对称：
-
-- 缓存里**多**一个 → 上游 400 `Model is unavailable`（§5）→ `bad_request` → 不重试、不归咎 Worker，自限
-- 缓存里**少**一个 → 误拒一个可用模型，所以判出"已下架"时会触发一次目录刷新
-
-真出现那天的修法是并集：`/v1/models` 取所有启用 Worker 的并集，路由校验用该 Worker
-自己的目录。代价是 N 次上游请求，眼下不值得。
-
----
-
-## 8. `/messages` 面从 `x-api-key` 读凭证，只给 Bearer 会 500
-
-**日期**：2026-09-23（免 key 与真实 key 各两次，真实 key 只打**免费模型**）
-
-**这条对正确性的影响最大**，因为它的失败方式会连累整个 Worker 池。
-
-| 发给 `/zen/v1/messages` 的凭证头 | 状态 | 体 |
-|---|---|---|
-| 仅 `Authorization: Bearer <key>` | **500** | `{"type":"error","error":{"type":"error","message":"Internal server error"}}` |
-| 仅 `x-api-key: <key>` | 403 | `FreeTierError` |
-| 两者都带 | 403 | `FreeTierError` |
-
-403 `FreeTierError` 说明请求**已经走到免费额度闸门**（凭证被识别了），而 500 说明
-它在那之前就崩了 —— 上游这个面从 `x-api-key` 读凭证，缺了就炸。另外两个面
-（`/chat/completions`、`/responses`）都只认 Bearer，所以这是 Messages 面**独有**的要求。
-
-**不修的后果**：500 经 `classifyStatus` 归 `upstream_error` → `isRetryable` 为真
-且**归咎于 Worker** → 重试链把每个 Worker 依次试一遍，每个都记一次失败并进指数退避。
-于是一个**配置完全正确**的网关，只要客户端用 Messages 面就会把整池 Worker 打进冷却，
-而症状是"上游好像挂了"，完全指不到真实原因（少发了一个头）。
-
-不变量 #4 要保的正是这件事，而这里破坏它的不是客户端的坏请求，是网关自己少发了一个头。
-
-**这个要求不是本项目的特例**：任何驱动 Zen Messages 面的客户端都要顺带把
-Bearer key 镜像成 `x-api-key`。两处从不同入口撞到同一个要求。
-
-`anthropic-version` 本身实测**对结果没有影响**（带与不带状态码相同），但协议要求它，
-且必须由网关设定 —— 取自客户端头的话，一个伪造的旧版本号就是协议降级原语。
-
----
-
-## 9. `/responses` 与 `/messages` 在免 key 时的错误形状与 `/chat/completions` 不同
-
-**日期**：2026-09-23
-
-同一个免费模型、同样免 key，三个面的响应不一样：
-
-| 面 | 免 key | 带（语法合法的）坏 key |
-|---|---|---|
-| `/chat/completions` | 403 `FreeTierError` | 403 `FreeTierError` |
-| `/responses` | **500** `Internal server error` | 403 `FreeTierError` |
-| `/messages` | **500**（见 §8，缺 `x-api-key`） | 403 `FreeTierError`（带 `x-api-key` 时） |
-
-免 key + **付费**模型是 401 `AuthError: Missing API key.`；免 key + **不存在**的模型是
-401 `ModelError: Model xxx is not supported`（与 §4 一致，三个面都如此）。
-
-**有用的地方**：「模型是否在架」这条校验在**三个面上都免 key 可用**，对目录交集有直接帮助。
-
-**要当心的地方**：这些 500 都是**免 key 才出现**的形状，而转发链路上每个候选 Worker
-都有 key（`isUsable` 只看 key），所以生产路径走不到。不要据此给 500 加特殊处置 ——
-那会是一条永不执行的分支。
+- 免 key + 不存在模型返回 401 `ModelError`，提示模型不受支持。
+- 免 key + 付费模型返回 401 `AuthError`，提示缺少 API key。
+- 形状合法但错误的 key + 免费模型仍返回 403 `FreeTierError`。
+- 形状合法但错误的 key + 付费模型返回 401 `Invalid credential`。
+- 带 key 请求不存在模型时观察到 400 `Model is unavailable`。
+
+因此同一个 401 可能代表模型不存在或缺少凭证，且错误分类依赖模型和请求形态。
+网关用本地目录与免费规则提前挡住大多数错误模型名，避免把模型拼写问题归咎于
+Worker。
+
+## 错误响应头
+
+**观察日期**：2026-09-22。
+**形态**：免 key 请求同一免费模型的错误响应。
+
+401 的 `content-type` 曾为 `text/plain;charset=UTF-8`，响应体却仍是 JSON；403 和
+400 的 `content-type` 为 `application/json`。网关原样透传上游头和体，不替上游
+修正这个不一致，以便客户端和日志看到真实故障。
+
+## 目录差异
+
+**观察日期**：2026-09-22 至 2026-09-23。
+**范围**：三个不同身份、同一出口、连续三轮目录请求。
+
+不同身份看到的总目录数量不同，但本次样本中的免费子集相同。该结果只支持一个
+较窄的工程结论：网关可以把免费集作为公共过滤依据，同时仍需缓存带 key 与免
+key 的目录槽位。不能由少量样本推断完整目录按某个单一维度分区，也不能把目录
+总数写成固定值。
+
+目录的在架性不包含价格信息，所以新出现的无后缀免费模型不能自动发现；需要手工
+加入 `models.extraFreeIds`。反过来，符合免费后缀但已下架的模型可由目录交集
+自动剔除。
+
+## Messages 面的凭证头
+
+**观察日期**：2026-09-23。
+**形态**：向 `/zen/v1/messages` 发送免费模型请求，只改变凭证头。
+
+只带 `Authorization: Bearer ...` 时曾返回 500；带 `x-api-key`（或两个头）时到达
+403 免费闸门。`anthropic-version` 是否存在不改变该结果，但协议要求由网关统一
+设置，不能直接信任客户端传入的旧版本号。
+
+当前网关对非空认证 Worker 同时提供两个上游凭证头；匿名 Worker 两个头都为空。
+历史 500 不足以证明所有匿名或真实 CLI 请求都会失败，最终兼容性仍由真实客户端
+验收。
+
+## Responses 亲和
+
+**观察日期**：实现集成测试与真实 CLI 验证期间。
+**范围**：完整成功 Responses 响应和带 `previous_response_id` 的后续请求。
+
+后续请求优先使用 `previous_response_id` 作为会话提示。完整成功响应中的
+`response.id` 会绑定实际承接该响应的 Worker；失效推理或中途失败响应不会学习新
+绑定。这样重试链从第一个候选切换到另一个 Worker 时，后续请求仍跟随真正签发
+推理状态的 Worker。
+
+## 真实 OpenCode CLI 与多出口
+
+**观察日期**：2026-09-26。
+**客户端**：OpenCode CLI v2.0.12，使用原生 `opencode run --standalone --format json`。
+隔离 mock 确认 `providers.opencode.settings` 足以覆盖 Base URL 和 API key；当前推荐配置
+只覆盖这两个连接设置，保留 OpenCode 自己的 SDK package 和模型目录。客户端模型目录中
+没有的模型会在 CLI 侧报 `Model unavailable`，不应归因于网关。
+**历史范围**：当时的验收夹具显式补了逐模型 package/settings，覆盖 3 个未绑定到当前
+Worker 的临时 Clash 出口、3 把已配置认证 key 和一个临时构造的不发送 key 的匿名 Worker、
+4 个免费模型，共 48 次经网关请求。它证明了网关转发能力，但不能推出客户端必须覆盖
+模型目录；当前接入仍只使用 provider 连接设置。测试没有输出 key、出口名称或公网 IP；
+每次请求都在 Clash `/connections` 中核对到 `opencode.ai`、所选临时出口链路且不是
+`DIRECT`。
+
+结果按上游响应分类：
+
+- `mimo-v2.6-flash-free`、`big-pickle`、`space-bunny-free` 的 Chat Completions，以及
+  `muse-spark-1.3-contributor-free` 的 Responses：该历史夹具中的请求均返回 `OK`。这只
+  说明当时的临时出口和上游策略允许该样本；其他出口仍可能受地域限制。
+- 当前没有可用于 Messages 真实验收的免费模型。
+
+用户在默认 OpenCode 会话中观察到 Muse Spark 受地域限制，而经网关的本轮出口样本
+可以成功；两者并不矛盾，地域限制属于出口和上游策略的组合结果，不能把一次拒绝推广
+到所有出口。
+
+这组结果说明网关能够在多个真实命中的出口上转发，并保持认证与匿名 Worker 的
+凭证选择。用户默认 OpenCode 会话以及网关日志也分别观察到 MiMo、Big Pickle 的
+成功用量；Muse 是否成功与出口地域有关。一次同时启用 OpenCode 权限拒绝规则的旧
+矩阵曾得到 403；逐变量控制实验显示关键变量是该权限规则，空的 XDG 目录本身不构成
+失败原因，因此旧矩阵不作为上游可用性的结论。Messages 仍只有本地协议级验证，
+等待上游提供可验模型。
+
+同日后续的匿名专项复核改用三个真实出口，每次只启动一个匿名 Worker，并为每个 CLI
+进程设置 `PWD`、绝对 `OPENCODE_CONFIG`、隔离 XDG 目录和全新会话。三个出口上的
+Big Pickle、Space Bunny Chat 请求均返回 `200`；MiMo 在该隔离客户端目录中未注册，
+CLI 直接报 `Model unavailable`，没有发出网关请求；Muse Spark Responses 均因当前地域策略
+返回 `403`。三个临时运行库都只出现对应的匿名 Worker，未出现认证 Worker。另行对匿名 `/v1/models` 做 CA
+对照：服务进程未设置 `NODE_EXTRA_CA_CERTS` 时返回 `502 upstream_unreachable`，带上
+服务使用的 CA 后返回 `200`，响应中的目录槽位为 `keyless`。这两类结果分别属于出口/上游
+策略与服务信任库条件，不能互相归因。
+
+## 重新测量的边界
+
+`discover:upstream` 使用 Node 的网络栈和它自己的环境变量，不能证明服务进程的
+CA、代理、DNS、超时或请求头与脚本完全相同。验证网关时应运行服务进程并使用真实
+客户端；出口归属应核对实际 Clash `/connections`，不能只探测一个可能命中不同
+规则的第三方回显服务。

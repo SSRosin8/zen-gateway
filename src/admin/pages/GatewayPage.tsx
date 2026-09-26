@@ -1,13 +1,16 @@
+import { useState } from "react";
 import type { Overview } from "../../shared/contract.ts";
-import { Mono, Panel, Strong } from "../components/Panel.tsx";
+import { Mono, Panel, PrimaryButton, Strong } from "../components/Panel.tsx";
 import { StatusIndicator } from "../components/StatusIndicator.tsx";
+import { patchConfig } from "../lib/api.ts";
+import { openCodeConfigSnippet, type OpenCodeVersion } from "../lib/openCodeConfig.ts";
 
 /**
  * 网关页 —— 连接信息与客户端配置片段。
  *
  * ## 这一页的主要价值是那段可复制的配置
  *
- * 规划要求「直接给出可一键复制的 **V2 格式** `opencode.json` 片段」。
+ * 提供兼容 OpenCode 1/2 的 `opencode.json` 片段。
  * 手写那段配置是最容易出错的一步（端口、路径、token 三处都能写错），
  * 而写错的症状是 401 或连接被拒 —— 两者都指不到「你的 baseURL 少了 /v1」。
  *
@@ -15,18 +18,13 @@ import { StatusIndicator } from "../components/StatusIndicator.tsx";
  * 占位符并告诉用户去哪儿取 —— 把 token 渲染进 DOM 等于让它进截图、进
  * 浏览器扩展、进 devtools 的保存。
  */
-export function GatewayPage({ data }: { data: Overview }) {
-  const snippet = `{
-  "$schema": "https://opencode.ai/config.json",
-  "provider": {
-    "opencode": {
-      "options": {
-        "baseURL": "http://127.0.0.1:${data.gateway.port}/v1",
-        "apiKey": "<把 data/config.json 里的 gateway.relayToken 填进来>"
-      }
-    }
-  }
-}`;
+export function GatewayPage({ data, refresh }: { data: Overview; refresh?: () => void }) {
+  const [maxAttempts, setMaxAttempts] = useState(String(data.gateway.maxAttempts));
+  const [saving, setSaving] = useState(false);
+  const [message, setMessage] = useState<string | null>(null);
+  const [copied, setCopied] = useState(false);
+  const [openCodeVersion, setOpenCodeVersion] = useState<OpenCodeVersion>("2");
+  const snippet = openCodeConfigSnippet(data.gateway.port, openCodeVersion);
 
   return (
     <div className="space-y-4">
@@ -67,18 +65,90 @@ export function GatewayPage({ data }: { data: Overview }) {
         </dl>
       </Panel>
 
+      <Panel title="运行设置">
+        <form
+          className="flex flex-wrap items-end gap-3"
+          onSubmit={(event) => {
+            event.preventDefault();
+            setSaving(true);
+            setMessage(null);
+            void patchConfig({ gateway: { maxAttempts: Number(maxAttempts) } })
+              .then(() => {
+                setMessage("已保存");
+                refresh?.();
+              })
+              .catch((err) => setMessage(err instanceof Error ? err.message : String(err)))
+              .finally(() => setSaving(false));
+          }}
+        >
+          <label className="flex flex-col gap-1">
+            <span className="text-text-muted">最多尝试 Worker 数</span>
+            <input
+              type="number"
+              min={1}
+              max={10}
+              required
+              value={maxAttempts}
+              onChange={(e) => setMaxAttempts(e.target.value)}
+              className="min-h-[44px] w-40 rounded-sm border border-border-strong bg-bg px-3"
+            />
+          </label>
+          <PrimaryButton type="submit" onClick={() => undefined} disabled={saving}>
+            {saving ? "保存中…" : "保存"}
+          </PrimaryButton>
+          {message !== null && <span className="text-text-muted">{message}</span>}
+        </form>
+      </Panel>
+
       <Panel title="客户端配置">
         <p className="mb-3 text-text-muted">
-          覆盖 OpenCode 内置的 <Mono>opencode</Mono> provider，只给{" "}
-          <Mono>baseURL</Mono> 与 <Mono>apiKey</Mono>。放在{" "}
+          选择你的 OpenCode 主版本，生成覆盖本地网关的 <Mono>opencode</Mono> provider 配置。放在{" "}
           <Mono>~/.config/opencode/opencode.json</Mono> 或项目根目录。
         </p>
-        <pre className="overflow-x-auto rounded-md border border-border-strong bg-bg p-3 font-mono">
-          {snippet}
-        </pre>
+        <label className="mb-3 flex w-fit flex-col gap-1">
+          <span className="text-text-muted">OpenCode 配置格式</span>
+          <select
+            aria-label="OpenCode 版本"
+            value={openCodeVersion}
+            onChange={(event) => setOpenCodeVersion(event.target.value as OpenCodeVersion)}
+            className="min-h-[44px] rounded-sm border border-border-strong bg-bg px-3"
+          >
+            <option value="2">OpenCode 2.x（默认）</option>
+            <option value="1">OpenCode 1.x</option>
+          </select>
+        </label>
+        <div className="relative">
+          <pre className="overflow-x-auto rounded-md border border-border-strong bg-bg p-3 pr-28 font-mono">
+            {snippet}
+          </pre>
+          <button
+            type="button"
+            className="absolute right-2 top-2 min-h-[40px] rounded-xs border border-border-strong bg-surface px-3"
+            onClick={() => {
+              void navigator.clipboard?.writeText(snippet).then(() => {
+                setCopied(true);
+                window.setTimeout(() => setCopied(false), 1500);
+              });
+            }}
+          >
+            {copied ? "已复制" : "复制"}
+          </button>
+        </div>
         <p className="mt-3 text-text-muted">
-          <Strong>不要写 <Mono>models</Mono> 块</Strong> —— 内置 provider 自带模型表，
-          手写一份会随上游目录变化而过期。
+          {openCodeVersion === "1" ? (
+            <>
+              OpenCode 1.x 使用单数 <Mono>provider</Mono> 与 <Mono>options</Mono>，只覆盖已有
+              provider 的 <Mono>baseURL</Mono> 与 <Mono>apiKey</Mono>；模型和 SDK 由 OpenCode
+              自己管理。
+            </>
+          ) : (
+            <>
+              OpenCode 2.x 使用复数 <Mono>providers</Mono>，只覆盖已有 <Mono>opencode</Mono>{" "}
+              provider 的 <Mono>settings.baseURL</Mono> 与 <Mono>settings.apiKey</Mono>；模型和
+              SDK 由 OpenCode 自己管理。
+            </>
+          )}{" "}
+          你选择的模型仍受上游权限与免费规则约束。
         </p>
       </Panel>
 

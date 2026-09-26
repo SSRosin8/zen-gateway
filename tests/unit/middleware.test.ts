@@ -212,6 +212,42 @@ describe("loopbackOnly 中间件", () => {
     const res = await app("203.0.113.9").request("/api/ping");
     expect(await res.text()).not.toContain("203.0.113.9");
   });
+
+  it("拒绝非回环 Host，即使 TCP 对端是本机", async () => {
+    const a = new Hono();
+    a.use(
+      "/api/*",
+      loopbackOnly({ addressOf: () => "127.0.0.1" }),
+    );
+    a.get("/api/ping", (c) => c.json({ ok: true }));
+    const res = await a.request("http://127.0.0.1/api/ping", {
+      headers: { host: "127.0.0.1.evil.invalid" },
+    });
+    expect(res.status).toBe(403);
+  });
+
+  it("拒绝非回环 Origin，即使 TCP 对端与 Host 都是本机", async () => {
+    const a = new Hono();
+    a.use(
+      "/api/*",
+      loopbackOnly({ addressOf: () => "127.0.0.1" }),
+    );
+    a.get("/api/ping", (c) => c.json({ ok: true }));
+    const res = await a.request("http://127.0.0.1/api/ping", {
+      headers: { origin: "https://evil.invalid" },
+    });
+    expect(res.status).toBe(403);
+  });
+
+  it("拒绝显式空 Origin", async () => {
+    const a = new Hono();
+    a.use("/api/*", loopbackOnly({ addressOf: () => "127.0.0.1" }));
+    a.get("/api/ping", (c) => c.json({ ok: true }));
+    const res = await a.request("http://127.0.0.1/api/ping", {
+      headers: { origin: "" },
+    });
+    expect(res.status).toBe(403);
+  });
 });
 
 /* ================================================================== *

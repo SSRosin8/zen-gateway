@@ -73,9 +73,8 @@ export type RuntimeWorkerState = {
  *
  * ## `inPool` 与 `enabled` 必须分开显示
  *
- * `isUsable()` 除了 `enabled` 还要求 apiKey 非空（免 key 通道已被上游关闭）。
- * 合成一个字段的话，「启用了但没 key」会显示成启用，而用户会发现它从不被
- * 选中却找不到原因。
+ * `isUsable()` 对认证 Worker 要求 apiKey 非空，对匿名 Worker 允许免 key。
+ * 合成一个字段的话，匿名 Worker 的类型语义会被丢掉，用户无法区分两种候选。
  *
  * `runtime` 里查不到的 Worker（不在候选池里）—— `ready` 为 false 而不是
  * 「未知」：它确实不会被选中，这是个确定的事实，不是缺失信息。
@@ -329,7 +328,22 @@ export function modelViews(config: Config, snapshot: CatalogSnapshot | null): Mo
   if (snapshot === null) return [];
 
   const view = { ids: snapshot.ids };
-  return snapshot.entries.map((entry): ModelView => {
+  /*
+   * 管理页需要同时回答两个问题：当前目录里有哪些模型，以及配置里记着的免费
+   * 模型是否已经从目录消失。只遍历 `snapshot.entries` 会让第二类模型在生产
+   * 响应中完全消失，`retired` 分支因此只能在单测 fixture 里存在。
+   *
+   * 这些额外 id 只来自用户配置（显式免费名单与协议面覆写），不从历史数据库
+   * 猜测模型，避免把已删除配置重新显示出来。条目缺失时只保留 id，协议面仍由
+   * `surfacesFor` 从当前配置推导。
+   */
+  const entries = new Map(snapshot.entries.map((entry) => [entry.id, entry] as const));
+  for (const id of config.models.extraFreeIds) entries.set(id, entries.get(id) ?? { id });
+  for (const id of Object.keys(config.models.surfaceOverrides)) {
+    entries.set(id, entries.get(id) ?? { id });
+  }
+
+  return [...entries.values()].map((entry): ModelView => {
     const verdict = judgeFree(entry.id, config.models, view);
     return {
       id: entry.id,

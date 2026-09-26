@@ -238,6 +238,16 @@ describe("可用性约束", () => {
   it("匿名 Worker 无需 apiKey", () => {
     expect(WorkerSchema.safeParse({ id: "w1", kind: "anonymous" }).success).toBe(true);
   });
+
+  it("匿名 Worker 会在配置归一化时清掉残留 apiKey", () => {
+    expect(
+      WorkerSchema.parse({ id: "w1", kind: "anonymous", apiKey: "fake-key-old-not-real" }).apiKey,
+    ).toBe("");
+    expect(WorkerSchema.parse({ id: "w1", kind: "anonymous", apiKey: "   " }).apiKey).toBe("");
+    expect(WorkerSchema.parse({ id: "w1", kind: "authenticated", apiKey: "fake-key-new-not-real" }).apiKey).toBe(
+      "fake-key-new-not-real",
+    );
+  });
 });
 
 describe("egressIp 语义", () => {

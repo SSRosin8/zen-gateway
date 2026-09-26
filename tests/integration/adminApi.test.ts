@@ -1,13 +1,16 @@
 import { readFileSync } from "node:fs";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { createServer, type Server } from "node:http";
+import { Response as UndiciResponse } from "undici";
 import { mkdtemp, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { Hono } from "hono";
 import { createApp } from "../../src/server/app.ts";
 import { EgressService } from "../../src/core/proxy/egress.ts";
-import { ModelCatalog } from "../../src/core/models/catalog.ts";
+import { ModelCatalog, catalogIdentityOf } from "../../src/core/models/catalog.ts";
+import { DispatcherPool } from "../../src/core/proxy/dispatcher.ts";
+import { SelectorLockRegistry } from "../../src/core/proxy/selectorLock.ts";
 import { Scheduler } from "../../src/core/routing/scheduler.ts";
 import { ConfigSchema, CONFIG_VERSION, type Config } from "../../src/shared/schema.ts";
 import {
@@ -158,6 +161,7 @@ function makeApp(
         current = next;
         opts.onApply?.(next);
       },
+      effectivePort: () => current.gateway.port,
       runtimeWorkers: () => scheduler.runtimeWorkers(current, Date.now()),
       catalog,
       egress,
@@ -173,7 +177,7 @@ function makeApp(
     },
   });
 
-  return { app, scheduler, getConfig: () => current, seenSinceDay: seen };
+  return { app, scheduler, catalog, getConfig: () => current, seenSinceDay: seen };
 }
 
 async function get(app: Hono, path: string) {
@@ -261,7 +265,7 @@ describe("/api/overview 把配置与运行期状态合在一处", () => {
     const config = makeConfig({
       workers: [
         { id: "on", kind: "authenticated", apiKey: KEY_A, proxyId: null },
-        // 启用了但**没有 key** —— `isUsable()` 会过滤掉它。
+        // 匿名 Worker 没有 key 也应进入候选池。
         { id: "nokey", kind: "anonymous", apiKey: "", proxyId: null },
         { id: "off", kind: "authenticated", apiKey: KEY_B, enabled: false, proxyId: null },
       ],
@@ -278,12 +282,12 @@ describe("/api/overview 把配置与运行期状态合在一处", () => {
      * 「启用了但没 key」必须与「已停用」区分开:合成一类的话,用户会看到
      * enabled 为真却发现它从不被选中,而界面上没有任何线索。
      */
-    expect(byId.get("nokey")).toMatchObject({ enabled: true, inPool: false, ready: false });
+    expect(byId.get("nokey")).toMatchObject({ enabled: true, inPool: true, ready: true });
     expect(byId.get("off")).toMatchObject({ enabled: false, inPool: false, ready: false });
     expect(byId.get("on")).toMatchObject({ enabled: true, inPool: true, ready: true });
 
-    // 池计数只算在候选池里的 —— 停用与没 key 的都不算。
-    expect(parsed.pool).toMatchObject({ ready: 1, total: 1, health: "healthy" });
+    // 池计数只算在候选池里的 —— 停用不算，匿名 Worker 即使没 key 也算。
+    expect(parsed.pool).toMatchObject({ ready: 2, total: 2, health: "healthy" });
   });
 
   it("冷却中的 Worker 报 ready:false 并给出剩余时间与失败类别", async () => {
@@ -585,6 +589,48 @@ describe("写入失败分类", () => {
     });
     expect(result.ok).toBe(false);
     if (!result.ok) expect(result.failure.kind).toBe("invalid_config");
+  });
+
+  it("匿名 Worker 可以通过补丁完整创建、更新类型并删除", () => {
+    const config = makeConfig({ workers: [] });
+    const created = applyConfigPatch(config, {
+      workers: {
+        create: [{ id: "anon-1", kind: "anonymous", name: "公共额度", apiKey: "", proxyId: null, enabled: true }],
+      },
+    });
+    expect(created.ok).toBe(true);
+    if (!created.ok) return;
+    expect(created.config.workers[0]).toMatchObject({ id: "anon-1", kind: "anonymous", apiKey: "", enabled: true });
+
+    const changed = applyConfigPatch(created.config, {
+      workers: { update: { "anon-1": { name: "改名", proxyId: null, enabled: false } } },
+    });
+    expect(changed.ok).toBe(true);
+    if (!changed.ok) return;
+    expect(changed.config.workers[0]).toMatchObject({ kind: "anonymous", name: "改名", enabled: false });
+
+    const removed = applyConfigPatch(changed.config, { workers: { delete: ["anon-1"] } });
+    expect(removed.ok).toBe(true);
+    if (removed.ok) expect(removed.config.workers).toHaveLength(0);
+  });
+
+  it("认证 Worker 切匿名会清掉旧 key，切回认证必须重新提供 key", async () => {
+    const { app, getConfig } = makeApp(makeConfig());
+    expect(getConfig().workers[0]!.apiKey).toBe(KEY_A);
+
+    const anonymous = await patch(app, { workers: { update: { w1: { kind: "anonymous" } } } });
+    expect(anonymous.status).toBe(200);
+    expect(getConfig().workers[0]).toMatchObject({ kind: "anonymous", apiKey: "" });
+
+    const authenticated = await patch(app, { workers: { update: { w1: { kind: "authenticated" } } } });
+    expect(authenticated.status).toBe(422);
+    expect(getConfig().workers[0]).toMatchObject({ kind: "anonymous", apiKey: "" });
+
+    const restored = await patch(app, {
+      workers: { update: { w1: { kind: "authenticated", apiKey: { set: "fake-key-replacement-not-real" } } } },
+    });
+    expect(restored.status).toBe(200);
+    expect(getConfig().workers[0]).toMatchObject({ kind: "authenticated", apiKey: "fake-key-replacement-not-real" });
   });
 
   it("**同一请求里 `delete X` + `create X` 净效果是新建**（缺口 #27）", () => {
@@ -1278,6 +1324,66 @@ describe("/api/models", () => {
     expect(parsed.models).toEqual([]);
     // 规则照常给出 —— 那来自配置，与目录无关。
     expect(parsed.rules.freeSuffix).toBe("-free");
+  });
+
+  it("把配置中的缺失显式免费项列为 retired，并保留 listed=false", async () => {
+    const config = makeConfig({
+      models: { extraFreeIds: ["missing-free"], enforceCatalog: true },
+    });
+    for (const worker of config.workers) worker.proxyId = null;
+    const { app, catalog } = makeApp(config);
+    const response = new UndiciResponse(
+      JSON.stringify({ data: [{ id: "listed-free" }, { id: "paid-model" }] }),
+      { status: 200, headers: { "content-type": "application/json" } },
+    );
+    const pool = new DispatcherPool({ headersTimeoutMs: 1000, bodyTimeoutMs: 1000 });
+    await catalog.ensure(catalogIdentityOf(config), config, () => ({
+      config,
+      dispatchers: pool,
+      locks: new SelectorLockRegistry(),
+      controllerFor: () => null,
+      fetchImpl: async () => response,
+    }));
+
+    const parsed = ModelListSchema.parse((await get(app, "/api/models")).body);
+    expect(parsed.models.find((m) => m.id === "missing-free")).toMatchObject({
+      free: false,
+      reason: "retired",
+      listed: false,
+    });
+    expect(parsed.models.find((m) => m.id === "listed-free")).toMatchObject({
+      free: true,
+      listed: true,
+    });
+    await pool.close();
+  });
+
+  it("关闭目录交集时，缺失显式免费项仍可用而不是误称 retired", async () => {
+    const config = makeConfig({
+      models: { extraFreeIds: ["missing-free"], enforceCatalog: false },
+    });
+    for (const worker of config.workers) worker.proxyId = null;
+    const { app, catalog } = makeApp(config);
+    const response = new UndiciResponse(JSON.stringify({ data: [{ id: "listed-free" }] }), {
+      status: 200,
+      headers: { "content-type": "application/json" },
+    });
+    const pool = new DispatcherPool({ headersTimeoutMs: 1000, bodyTimeoutMs: 1000 });
+    await catalog.ensure(catalogIdentityOf(config), config, () => ({
+      config,
+      dispatchers: pool,
+      locks: new SelectorLockRegistry(),
+      controllerFor: () => null,
+      fetchImpl: async () => response,
+    }));
+
+    const parsed = ModelListSchema.parse((await get(app, "/api/models")).body);
+    expect(parsed.models.find((m) => m.id === "missing-free")).toMatchObject({
+      free: true,
+      reason: "extra",
+      listed: false,
+    });
+    await pool.close();
   });
 });
 

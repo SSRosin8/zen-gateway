@@ -9,6 +9,7 @@ import {
   type ProbeResult,
   type SubscriptionRefresh,
 } from "../../shared/contract.ts";
+import type { ConfigPatch } from "../../shared/contract.ts";
 import { pollIntervalMs } from "../../shared/batchProbe.ts";
 
 /**
@@ -56,6 +57,19 @@ async function getJson(path: string): Promise<unknown> {
     throw new Error(detail);
   }
   return res.json();
+}
+
+/** 写入配置补丁；凭证只在请求体中单向发送，响应不回传配置内容。 */
+export async function patchConfig(patch: ConfigPatch): Promise<void> {
+  const res = await fetch("/api/config", {
+    method: "PATCH",
+    headers: { "content-type": "application/json", accept: "application/json" },
+    body: JSON.stringify(patch),
+  });
+  const body = (await res.json().catch(() => null)) as { error?: { message?: string } } | null;
+  if (!res.ok) {
+    throw new Error(body?.error?.message ?? `HTTP ${res.status}`);
+  }
 }
 
 /**

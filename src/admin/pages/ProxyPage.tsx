@@ -16,7 +16,7 @@ import { humanMs } from "./OverviewPage.tsx";
 /**
  * 代理池页。
  *
- * 两个标签：**列表**（分页）与**出口隔离**（不分页）。
+ * 两个标签：**列表**（分页）与**回显出口**（不分页）。
  *
  * 隔离视图刻意不分页 —— 规划明确：那个任务本身就是「一眼看全、找出共用出口
  * 的节点」，分页会破坏它的意义。数量大时靠浏览器原生滚动，而不是切成 6 页
@@ -26,7 +26,7 @@ import { humanMs } from "./OverviewPage.tsx";
 function proxyTone(p: ProxyView): "success" | "warn" | "error" | "neutral" {
   if (!p.enabled) return "neutral";
   if (!p.resolvable) return "error";
-  // 能用但没实测过出口 —— 那不是错误，只是还不知道。
+  // 能用但没实测过回显出口 —— 那不是错误，只是还不知道。
   if (p.egressIp === null) return "warn";
   return "success";
 }
@@ -157,7 +157,7 @@ function BatchPanel({ progress, control }: { progress: BatchProgressView; contro
             percent={pct.screen}
           />
           <ProgressBar
-            label="第 2 段 · 实测出口"
+            label="第 2 段 · 实测回显出口"
             done={progress.mainDone}
             total={progress.mainTotal}
             percent={pct.main}
@@ -237,27 +237,30 @@ function SecondaryButton({
   );
 }
 
-/** 出口隔离视图 —— **不分页**（见文件头）。 */
+/** 回显出口视图 —— **不分页**（见文件头）。 */
 function IsolationTab({ data }: { data: ProxyList }) {
   const { groups, sharedGroups, unknownWorkerIds, isolated } = data.isolation;
 
   return (
-    <Panel title="出口隔离">
+    <Panel title="回显出口">
       <StatusIndicator
         tone={isolated ? "success" : sharedGroups.length > 0 ? "error" : "warn"}
         icon={isolated ? "✓" : sharedGroups.length > 0 ? "✕" : "!"}
         label={
           isolated
-            ? `已隔离 · ${groups.length} 个独立出口`
+            ? `回显出口独立 · ${groups.length} 个出口`
             : sharedGroups.length > 0
-              ? `未隔离 · ${sharedGroups.length} 组共用出口`
+              ? `回显出口共用 · ${sharedGroups.length} 组共用出口`
               : `${unknownWorkerIds.length} 个出口未探测`
         }
       />
 
       <p className="mt-3 text-text-muted">
-        <Strong>按实测公网 IP 分组，不按代理 id</Strong> —— 两个不同代理可能 NAT 到同一个
-        公网 IP，那种情况下「已隔离」是假的。未探测出 IP 的<Strong>不算已隔离</Strong>。
+        <Strong>按回显目标的实测公网 IP 分组</Strong>。两个不同代理可能共用公网 IP；
+        未探测的出口单独列出。已保存的 IP 是最后一次成功探测结果，不代表当前仍然可用。
+      </p>
+      <p className="mt-2 text-text-muted">
+        仅反映 IP 回显目标的出口；Zen 实际出口需核对发往 opencode.ai 的连接。
       </p>
 
       {groups.length > 0 && (
@@ -540,7 +543,7 @@ export function ProxyPage({
             hint="参与调度"
           />
           <Metric
-            label="已实测出口"
+          label="已实测回显出口"
             value={String(data.proxies.filter((p) => p.egressIp !== null).length)}
             hint="有公网 IP"
           />
@@ -560,7 +563,7 @@ export function ProxyPage({
         <TabButton
           active={tab === "isolation"}
           onClick={() => navigate({ tab: "isolation" })}
-          label="出口隔离"
+          label="回显出口"
         />
         <TabButton
           active={tab === "subscriptions"}

@@ -2,7 +2,7 @@ import { Hono, type Context } from "hono";
 import type { Config } from "../../shared/schema.ts";
 import { judgeFree } from "../../core/models/free.ts";
 import type { UpstreamDeps } from "../../core/upstream/fetch.ts";
-import { ModelCatalog, catalogIdentityOf, slotOf } from "../../core/models/catalog.ts";
+import { ModelCatalog, catalogIdentitiesOf, slotOf } from "../../core/models/catalog.ts";
 import { gatewayError } from "../middleware/errorMap.ts";
 import { MODELS_PATHS } from "../../core/protocols/chat.ts";
 
@@ -63,9 +63,15 @@ export function createModelsRoutes(deps: ModelsDeps): Hono {
  */
 async function handleModels(c: Context, deps: ModelsDeps): Promise<Response> {
   const config = deps.configOf();
-  const identity = catalogIdentityOf(config);
+  const identities = catalogIdentitiesOf(config);
+  let identity = identities[0]!;
+  let snapshot = null;
 
-  const snapshot = await deps.catalog.ensure(identity, config, deps.upstreamOf);
+  for (const candidate of identities) {
+    identity = candidate;
+    snapshot = await deps.catalog.ensure(candidate, config, deps.upstreamOf);
+    if (snapshot !== null) break;
+  }
   if (snapshot === null) {
     /*
      * 从来没成功拉到过目录。
