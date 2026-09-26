@@ -51,8 +51,15 @@ npm run setup                # 写入 data/config.json
 npm run restart
 ```
 
-setup 支持 `--api <http://127.0.0.1:端口>` 与 `--secret <值>`；API 地址必须是本机
-HTTP 回环地址。
+不带参数时 setup 会探测本机常见的 Controller 端口。Controller 设了 secret 时自动探测
+只会报告“需要 secret”：从 Clash 配置文件的 `secret` 字段或客户端设置里的外部控制
+（External Controller）处取得地址与 secret，再显式传入：
+
+```bash
+npm run setup -- --dry-run --api http://127.0.0.1:<端口> --secret '<secret>'
+```
+
+API 地址必须是本机 HTTP 回环地址。
 
 运行中的服务不会重新读取外部修改的配置文件。setup 写入后到重启完成前，不要在
 管理后台保存任何配置：后台保存会把进程内的旧配置整份写回磁盘，覆盖刚导入的代理
@@ -82,7 +89,10 @@ HTTP 回环地址。
 
 ## 客户端接入
 
-先运行 `npm run status` 取得服务实际端口。后台网关页可以选择 OpenCode 主版本并
+首次启动时没有任何 Worker，这时客户端请求会得到 503 `no_worker_available`。先在后台
+Worker 页（或用 `PATCH /api/config`）至少建一个 Worker，再接入客户端。
+
+运行 `npm run status` 取得服务实际端口。后台网关页可以选择 OpenCode 主版本并
 复制对应片段。OpenCode 1.x 使用单数 `provider`/`options`：
 
 ```json
@@ -116,8 +126,10 @@ OpenCode 2.x 使用复数 `providers`/`settings`。只覆盖已有 `opencode` pr
 }
 ```
 
-选择对应版本的片段放进 `~/.config/opencode/opencode.json` 或项目根目录，token 是
-占位符，仍需填入真实值。不要把具体模型或 SDK package 从 OpenCode 配置复制到这里，
+选择对应版本的片段放进 `~/.config/opencode/opencode.json`，或只对某个项目生效时放进
+运行 `opencode` 的那个目录下的 `opencode.json`。token 是占位符，仍需填入真实值；
+文件含 Relay Token，建议 `chmod 600`。本仓库的 `.gitignore` 已忽略根目录的
+`opencode.json`，其他仓库需自行忽略。不要把具体模型或 SDK package 从 OpenCode 配置复制到这里，
 否则会覆盖 OpenCode 自己维护的目录。
 
 转发面用 `Authorization: Bearer <Relay Token>` 鉴权；`/v1/messages`（及无前缀的
@@ -139,6 +151,8 @@ opencode run --model opencode/big-pickle "Reply with exactly: OK"
 - OpenCode 2.0.12 的隔离实测确认，`providers.opencode.settings` 会覆盖
   `baseURL`/`apiKey`，但只对客户端自身模型目录中已存在的模型发起请求。CLI 报
   `Model unavailable` 表示客户端目录没有该模型，不是网关没有接管 Base URL。
+  网关 `/v1/models` 列出的免费模型不一定都在客户端目录里，验收应选两边都有的模型
+  （如 `big-pickle`）。
 - 验收匿名 Worker 时为每次测试使用新的会话和隔离的 `PWD`、`OPENCODE_CONFIG`、
   `XDG_CONFIG_HOME`、`XDG_DATA_HOME`、`XDG_STATE_HOME`；已有会话的亲和绑定优先于
   `anonymous_first`，会继续使用原 Worker。
