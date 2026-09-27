@@ -50,32 +50,29 @@ export function OpenCodeConfigCard({
 
   return (
     <div className="space-y-3" data-opencode="">
-      <StatusIndicator {...label} />
-      <dl className="grid grid-cols-[auto_1fr] gap-x-6 gap-y-1">
-        <dt className="text-text-muted">文件</dt>
-        <dd>
-          <Mono>{s.path}</Mono>
-          <span className="ml-2 text-text-muted">网关项目根目录</span>
-        </dd>
-        <dt className="text-text-muted">检测到的 OpenCode</dt>
-        <dd>{detected === null ? <span className="text-text-muted">未安装或不在 PATH 中</span> : <Mono>{detected}</Mono>}</dd>
-        <dt className="text-text-muted">当前格式</dt>
-        <dd>{s.shape === null ? <span className="text-text-muted">无</span> : <Mono>{s.shape}</Mono>}</dd>
-      </dl>
+      {/* 状态与三项事实同一行，宽屏不必逐行往下读。 */}
+      <div className="flex flex-wrap items-center gap-x-6 gap-y-1">
+        <StatusIndicator {...label} />
+        <span>
+          <span className="text-text-muted">检测到的 OpenCode </span>
+          {detected === null ? <span className="text-text-muted">未安装或不在 PATH 中</span> : <Mono>{detected}</Mono>}
+        </span>
+        <span>
+          <span className="text-text-muted">当前格式 </span>
+          {s.shape === null ? <span className="text-text-muted">无</span> : <Mono>{s.shape}</Mono>}
+        </span>
+      </div>
       {s.unwritableReason !== null && <StatusIndicator tone="warn" icon="!" label={`不会改写：${s.unwritableReason}`} />}
-      <div className="flex flex-wrap items-end gap-2">
-        <label className="flex flex-col gap-1">
-          <span className="text-text-muted">配置格式</span>
-          <select
-            aria-label="OpenCode 版本"
-            value={chosen}
-            onChange={(e) => setVersion(e.target.value as "1" | "2")}
-            className="min-h-[44px] rounded-sm border border-border-strong bg-bg px-3"
-          >
-            <option value="2">OpenCode 2.x</option>
-            <option value="1">OpenCode 1.x</option>
-          </select>
-        </label>
+      <div className="flex flex-wrap items-center gap-2">
+        <select
+          aria-label="OpenCode 版本"
+          value={chosen}
+          onChange={(e) => setVersion(e.target.value as "1" | "2")}
+          className="min-h-[44px] rounded-sm border border-border-strong bg-bg px-3"
+        >
+          <option value="2">OpenCode 2.x 格式</option>
+          <option value="1">OpenCode 1.x 格式</option>
+        </select>
         <Button
           disabled={running}
           onClick={() => void write.run(chosen).then((r) => r !== null && onWritten())}
@@ -91,11 +88,11 @@ export function OpenCodeConfigCard({
                 : null
           }
         />
+        <span className="text-text-muted">
+          只设置内置 <Mono>opencode</Mono> provider 的 <Mono>baseURL</Mono> 与 <Mono>apiKey</Mono>，其他设置保留；
+          含注释的 JSONC 文件<Strong>不会被改动</Strong>。
+        </span>
       </div>
-      <p className="max-w-3xl text-text-muted">
-        只设置内置 <Mono>opencode</Mono> provider 的 <Mono>baseURL</Mono> 与 <Mono>apiKey</Mono>，
-        文件里的其他设置保留；含注释的 JSONC 文件<Strong>不会被改动</Strong>。
-      </p>
     </div>
   );
 }

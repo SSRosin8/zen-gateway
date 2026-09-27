@@ -168,6 +168,7 @@ function stats(): StatsView {
     workers: [{ workerId: "w1", attempts: 9, successes: 7, failures: 2, lastUsedAt: 1, lastStatus: 200 }],
     rates: { cacheHitRate: 0.3, usageCoverage: 0.833, droppedUsageCount: 0 },
     rejections: {},
+    rejectedModels: [],
   };
 }
 
@@ -624,25 +625,29 @@ describe("概览不重复网关页与分组", () => {
     expect(screen.getByRole("link", { name: /网关页/ })).toHaveAttribute("href", "#gateway");
   });
 
-  it("共用出口只列一次，并标记共用", () => {
+  it("回显出口是 Worker 表的一列，共用只标在共用的行上", () => {
     const shared = { egressIp: "198.51.100.1", workerIds: ["w1", "w2"], proxyIds: ["p1", "p2"] };
     const single = { egressIp: "198.51.100.2", workerIds: ["w3"], proxyIds: ["p3"] };
     render(
       <OverviewPage
         data={fakeOverview({
-          workers: [worker({ id: "w1" }), worker({ id: "w2" }), worker({ id: "w3" })],
+          workers: [
+            worker({ id: "w1", egressIp: "198.51.100.1" }),
+            worker({ id: "w2", egressIp: "198.51.100.1" }),
+            worker({ id: "w3", egressIp: "198.51.100.2" }),
+          ],
           pool: { ready: 3, total: 3, health: "healthy" },
           isolation: { groups: [shared, single], sharedGroups: [shared], unknownWorkerIds: [], isolated: false },
         })}
       />,
     );
-    const list = screen.getByRole("list", { name: "回显出口分组" });
-    const items = within(list).getAllByRole("listitem");
-    expect(items).toHaveLength(2);
-    // 分组 IP 在隔离面板里只出现一次（不再有单独的「共用组」列表重复它）。
-    const panel = list.closest("section")!;
-    expect(within(panel).getAllByText("198.51.100.1")).toHaveLength(1);
-    expect(within(items[0]!).getByText("共用")).toBeInTheDocument();
-    expect(within(items[1]!).queryByText("共用")).not.toBeInTheDocument();
+    // 不再有单独的分组列表：每个出口不再额外占一行。
+    expect(screen.queryByRole("list", { name: "回显出口分组" })).not.toBeInTheDocument();
+    const table = screen.getByRole("table");
+    expect(within(table).getByRole("columnheader", { name: "回显出口" })).toBeInTheDocument();
+    const rowOf = (id: string) => within(table).getByText(id).closest("tr")!;
+    expect(within(rowOf("w1")).getByText("共用")).toBeInTheDocument();
+    expect(within(rowOf("w2")).getByText("共用")).toBeInTheDocument();
+    expect(within(rowOf("w3")).queryByText("共用")).not.toBeInTheDocument();
   });
 });

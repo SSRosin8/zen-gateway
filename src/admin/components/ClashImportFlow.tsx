@@ -44,19 +44,18 @@ export function ClashImportFlow({ onImported }: { onImported?: () => void }) {
 
   return (
     <div className="space-y-3" data-clash-import="">
-      <div className="flex flex-wrap items-end gap-2">
-        <label className="flex min-w-[16rem] flex-col gap-1">
-          <span className="text-text-muted">控制面地址（留空自动探测本机常见端口）</span>
-          <input
-            value={manualBase}
-            onChange={(e) => setManualBase(e.target.value)}
-            placeholder="http://127.0.0.1:9097"
-            className="min-h-[44px] rounded-sm border border-border-strong bg-bg px-3"
-          />
-        </label>
+      <div className="flex flex-wrap items-center gap-2">
+        <input
+          aria-label="控制面地址"
+          value={manualBase}
+          onChange={(e) => setManualBase(e.target.value)}
+          placeholder="http://127.0.0.1:9097"
+          className="min-h-[44px] w-72 max-w-full rounded-sm border border-border-strong bg-bg px-3"
+        />
         <SecondaryButton onClick={() => void runDiscover()} disabled={discover.state.status === "running"}>
           {discover.state.status === "running" ? "探测中…" : "探测 Clash"}
         </SecondaryButton>
+        <span className="text-text-muted">地址留空时自动探测本机常见端口</span>
       </div>
 
       <FormStatus message={discover.state.status === "error" ? { tone: "error", text: discover.state.message } : null} />

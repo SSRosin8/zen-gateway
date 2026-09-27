@@ -73,23 +73,27 @@ describe("配色解析", () => {
   }
 });
 
-describe("页头配色选择", () => {
-  it("是带标签的下拉框，切换后写入 data-theme 与 localStorage", async () => {
+describe("侧栏配色按钮", () => {
+  it("一个图标按钮在跟随系统 → 浅色 → 深色之间循环，写入 data-theme 与 localStorage", async () => {
     stubMatchMedia(false);
     vi.stubGlobal("fetch", vi.fn(() => new Promise(() => {})));
     const user = userEvent.setup();
     render(<App />);
 
-    const select = screen.getByRole("combobox", { name: "配色" });
-    expect(select).toHaveValue("system");
+    const button = () => screen.getByRole("button", { name: /^配色：/ });
+    expect(button()).toHaveAccessibleName("配色：跟随系统，点击切换为浅色");
     expect(document.documentElement.dataset.theme).toBe("light");
+    // 不再有写着「配色」的下拉框。
+    expect(screen.queryByRole("combobox", { name: "配色" })).not.toBeInTheDocument();
 
-    await user.selectOptions(select, "dark");
+    await user.click(button());
+    expect(window.localStorage.getItem(THEME_KEY)).toBe("light");
+    await user.click(button());
     expect(document.documentElement.dataset.theme).toBe("dark");
     expect(window.localStorage.getItem(THEME_KEY)).toBe("dark");
 
     // 回到跟随系统时清掉存储，而不是存一个 "system"。
-    await user.selectOptions(select, "system");
+    await user.click(button());
     expect(window.localStorage.getItem(THEME_KEY)).toBeNull();
     expect(document.documentElement.dataset.theme).toBe("light");
   });
@@ -99,7 +103,7 @@ describe("页头配色选择", () => {
     vi.stubGlobal("fetch", vi.fn(() => new Promise(() => {})));
     window.localStorage.setItem(THEME_KEY, "dark");
     render(<App />);
-    expect(screen.getByRole("combobox", { name: "配色" })).toHaveValue("dark");
+    expect(screen.getByRole("button", { name: /^配色：深色/ })).toBeInTheDocument();
     expect(document.documentElement.dataset.theme).toBe("dark");
   });
 });

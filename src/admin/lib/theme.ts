@@ -22,6 +22,14 @@ export const THEME_OPTIONS: ReadonlyArray<{ value: ThemePreference; label: strin
   { value: "dark", label: "深色" },
 ];
 
+/** 主题按钮的循环顺序：跟随系统 → 浅色 → 深色 → 跟随系统。 */
+export function nextPreference(pref: ThemePreference): ThemePreference {
+  return pref === "system" ? "light" : pref === "light" ? "dark" : "system";
+}
+
+/** 侧栏收起状态的存储键；与配色一样是纯显示偏好，不进 URL。 */
+export const SIDEBAR_KEY = "zg-sidebar";
+
 const DARK_QUERY = "(prefers-color-scheme: dark)";
 
 function isPreference(value: unknown): value is ThemePreference {
@@ -51,7 +59,7 @@ export function applyTheme(theme: ResolvedTheme): void {
   document.documentElement.dataset.theme = theme;
 }
 
-/** 页头配色选择器使用的状态。选择「跟随系统」时订阅系统配色变化。 */
+/** 侧栏主题按钮使用的状态。选择「跟随系统」时订阅系统配色变化。 */
 export function useTheme(): {
   preference: ThemePreference;
   setPreference: (pref: ThemePreference) => void;

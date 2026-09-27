@@ -4,7 +4,7 @@ import type { Hono } from "hono";
 import { ConfigSchema, CONFIG_VERSION, type Config } from "../../src/shared/schema.ts";
 import { OverviewSchema, ProbeReportSchema, ProxyListSchema } from "../../src/shared/contract.ts";
 import { allSecretValues } from "../../src/server/admin/project.ts";
-import { KEY_A, KEY_B, get, makeApp, makeConfig, patch } from "./helpers/adminFixture.ts";
+import { KEY_A, KEY_B, get, makeApp, makeConfig, patch, post } from "./helpers/adminFixture.ts";
 
 /*
  * 管理 API 中会写回配置的探测与订阅：实测出口 IP 写回、订阅列表与刷新。
@@ -185,6 +185,36 @@ describe("POST /api/probe 把实测 IP 写回配置", () => {
     expect(view.isolation.unknownWorkerIds).toHaveLength(0);
     expect(view.isolation.isolated).toBe(true);
     expect(view.isolation.groups).toHaveLength(2);
+  }, 20_000);
+
+  it("`proxyIds` 只探指定出口并写回；未知 id 整体 404、不探一半", async () => {
+    const config = makeConfig({
+      workers: [
+        { id: "w1", kind: "authenticated", apiKey: KEY_A, proxyId: "p1" },
+        { id: "w2", kind: "authenticated", apiKey: KEY_B, proxyId: "p2" },
+      ],
+      proxies: ["p1", "p2"].map((id) => ({
+        id, name: id, type: "http" as const, host: "127.0.0.1", port: echoPort,
+        source: "manual" as const, direct: true, bridgeable: false, egressIp: null,
+      })),
+      clash: { enabled: false, bridges: [] },
+    });
+    const { app, getConfig } = makeApp(config, {
+      probeServices: [{ url: `http://127.0.0.1:${echoPort}/`, extract: (t) => t.trim() }],
+    });
+
+    const missing = await post(app, "/api/probe", { proxyIds: ["p2", "nope"] });
+    expect(missing.status).toBe(404);
+    expect(getConfig().proxies.every((p) => p.egressIp === null)).toBe(true);
+
+    const res = await post(app, "/api/probe", { proxyIds: ["p2"] });
+    expect(res.status).toBe(200);
+    expect(ProbeReportSchema.parse(res.body).results.map((r) => r.proxyId)).toEqual(["p2"]);
+    expect(getConfig().proxies.map((p) => p.egressIp !== null)).toEqual([false, true]);
+
+    // 空数组与多余字段按契约拒绝。
+    expect((await post(app, "/api/probe", { proxyIds: [] })).status).toBe(400);
+    expect((await post(app, "/api/probe", { extra: 1 })).status).toBe(400);
   }, 20_000);
 
   it("没有可用 Worker 时拒绝探测", async () => {

@@ -61,6 +61,11 @@ export function importClash(body: { apiBase: string; secret?: string; dryRun: bo
   return request("POST", "/api/clash/import", ClashImportResponseSchema, body);
 }
 
+/** 探测指定出口并写回 IP；批量探测进行中时服务端回 409。 */
+export function probeEgress(proxyIds: readonly string[]): Promise<ProbeReport> {
+  return request("POST", "/api/probe", ProbeReportSchema, { proxyIds });
+}
+
 /** 深度出口测试：与 `/api/probe` 同形；批量探测进行中时服务端回 409。 */
 export function runDeepEgressTest(): Promise<ProbeReport> {
   return request("POST", "/api/diagnostics/deep", ProbeReportSchema);

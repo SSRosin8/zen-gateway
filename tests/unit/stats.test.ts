@@ -209,6 +209,70 @@ describe("用量:缺失如实记为缺失", () => {
   });
 });
 
+describe("带会话的用量每段会话只算一次", () => {
+  /*
+   * OpenCode 每一轮都带着完整上下文，上游报的是整段对话到此为止的用量。
+   * 逐条相加会把同一段上下文重复算很多遍（用户实测看到的偏大）。
+   */
+  it("同一会话多轮只保留最大的那条，请求计数仍逐条累计", () => {
+    stats.recordUsage({ model: "m", workerId: "w1", at: T0, usage: usage({ promptTokens: 1_000, completionTokens: 10 }), sessionHash: "s1" });
+    stats.recordUsage({ model: "m", workerId: "w1", at: T0 + 1, usage: usage({ promptTokens: 3_000, completionTokens: 30, cacheReadTokens: 900 }), sessionHash: "s1" });
+    // 同一会话里晚到的小请求（例如标题生成）不能把整段会话覆盖成它。
+    stats.recordUsage({ model: "m", workerId: "w2", at: T0 + 2, usage: usage({ promptTokens: 50, completionTokens: 5 }), sessionHash: "s1" });
+
+    expect(stats.modelUsage()[0]).toMatchObject({
+      inputTokens: 3_000,
+      outputTokens: 30,
+      cacheReadTokens: 900,
+      requestsWithUsage: 3,
+    });
+    expect(stats.rates().cacheHitRate).toBeCloseTo(0.3, 10);
+  });
+
+  it("不同会话、无会话请求各自累加", () => {
+    stats.recordUsage({ model: "m", workerId: "w1", at: T0, usage: usage(), sessionHash: "s1" });
+    stats.recordUsage({ model: "m", workerId: "w1", at: T0, usage: usage(), sessionHash: "s2" });
+    stats.recordUsage({ model: "m", workerId: "w1", at: T0, usage: usage() });
+    stats.recordUsage({ model: "m", workerId: "w1", at: T0, usage: usage(), sessionHash: null });
+    expect(stats.modelUsage()[0]).toMatchObject({ inputTokens: 400, requestsWithUsage: 4 });
+  });
+
+  it("同一会话换模型时按模型分开", () => {
+    stats.recordUsage({ model: "a", workerId: "w1", at: T0, usage: usage(), sessionHash: "s1" });
+    stats.recordUsage({ model: "b", workerId: "w1", at: T0, usage: usage({ promptTokens: 7 }), sessionHash: "s1" });
+    const byModel = Object.fromEntries(stats.modelUsage().map((r) => [r.model, r.inputTokens]));
+    expect(byModel).toEqual({ a: 100, b: 7 });
+  });
+
+  it("会话里没报用量的请求不清掉已知用量", () => {
+    stats.recordUsage({ model: "m", workerId: "w1", at: T0, usage: usage(), sessionHash: "s1" });
+    stats.recordUsage({ model: "m", workerId: "w1", at: T0 + 1, usage: null, sessionHash: "s1" });
+    expect(stats.modelUsage()[0]).toMatchObject({ inputTokens: 100, requestsWithUsage: 1, requestsWithoutUsage: 1 });
+  });
+
+  it("时间窗按保留那条所在的天计入", () => {
+    const nextDay = T0 + 24 * 3_600_000;
+    stats.recordUsage({ model: "m", workerId: "w1", at: T0, usage: usage(), sessionHash: "s1" });
+    stats.recordUsage({ model: "m", workerId: "w1", at: nextDay, usage: usage({ promptTokens: 500 }), sessionHash: "s1" });
+    expect(stats.modelUsage(dayKey(nextDay))[0]).toMatchObject({ inputTokens: 500 });
+    expect(stats.modelUsage()[0]).toMatchObject({ inputTokens: 500 });
+  });
+});
+
+describe("被拒模型明细", () => {
+  it("按（原因, 模型）合并协议面，按次数降序", () => {
+    stats.recordRejection({ reason: "not_free", protocol: "chat", model: "paid-a", at: T0 });
+    stats.recordRejection({ reason: "not_free", protocol: "responses", model: "paid-a", at: T0 });
+    stats.recordRejection({ reason: "not_free", protocol: "chat", model: "paid-b", at: T0 });
+    stats.recordRejection({ reason: "retired", protocol: "chat", model: "paid-b", at: T0 });
+    expect(stats.rejectedModels()).toEqual([
+      { reason: "not_free", model: "paid-a", count: 2 },
+      { reason: "not_free", model: "paid-b", count: 1 },
+      { reason: "retired", model: "paid-b", count: 1 },
+    ]);
+  });
+});
+
 describe("派生比值:分母为 0 给 null 而不是 0", () => {
   /*
    * 「没有数据」与「命中率是 0%」是两件不同的事：前者在 UI 上该显示 "—"，

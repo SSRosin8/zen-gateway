@@ -330,6 +330,10 @@ function stats(overrides: Partial<StatsView> = {}): StatsView {
     ],
     rates: { cacheHitRate: 0.3, usageCoverage: 0.833, droppedUsageCount: 0 },
     rejections: { not_free: 3, retired: 1 },
+    rejectedModels: [
+      { reason: "not_free", model: "fake-paid-model", count: 3 },
+      { reason: "retired", model: "fake-retired-model", count: 1 },
+    ],
     ...overrides,
   };
 }

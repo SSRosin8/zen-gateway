@@ -20,7 +20,7 @@ import type { VersionProbe } from "../admin/opencode.ts";
 import { createClashRoutes } from "./admin/clash.ts";
 import { createDiagnosticsRoutes } from "./admin/diagnostics.ts";
 import { createOpenCodeRoutes } from "./admin/opencode.ts";
-import { probeUsedEgress } from "./admin/probe.ts";
+import { probeExclusive } from "./admin/probe.ts";
 import { adminError, issuesText, MAX_ADMIN_BODY_BYTES } from "./admin/common.ts";
 import { safeErrorMessage } from "../../shared/redact.ts";
 import { dayKey } from "../../store/db/stats.ts";
@@ -58,6 +58,7 @@ export type AdminStatsSource = {
   workerTotals(): StatsView["workers"];
   rates(sinceDay?: string): StatsView["rates"];
   rejectionsByReason(sinceDay?: string): Record<string, number>;
+  rejectedModels(sinceDay?: string): Array<{ reason: string; model: string; count: number }>;
   requestCounts(sinceDay?: string): { requests: number; attempts: number };
 };
 
@@ -184,6 +185,7 @@ export function createAdminRoutes(deps: AdminDeps): Hono {
       workers: deps.stats.workerTotals(),
       rates: deps.stats.rates(since),
       rejections: deps.stats.rejectionsByReason(since),
+      rejectedModels: deps.stats.rejectedModels(since),
     };
     return c.json(StatsViewSchema.parse(body));
   });
@@ -242,9 +244,10 @@ export function createAdminRoutes(deps: AdminDeps): Hono {
   /**
    * 探测在用的出口并把实测 IP 写回配置：隔离报告按 `config.proxies[].egressIp` 分组，
    * 只探测不写回则隔离永远无法成立。探测走服务自己的 `EgressService`（不变量 #7 的延伸）。
-   * 同步返回，只探在用出口；几十个节点的批测走 `/batch-probe`。
+   * 同步返回，默认探在用出口，可用 `proxyIds` 指定；几十个节点的批测走 `/batch-probe`。
+   * 与批量探测互斥（都要切 selector），进行中回 409。
    */
-  app.post("/probe", async (c) => await probeUsedEgress(c, deps));
+  app.post("/probe", async (c) => await probeExclusive(c, deps));
 
   /**
    * 刷新一个订阅：`fetchSubscription`（多 UA 协商）→ `parseSubscription` → `importSubscriptionNodes`，这里只接线并写盘。

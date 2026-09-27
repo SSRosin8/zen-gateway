@@ -197,6 +197,7 @@ describe("空单元格用词，不用符号", () => {
       workers: [{ workerId: "w1", attempts: 1, successes: 0, failures: 1, lastUsedAt: 1, lastStatus: null }],
       rates: { cacheHitRate: null, usageCoverage: null, droppedUsageCount: 0 },
       rejections: {},
+      rejectedModels: [],
     };
     render(<UsagePage data={data} days="all" onDays={noop} />);
     expect(screen.getByText("无响应")).toBeInTheDocument();

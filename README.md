@@ -62,8 +62,8 @@ opencode run --model opencode/big-pickle "Reply with exactly: OK"
   成功响应的 `response.id` 都参与绑定。
 - 每个 Worker 绑定一个直连代理、Clash 桥接代理或本机直连出口；批量探测按 IP
   回显目标的实测公网 IP 分组（[测量范围](docs/usage.md#回显-ip-的测量范围)）。
-- 管理后台提供概览、网关、代理池、Worker、模型、用量六页，以及批量探测和
-  订阅刷新。
+- 管理后台提供快速开始、概览、网关、代理池、Worker、模型、用量和诊断页，
+  覆盖 CLI 的配置、探测（逐个或批量）、订阅刷新与诊断。
 
 管理 API 只接受本机回环请求，并要求回环 Host；浏览器 Origin 也必须来自回环
 HTTP(S) 地址。凭证只以“是否存在 + 指纹”形式返回。

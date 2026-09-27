@@ -130,14 +130,50 @@ describe("侧栏导航", () => {
     expect(toggle).toHaveAttribute("aria-expanded", "false");
   });
 
-  it("配色选择在侧栏里", () => {
+  it("配色按钮在侧栏里，且没有「配色」文字标签", () => {
     render(
       <Shell current="overview" badge={null} version={null}>
         <p />
       </Shell>,
     );
     const aside = screen.getByRole("navigation", { name: "主导航" }).closest("aside")!;
-    expect(within(aside).getByRole("combobox", { name: "配色" })).toBeInTheDocument();
+    expect(within(aside).getByRole("button", { name: /^配色：/ })).toBeInTheDocument();
+    expect(within(aside).queryByText("配色")).not.toBeInTheDocument();
+  });
+
+  it("侧栏可收起与展开：收起后只剩图标，链接名称不变，偏好刷新后保留", async () => {
+    window.localStorage.clear();
+    const user = userEvent.setup();
+    const { unmount } = render(
+      <Shell current="overview" badge="1/4" version="9.9.9">
+        <p />
+      </Shell>,
+    );
+    const aside = screen.getByRole("navigation", { name: "主导航" }).closest("aside")!;
+    const link = () => within(aside).getByRole("link", { name: "概览" });
+    expect(aside.hasAttribute("data-collapsed")).toBe(false);
+    expect(within(link()).getByText("概览")).toBeInTheDocument();
+
+    await user.click(within(aside).getByRole("button", { name: "收起侧栏" }));
+    expect(aside.hasAttribute("data-collapsed")).toBe(true);
+    // 文字不再渲染，但可访问名称与当前页标记仍在。
+    expect(within(link()).queryByText("概览")).not.toBeInTheDocument();
+    expect(link()).toHaveAttribute("aria-current", "page");
+    expect(link()).toHaveAttribute("title", "概览");
+    // 首启进度退成圆点，仍可被读屏读到。
+    expect(within(aside).getByLabelText("首启进度 1/4")).toBeInTheDocument();
+    unmount();
+
+    render(
+      <Shell current="overview" badge={null} version={null}>
+        <p />
+      </Shell>,
+    );
+    const again = screen.getByRole("navigation", { name: "主导航" }).closest("aside")!;
+    expect(again.hasAttribute("data-collapsed")).toBe(true);
+    await user.click(within(again).getByRole("button", { name: "展开侧栏" }));
+    expect(again.hasAttribute("data-collapsed")).toBe(false);
+    expect(window.localStorage.getItem("zg-sidebar")).toBeNull();
   });
 });
 
