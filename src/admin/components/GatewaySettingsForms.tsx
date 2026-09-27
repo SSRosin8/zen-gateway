@@ -3,6 +3,7 @@ import { RoutingStrategySchema, CooldownConfigSchema, RoutingConfigSchema, Gatew
 import type { ConfigPatch, Overview } from "../../shared/contract.ts";
 import { FormStatus, Panel, PrimaryButton, SecondaryButton, errorMessage, type FormMessage } from "./Panel.tsx";
 import { patchConfig } from "../lib/api.ts";
+import { FIELD } from "../lib/styles.ts";
 
 /**
  * 网关页的两张设置表单：运行参数与调度。
@@ -83,7 +84,7 @@ const STRATEGY_LABEL: Record<(typeof RoutingStrategySchema.options)[number], str
   mixed: "混合",
 };
 
-const INPUT = "min-h-[44px] w-full min-w-[10rem] rounded-sm border border-border-strong bg-bg px-3";
+const INPUT = `${FIELD} w-full min-w-[10rem]`;
 
 function Field({ label, unit, children }: { label: string; unit?: Unit; children: ReactNode }) {
   return (

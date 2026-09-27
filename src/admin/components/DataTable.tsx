@@ -1,5 +1,6 @@
 import { Fragment, type ReactNode } from "react";
 import { Mono, RowMark, SecondaryButton, Skeleton } from "./Panel.tsx";
+import { FIELD } from "../lib/styles.ts";
 
 /**
  * 表格 —— 分页 + 搜索 + 状态筛选，以及不分页的 `SimpleTable`。
@@ -90,7 +91,7 @@ function TableBody<T>({
       <table className="w-full min-w-max border-separate border-spacing-0 text-left">
         {/* 表头吸顶：实色底 + 下边框，不用阴影。 */}
         <thead>
-          <tr className="text-label-13 text-text-muted">
+          <tr className="text-label-12 text-text-muted">
             {columns.map((col, i) => (
               <th
                 key={col.key}
@@ -130,7 +131,7 @@ function TableBody<T>({
                 </tr>
                 {expanded && (
                   <tr data-expanded={key}>
-                    <td colSpan={columns.length} className="border-b border-border-strong bg-bg px-3 py-4">
+                    <td colSpan={columns.length} className="border-b border-border-strong bg-surface-hover px-3 py-4">
                       {renderExpanded(row)}
                     </td>
                   </tr>
@@ -284,9 +285,9 @@ export function TableFilters({
         onChange={(e) => onQ(e.target.value)}
         placeholder={placeholder}
         aria-label="搜索"
-        className="min-h-[44px] min-w-0 flex-1 basis-48 rounded-sm border border-border-strong bg-bg px-3"
+        className={`${FIELD} min-w-0 flex-1 basis-48`}
       />
-      <div className="flex flex-wrap gap-1" role="group" aria-label="状态筛选">
+      <div className={SEGMENTED_TRACK} role="group" aria-label="状态筛选">
         <FilterChip active={status === null} onClick={() => onStatus(null)} label="全部" />
         {statuses.map((s) => (
           <FilterChip
@@ -301,7 +302,19 @@ export function TableFilters({
   );
 }
 
-/** 可切换的筛选片。选中态用 accent 描边 + 加粗 + `aria-pressed`，不只靠颜色。 */
+/**
+ * 分段控件的轨道与分段：筛选片（`aria-pressed`）与页内标签（tablist）共用同一外观。
+ * 选中段是一块实色「滑块」+ 加粗，不只靠颜色；每段本身 44px（独立控件下限）。
+ */
+export const SEGMENTED_TRACK = "inline-flex flex-wrap gap-0.5 rounded-md bg-surface-active p-0.5 dark:bg-bg";
+
+export function segmentClass(active: boolean): string {
+  return `inline-flex min-h-[44px] items-center justify-center rounded-sm px-3 no-underline transition-colors ${
+    active ? "bg-surface font-medium text-text shadow-thumb dark:bg-surface-active" : "text-text-muted hover:bg-surface-hover hover:text-text"
+  }`;
+}
+
+/** 可切换的筛选片（分段控件里的一段）。选中态靠滑块 + 加粗 + `aria-pressed`，不只靠颜色。 */
 export function FilterChip({
   active,
   onClick,
@@ -316,11 +329,7 @@ export function FilterChip({
       type="button"
       onClick={onClick}
       aria-pressed={active}
-      className={`min-h-[44px] rounded-xs border px-3 transition-colors hover:bg-surface-hover active:bg-surface-active ${
-        active
-          ? "border-accent-fg text-accent-fg font-medium"
-          : "border-border-strong text-text-muted hover:text-text"
-      }`}
+      className={segmentClass(active)}
     >
       {label}
     </button>

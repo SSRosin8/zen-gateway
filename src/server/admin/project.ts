@@ -141,7 +141,7 @@ export function poolCounts(views: readonly WorkerView[]): { ready: number; total
  * 既查不到 token 又会与 `gateway.baseUrl` 误报。
  */
 export function allSecretValues(config: Config): string[] {
-  const out: string[] = [config.gateway.relayToken];
+  const out: string[] = [config.gateway.relayToken, config.gateway.lanPasswordHash ?? ""];
   for (const w of config.workers) out.push(w.apiKey);
   for (const b of config.clash.bridges) out.push(b.apiSecret);
   for (const p of config.proxies) {

@@ -1,6 +1,7 @@
 import { useEffect, useId, useRef, useState, type ReactNode } from "react";
 import { Nav } from "./Nav.tsx";
 import { SidebarIcon, THEME_ICON } from "./Icons.tsx";
+import { Truncate } from "./Panel.tsx";
 import type { PageId } from "../lib/router.ts";
 import { SIDEBAR_KEY, THEME_OPTIONS, nextPreference, useTheme } from "../lib/theme.ts";
 
@@ -8,6 +9,8 @@ import { SIDEBAR_KEY, THEME_OPTIONS, nextPreference, useTheme } from "../lib/the
  * 应用外壳：左侧栏 + 流式内容区。
  *
  * ## 同一份侧栏在两种宽度下复用
+ *
+ * 侧栏与窄屏顶栏是导航层，用毛玻璃（`zg-glass` / `zg-glass-thick`）；内容区是实色卡片。
  *
  * md 及以上侧栏常驻（展开 220px / 收起 64px 只剩图标，吸顶满高）；md 以下收成顶栏 +
  * 展开式抽屉。几种形态是**同一个 `<aside>`** 的不同样式，不渲染两份导航：两份会让
@@ -27,12 +30,15 @@ export function Shell({
   current,
   badge,
   version,
+  task = null,
   children,
 }: {
   current: PageId;
   badge: string | null;
   /** 网关版本；首次加载前未知时为 null。 */
   version: string | null;
+  /** 正在后台进行的长任务（如出口探测）；在侧栏底部常驻，离开所在页面也看得到。 */
+  task?: { label: string; href: string } | null;
   children: ReactNode;
 }) {
   const [open, setOpen] = useState(false);
@@ -57,7 +63,8 @@ export function Shell({
   return (
     <div className="min-h-screen md:flex">
       {/* 顶栏只在窄屏出现。 */}
-      <div className="flex items-center justify-between gap-3 border-b border-border-strong bg-surface px-4 py-2 md:hidden">
+      {/* 内容会从它下面滚过，所以用更不透明的厚玻璃（见 tokens.css 与对比度测试）。 */}
+      <div className="zg-glass-thick sticky top-0 z-20 flex items-center justify-between gap-3 border-b border-border-strong px-4 py-2 md:hidden">
         <Wordmark />
         <button
           ref={toggleRef}
@@ -65,7 +72,7 @@ export function Shell({
           aria-expanded={open}
           aria-controls={drawerId}
           onClick={() => setOpen((v) => !v)}
-          className="min-h-[44px] rounded-sm border border-border-strong px-3 transition-colors hover:bg-surface-hover active:bg-surface-active"
+          className="min-h-[44px] rounded-sm border border-border-strong bg-surface px-3 transition-colors hover:bg-surface-hover active:bg-surface-active"
         >
           {open ? "收起菜单" : "菜单"}
         </button>
@@ -82,17 +89,33 @@ export function Shell({
             close(true);
           }
         }}
-        className={`${open ? "flex" : "hidden"} flex-col border-b border-border-strong bg-surface md:sticky md:top-0 md:flex md:h-screen md:shrink-0 md:border-b-0 md:border-r ${
+        /* 侧栏是导航层：毛玻璃，背后只有固定的背景色场。 */
+        className={`zg-glass ${open ? "flex" : "hidden"} flex-col border-b border-border-strong md:sticky md:top-0 md:flex md:h-screen md:shrink-0 md:border-b-0 md:border-r ${
           compact ? "md:w-16" : "md:w-[220px]"
         }`}
       >
         {/* 品牌行与导航项同一套左右内边距，图标列与文字列上下对齐。 */}
+        {/* 品牌行的左内边距 = 导航列表 px-2 + 导航项 px-3，wordmark 与导航图标左对齐。 */}
         <div className={`hidden h-16 items-center md:flex ${compact ? "justify-center" : "px-5"}`}>
           {compact ? <Monogram /> : <Wordmark />}
         </div>
         <div className="py-2 md:flex-1 md:overflow-y-auto">
           <Nav current={current} badge={badge} collapsed={compact} onNavigate={() => close(false)} />
         </div>
+        {task !== null && (
+          <a
+            href={task.href}
+            role="status"
+            title={task.label}
+            aria-label={task.label}
+            className={`mx-2 mb-2 flex min-h-[44px] items-center gap-2 rounded-md bg-surface px-3 text-info no-underline dark:bg-surface-active ${
+              compact ? "justify-center px-0" : ""
+            }`}
+          >
+            <span aria-hidden="true">◴</span>
+            {!compact && <Truncate text={task.label} maxWidth="10rem" />}
+          </a>
+        )}
         <div
           className={`flex gap-1 border-t border-border-strong py-3 ${
             compact ? "flex-col items-center px-2" : "items-center px-3"
@@ -123,7 +146,7 @@ export function Shell({
 
 /** 侧栏底部的图标按钮：44px 正方形命中区。 */
 const iconButton =
-  "inline-flex h-11 w-11 items-center justify-center rounded-sm text-text-muted transition-colors hover:bg-surface-hover hover:text-text active:bg-surface-active";
+  "inline-flex h-11 w-11 items-center justify-center rounded-md text-text-muted transition-colors hover:bg-surface-hover hover:text-text active:bg-surface-active";
 
 function useCollapsed(): [boolean, (next: boolean) => void] {
   const [collapsed, setState] = useState(() => {

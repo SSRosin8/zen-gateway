@@ -16,12 +16,12 @@ import { FallbackView, StaleBanner } from "./components/StatusViews.tsx";
 import { OverviewPage } from "./pages/OverviewPage.tsx";
 import { GatewayPage } from "./pages/GatewayPage.tsx";
 import { ProxyPage } from "./pages/ProxyPage.tsx";
-import { WorkersPage, type WorkerIntent } from "./pages/WorkersPage.tsx";
+import { WorkersPage } from "./pages/WorkersPage.tsx";
 import { ModelsPage } from "./pages/ModelsPage.tsx";
 import { UsagePage } from "./pages/UsagePage.tsx";
 import { StartPage, onboardingProgress } from "./pages/StartPage.tsx";
 import { DiagnosticsPage } from "./pages/DiagnosticsPage.tsx";
-import { useEndpoint, useOverview, type Polled } from "./lib/api.ts";
+import { useEndpoint, useOverview, useProbe, type FetchState, type Polled, type ProbeRun } from "./lib/api.ts";
 import { useViewState } from "./lib/router.ts";
 
 /**
@@ -49,6 +49,12 @@ export function App() {
   const opencode = useEndpoint<OpenCodeView>("/api/opencode", OpenCodeViewSchema, 10_000);
   const { state } = overview;
 
+  /*
+   * 出口探测归 App 所有：离开概览页后循环照常进行，进度与逐行结果不能随页面卸载丢失。
+   * 侧栏显示进行中的任务，点一下回到概览。
+   */
+  const probe = useProbe(overview.refresh);
+
   const progress = state.status === "ready" ? onboardingProgress(state.data, opencode.state) : null;
   useLandOnStart(progress, opencode.state.status === "loading", () => navigate({ page: "start" }));
 
@@ -57,6 +63,7 @@ export function App() {
       current={view.page}
       badge={progress === null || progress.complete ? null : `${progress.done}/${progress.total}`}
       version={state.status === "ready" ? state.data.health.version : null}
+      task={probe.running ? { label: `探测出口 ${probe.done}/${probe.total ?? 0}`, href: "#overview" } : null}
     >
       <StaleBanner stale={overview.stale} />
       {state.status === "ready" ? (
@@ -67,6 +74,7 @@ export function App() {
           navigate={navigate}
           refresh={overview.refresh}
           overviewStale={overview.stale !== null}
+          probe={probe}
         />
       ) : (
         <FallbackView state={state} />
@@ -108,22 +116,15 @@ function Body({
   navigate,
   refresh,
   overviewStale,
+  probe,
 }: ViewProps & {
   data: Overview;
   opencode: Polled<OpenCodeView>;
   refresh: () => void;
+  probe: ProbeRun;
   /** 页头已经显示了断连横幅时，子页面不再重复显示自己的。 */
   overviewStale: boolean;
 }) {
-  /*
-   * 「去 Worker 页并打开新增 / 批量导入」是一次性意图：Worker 页挂载时取走并清空。
-   * 用递增计数的话值一直留着，之后每次点进 Worker 页都会重新打开新增表单。
-   */
-  const [intent, setIntent] = useState<WorkerIntent>(null);
-  const openWorkers = (bulk: boolean) => {
-    setIntent(bulk ? "bulk" : "create");
-    navigate({ page: "workers" });
-  };
   const refreshAll = () => {
     refresh();
     opencode.refresh();
@@ -132,16 +133,10 @@ function Body({
   return (
     <div className="space-y-4">
       {view.page === "start" && (
-        <StartPage
-          data={data}
-          opencode={opencode.state}
-          refresh={refreshAll}
-          onCreateWorker={() => openWorkers(false)}
-          onBulkImport={() => openWorkers(true)}
-        />
+        <StartTab data={data} opencode={opencode.state} refresh={refreshAll} />
       )}
       {view.page === "overview" && (
-        <OverviewPage data={data} page={view.page_} onPage={(next) => navigate({ page_: next })} refresh={refresh} />
+        <OverviewPage data={data} page={view.page_} onPage={(next) => navigate({ page_: next })} probe={probe} />
       )}
       {view.page === "gateway" && <GatewayPage data={data} refresh={refreshAll} opencode={opencode.state} />}
       {view.page === "workers" && (
@@ -150,8 +145,6 @@ function Body({
           view={view}
           navigate={navigate}
           refresh={refresh}
-          intent={intent}
-          onIntentConsumed={() => setIntent(null)}
         />
       )}
       {view.page === "proxy" && (
@@ -175,9 +168,7 @@ function WorkersTab({
   view,
   navigate,
   refresh,
-  intent,
-  onIntentConsumed,
-}: ViewProps & { data: Overview; refresh: () => void; intent: WorkerIntent; onIntentConsumed: () => void }) {
+}: ViewProps & { data: Overview; refresh: () => void }) {
   const proxies = useEndpoint<ProxyList>("/api/proxies", ProxyListSchema, 30_000);
   return (
     <WorkersPage
@@ -189,8 +180,25 @@ function WorkersTab({
         proxies.refresh();
       }}
       proxies={proxies.state}
-      intent={intent}
-      onIntentConsumed={onIntentConsumed}
+    />
+  );
+}
+
+/**
+ * 快速开始就地新建 Worker（单个或从 Clash 节点批量），需要代理列表做出口下拉与候选。
+ * 用户不必跳到 Worker 页再回来，引导的上下文不丢。
+ */
+function StartTab({ data, opencode, refresh }: { data: Overview; opencode: FetchState<OpenCodeView>; refresh: () => void }) {
+  const proxies = useEndpoint<ProxyList>("/api/proxies", ProxyListSchema, 30_000);
+  return (
+    <StartPage
+      data={data}
+      opencode={opencode}
+      proxies={proxies.state}
+      refresh={() => {
+        refresh();
+        proxies.refresh();
+      }}
     />
   );
 }

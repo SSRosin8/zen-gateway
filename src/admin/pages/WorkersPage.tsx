@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useState } from "react";
 import type { ConfigPatch, Overview, ProxyList, WorkerView } from "../../shared/contract.ts";
 import {
   FormStatus,
@@ -33,17 +33,12 @@ import { patchConfig, type FetchState } from "../lib/api.ts";
  * 新增表单在表格上方。删除前用对话框确认：删掉认证 Worker 等于丢掉它的 key，
  * 后台拿不到原值，无法恢复。
  */
-/** 进入 Worker 页时要打开的界面；null 表示正常打开列表。 */
-export type WorkerIntent = "create" | "bulk" | null;
-
 export function WorkersPage({
   data,
   view,
   navigate,
   refresh,
   proxies,
-  intent = null,
-  onIntentConsumed,
 }: {
   data: Overview;
   view: ViewState;
@@ -51,11 +46,8 @@ export function WorkersPage({
   refresh?: () => void;
   /** 出口下拉框的数据源；拿不到时编辑器退回文本输入。 */
   proxies?: FetchState<ProxyList>;
-  /** 从快速开始跳转过来时要打开的界面；取走后调用 `onIntentConsumed` 清空。 */
-  intent?: WorkerIntent;
-  onIntentConsumed?: () => void;
 }) {
-  const [editor, setEditor] = useState<"new" | string | null>(intent === "create" ? "new" : null);
+  const [editor, setEditor] = useState<"new" | string | null>(null);
   const [saving, setSaving] = useState(false);
   /*
    * 结果显示在触发它的操作旁边：编辑器里的保存失败显示在编辑器的保存按钮旁
@@ -66,20 +58,10 @@ export function WorkersPage({
   const setMessage = (message: FormMessage, scope = "list") => setFeedback({ scope, message });
   const [pendingDelete, setPendingDelete] = useState<string | null>(null);
 
-  const [bulkOpen, setBulkOpen] = useState(intent === "bulk");
+  const [bulkOpen, setBulkOpen] = useState(false);
   const existingIds = data.workers.map((w) => w.id);
   const candidateCount = proxies?.status === "ready" ? bulkCandidates(proxies.data.proxies).length : null;
 
-  useEffect(() => {
-    if (intent === null) return;
-    if (intent === "create") {
-      setMessage(null);
-      setEditor("new");
-    } else {
-      setBulkOpen(true);
-    }
-    onIntentConsumed?.();
-  }, [intent, onIntentConsumed]);
 
   const save = async (patch: ConfigPatch, success: string, scope: string) => {
     setSaving(true);

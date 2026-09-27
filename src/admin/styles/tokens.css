@@ -5,10 +5,12 @@
  *   1. 任何前景 token × 任何表面 token 的对比度必须 ≥ 4.5:1。
  *      Anthropic 官方品牌色里有四个在米白底上不及格（success 3.49 / accent 2.96 /
  *      info 2.78 / mid-gray 2.11），下面的值是重算后的替代值，不是品牌原值。
- *   2. 层次只靠「表面色调 + 1px 边框」，禁用 box-shadow。因此 border 必须真的可见：
- *      原 --zg-border 在 --zg-surface 上只有 1.077，故另设 --zg-border-strong。
+ *   2. 内容层（卡片、表格、表单）只靠「表面色调 + 1px 边框」分层；阴影只有
+ *      shadow-float（对话框）与 shadow-thumb（分段控件选中块）两种。
+ *   3. 毛玻璃只用在导航层（侧栏、窄屏顶栏、对话框遮罩），经 index.css 的 .zg-glass-*；
+ *      合成后的对比度按最坏背景由测试计算。系统要求减少透明度或提高对比度时退回实色。
  *
- * 结构性 token（border / border-strong / *-fill）不承载文本，不参与规则 1，
+ * 结构性 token（border / border-strong / *-fill / scrim）不承载文本，不参与规则 1，
  * 在测试里走白名单，但各自有独立断言。
  */
 
@@ -18,18 +20,24 @@
 
 /* ---- 浅色（默认） ---------------------------------------------------- */
 :root {
-  --zg-bg: #faf9f5;
-  --zg-surface: #f0eee6;
-  --zg-surface-accent: #f5e3c7;
-  /* 悬停/按下：在 surface 上仅 1.08 / 1.14，刻意轻；全部前景在其上仍 ≥4.5（最紧是 accent-fg 4.81 / 4.55）。 */
-  --zg-surface-hover: #e9e6dc;
-  --zg-surface-active: #e4e0d4;
+  /* 页面底色与背景色场（body 上的三层径向渐变，毛玻璃后面看得到的就是它们）。 */
+  --zg-bg: #eceef3;
+  --zg-backdrop-1: #e3e8f3;
+  --zg-backdrop-2: #f2e9e1;
+  /* 内容层实色卡片：白卡落在灰蓝底上，靠色差分层。 */
+  --zg-surface: #ffffff;
+  --zg-surface-accent: #fbf0e2;
+  /* 悬停/按下：在 surface 上 1.08 / 1.20，刻意轻；全部前景在其上仍 ≥4.5。 */
+  --zg-surface-hover: #f5f6f8;
+  --zg-surface-active: #e8eaee;
+  /* 毛玻璃材质的底色；实际透明度见 --zg-glass-alpha，合成后的对比度由测试按最坏背景算。 */
+  --zg-glass: #f8f9fb;
 
-  --zg-border: #e8e6dc;
-  --zg-border-strong: #d2cfc2;
+  --zg-border: #e1e3e9;
+  --zg-border-strong: #c6c9d1;
 
-  --zg-text: #141413;
-  --zg-text-muted: #5c5a51;
+  --zg-text: #1d1d1f;
+  --zg-text-muted: #5c5d66;
 
   /* 品牌橙保留，但只作填充；文字/图标/边框形态用 accent-fg。 */
   --zg-accent-fill: #d97757;
@@ -38,39 +46,50 @@
   --zg-on-accent-fill: #141413;
   --zg-accent-fg: #ad3f14;
 
-  --zg-success: #3f6b30;
-  /* 琥珀在浅底上最难达标：品牌感更强的 #8a6a12 在 surface 上只有 4.35、
-     在 surface-accent 上只有 4.02（两个都不及格，且 surface-accent 本身
-     就是暖黄调，与警告色天然接近）。压深到 #75580d 后三个底色分别
-     6.31 / 5.72 / 5.29，同时保持与 accent-fg 26.4°、与 error 40.0° 的色相间距。 */
-  --zg-warn: #75580d;
+  --zg-success: #2e6a29;
+  --zg-warn: #735609;
   --zg-error: #b3261e;
-  --zg-info: #2d5f9a;
+  --zg-info: #1f5da6;
+  /* 对话框遮罩色（按 --zg-scrim-alpha 叠在页面上），不承载文字。 */
+  --zg-scrim: #1d1d1f;
+
+  /* 透明度不是颜色 token：放在 --zg-*-alpha，测试单独读出来算合成色。 */
+  --zg-glass-alpha: 72%;
+  --zg-glass-thick-alpha: 92%;
+  --zg-scrim-alpha: 30%;
 }
 
-/* ---- 深色（同源暖调反转） -------------------------------------------- */
+/* ---- 深色 ------------------------------------------------------------- */
 [data-theme="dark"] {
-  --zg-bg: #141413;
-  --zg-surface: #1f1e1c;
-  --zg-surface-accent: #2a2621;
-  --zg-surface-hover: #2a2926;
-  --zg-surface-active: #312f2b;
+  --zg-bg: #0f1013;
+  --zg-backdrop-1: #141925;
+  --zg-backdrop-2: #1d1712;
+  --zg-surface: #1c1d21;
+  --zg-surface-accent: #2a2520;
+  --zg-surface-hover: #26272c;
+  --zg-surface-active: #303137;
+  --zg-glass: #1c1d21;
 
-  --zg-border: #2e2d2a;
-  --zg-border-strong: #454339;
+  --zg-border: #2b2d33;
+  --zg-border-strong: #474a53;
 
-  --zg-text: #e8e6dc;
-  --zg-text-muted: #a8a69c;
+  --zg-text: #f2f2f5;
+  --zg-text-muted: #a3a4ad;
 
   --zg-accent-fill: #d97757;
   --zg-accent-fill-hover: #e38a6b;
   --zg-on-accent-fill: #141413;
-  --zg-accent-fg: #e8956f;
+  --zg-accent-fg: #f0a07c;
 
-  --zg-success: #9dbd78;
-  --zg-warn: #e0b84a;
-  --zg-error: #e8796b;
-  --zg-info: #8fb8e0;
+  --zg-success: #93c97e;
+  --zg-warn: #e2bb4f;
+  --zg-error: #ff8a7d;
+  --zg-info: #86b8f5;
+  --zg-scrim: #000000;
+
+  --zg-glass-alpha: 72%;
+  --zg-glass-thick-alpha: 90%;
+  --zg-scrim-alpha: 50%;
 }
 
 @theme {
@@ -79,6 +98,10 @@
   --color-surface-accent: var(--zg-surface-accent);
   --color-surface-hover: var(--zg-surface-hover);
   --color-surface-active: var(--zg-surface-active);
+  --color-backdrop-1: var(--zg-backdrop-1);
+  --color-backdrop-2: var(--zg-backdrop-2);
+  --color-glass: var(--zg-glass);
+  --color-scrim: var(--zg-scrim);
 
   --color-border: var(--zg-border);
   --color-border-strong: var(--zg-border-strong);
@@ -99,14 +122,19 @@
   /* Instrument Serif 的 CJK 覆盖为零，而本项目文案只有中文 ——
      标题归 sans，衬线只用在纯拉丁的地方：指标数字与 wordmark。
      中文先取系统字体（macOS PingFang SC、Windows 微软雅黑），自托管的 Noto Sans SC 兜底。 */
-  --font-sans: Inter, "PingFang SC", "Microsoft YaHei", "Noto Sans SC", system-ui, sans-serif;
+  --font-sans: -apple-system, BlinkMacSystemFont, Inter, "PingFang SC", "Microsoft YaHei", "Noto Sans SC", system-ui, sans-serif;
   --font-serif: "Instrument Serif", Georgia, serif;
   --font-mono: "JetBrains Mono", ui-monospace, monospace;
 
-  --radius-xs: 4px;
-  --radius-sm: 6px;
-  --radius-md: 8px;
-  --radius-lg: 12px;
+  --radius-xs: 6px;
+  --radius-sm: 8px;
+  --radius-md: 10px;
+  --radius-lg: 14px;
+  --radius-xl: 20px;
+
+  /* 只有两种阴影：浮层（对话框）与分段控件的选中块。其余层次靠色调与边框（见文件头规则 2）。 */
+  --shadow-float: 0 12px 40px rgb(0 0 0 / 0.16);
+  --shadow-thumb: 0 1px 2px rgb(0 0 0 / 0.12);
 
   /* 字号阶梯：label 用于单行（表格、标签、按钮），copy 用于多行说明（行高 1.7）。
      字重只用 400 / 500 / 600。 */

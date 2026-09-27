@@ -14,6 +14,7 @@ import { StatusIndicator, type StatusTone } from "../components/StatusIndicator.
 import { DataTable, TableFilters, type Column } from "../components/DataTable.tsx";
 import type { ViewState } from "../lib/router.ts";
 import { patchConfig } from "../lib/api.ts";
+import { FIELD, TEXTAREA } from "../lib/styles.ts";
 
 /**
  * 模型页。
@@ -197,14 +198,14 @@ export function ModelsPage({
         >
           <label className="flex flex-col gap-1">
             <span className="text-text-muted">免费模型后缀</span>
-            <input value={freeSuffix} onChange={(e) => setFreeSuffix(e.target.value)} required className="min-h-[44px] rounded-sm border border-border-strong bg-bg px-3" />
+            <input value={freeSuffix} onChange={(e) => setFreeSuffix(e.target.value)} required className={FIELD} />
           </label>
           <label className="flex items-center gap-2 min-h-[44px] self-end">
             <input type="checkbox" checked={enforceCatalog} onChange={(e) => setEnforceCatalog(e.target.checked)} /> 与在架目录求交集
           </label>
           <label className="flex flex-col gap-1 sm:col-span-2">
             <span className="text-text-muted">无后缀免费模型（每行一个）</span>
-            <textarea value={extraFreeIds} onChange={(e) => setExtraFreeIds(e.target.value)} rows={3} className="rounded-sm border border-border-strong bg-bg px-3 py-2 font-mono" />
+            <textarea value={extraFreeIds} onChange={(e) => setExtraFreeIds(e.target.value)} rows={3} className={`${TEXTAREA} font-mono`} />
           </label>
           <div className="flex items-center gap-3 sm:col-span-2">
             <PrimaryButton type="submit" disabled={saving}>{saving ? "保存中…" : "保存"}</PrimaryButton>

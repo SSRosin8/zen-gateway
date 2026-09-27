@@ -44,3 +44,18 @@ export function resolvePort(root?: string): number {
 
   return DEFAULT_PORT;
 }
+
+/**
+ * 管理后台页面的端口：`ZG_ADMIN_PORT` > 5173。`0` 表示不启动后台页面（测试与只要网关的场景）。
+ * `npm run dev` 的 Vite 也用 5173：两者同时运行时后者先占住，网关会报端口被占并继续转发。
+ */
+export const DEFAULT_ADMIN_PORT = 5173;
+
+export function resolveAdminPort(): number {
+  const fromEnv = process.env["ZG_ADMIN_PORT"];
+  if (fromEnv === undefined || fromEnv === "") return DEFAULT_ADMIN_PORT;
+  const parsed = Number(fromEnv);
+  if (parsed === 0) return 0;
+  if (!validPort(parsed)) throw new PortResolveError(`ZG_ADMIN_PORT 不是合法端口:${fromEnv}`);
+  return parsed;
+}

@@ -50,3 +50,10 @@ SKILL.md 只放规则；这里记录数字从哪来，改 token 或密度前先�
 - GitHub Primer 通知与消息（内联反馈优先、不用 toast）：https://primer.style/product/ui-patterns/notification-messaging/
 - Apple HIG 字体与最小点击区域：https://developer.apple.com/design/human-interface-guidelines/typography
 - WCAG 2.2 2.5.8 目标尺寸（最小）：https://www.w3.org/WAI/WCAG22/Understanding/target-size-minimum.html
+
+## 毛玻璃改版（2026-09，Chrome headless 实测）
+
+- 色板改为冷灰蓝底 + 白卡（浅）/ 近黑蓝底 + 深灰卡（深），品牌橙保留。前景 × 表面最低 4.89（浅，accent-fg 在 backdrop-1）/ 5.23（深）。
+- 侧栏玻璃 72%：叠在背景色场上最低 5.46 / 6.87。窄屏顶栏厚玻璃 92%（浅）/ 90%（深）：按「最极端颜色铺满背后」估算最低 4.85 / 4.89；浅色降到 85% 只剩 4.21，测试钉住这一点。
+- 10 个视图 × 浅深 × 1440/390：无横向溢出，每视图主按钮 ≤1，行高 36，侧栏 `backdrop-filter: blur(24px) saturate(1.5)`；模拟 `prefers-reduced-transparency: reduce` 后为 `none` 与实色白底；控制台无错误。
+- 依据：Apple「Adopting Liquid Glass」（玻璃给导航与控件，内容不做成玻璃）、MDN `prefers-reduced-transparency`。

@@ -280,6 +280,11 @@ export const GatewaySchema = z.strictObject({
    * 参与隔离分组。放在 `gateway` 而非伪造一条 `Proxy`，免得 `resolveProxy` 等处开特例。
    */
   directEgressIp: EgressIpSchema.nullable().default(null),
+  /**
+   * 局域网访问管理后台的口令（scrypt 哈希，格式见 `server/admin/lanAccess.ts`）。
+   * null = 未开启：非本机 Host 的管理请求一律 403。只经 `/api/lan/password` 从本机设置。
+   */
+  lanPasswordHash: z.string().max(256).regex(/^scrypt\$[A-Za-z0-9$_-]+$/).nullable().default(null),
 });
 export type Gateway = z.infer<typeof GatewaySchema>;
 

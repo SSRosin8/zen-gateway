@@ -8,6 +8,7 @@ import {
   writeOpenCodeConfig,
   useAction,
 } from "../lib/consoleApi.ts";
+import { FIELD } from "../lib/styles.ts";
 
 /**
  * OpenCode 项目配置的状态 + 写入按钮。快速开始与网关页共用。
@@ -68,7 +69,7 @@ export function OpenCodeConfigCard({
           aria-label="OpenCode 版本"
           value={chosen}
           onChange={(e) => setVersion(e.target.value as "1" | "2")}
-          className="min-h-[44px] rounded-sm border border-border-strong bg-bg px-3"
+          className={FIELD}
         >
           <option value="2">OpenCode 2.x 格式</option>
           <option value="1">OpenCode 1.x 格式</option>

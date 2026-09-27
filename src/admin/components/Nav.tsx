@@ -10,9 +10,9 @@ import { PAGE_ICON } from "./Icons.tsx";
  * 条目是真实的 `<a href="#page">`：中键、新标签页打开、复制链接都能用。
  * 点击只改 hash，由 `useViewState` 的 hashchange 订阅切换页面。
  *
- * 选中态用 **3px 左边框实色 + 文字换 accent-fg**，不用 `accent-fill` 做底：
- * 那个 token 只有 `on-accent-fill` 一个合格前景（5.90），整条导航项铺满它
- * 会让徽标等次要文字不可读。
+ * 选中态是一块实色圆角「胶囊」（surface）+ 加粗 + 图标换 accent-fg，外加 `aria-current`，
+ * 不只靠颜色。不用 `accent-fill` 做底：它只有 `on-accent-fill` 一个合格前景，
+ * 徽标等次要文字压在上面不可读。
  *
  * `badge` 只挂在快速开始上（首启未完成时的进度），完成后不再显示。
  *
@@ -35,7 +35,7 @@ export function Nav({
 }) {
   return (
     <nav aria-label="主导航">
-      <ul className="flex flex-col gap-0.5">
+      <ul className="flex flex-col gap-0.5 px-2">
         {PAGES.map((page) => {
           const active = page === current;
           const showBadge = page === "start" && badge !== undefined && badge !== null;
@@ -44,19 +44,19 @@ export function Nav({
               <a
                 href={toHash({ ...parseHash(""), page })}
                 onClick={onNavigate}
-                /* 触摸目标 ≥44px。左边框常驻（透明），选中时只换色，文字不跳位。 */
-                className={`relative flex min-h-[44px] items-center gap-3 border-l-[3px] no-underline transition-colors hover:bg-surface-hover active:bg-surface-active ${
-                  collapsed ? "justify-center px-0" : "pl-[17px] pr-4"
+                /* 触摸目标 ≥44px。 */
+                className={`group relative flex min-h-[44px] items-center gap-3 rounded-md no-underline transition-colors ${
+                  collapsed ? "justify-center px-0" : "px-3"
                 } ${
                   active
-                    ? "border-l-accent-fg font-medium text-accent-fg"
-                    : "border-l-transparent text-text-muted hover:text-text"
+                    ? "bg-surface font-medium text-text dark:bg-surface-active"
+                    : "text-text-muted hover:bg-surface-hover hover:text-text active:bg-surface-active"
                 }`}
                 /* 屏幕阅读器要知道哪个是当前页 —— 颜色与边框它读不到。 */
                 aria-current={active ? "page" : undefined}
                 {...(collapsed ? { "aria-label": PAGE_LABEL[page], title: PAGE_LABEL[page] } : {})}
               >
-                {PAGE_ICON[page]}
+                <span className={active ? "text-accent-fg" : ""}>{PAGE_ICON[page]}</span>
                 {!collapsed && <span className="flex-1">{PAGE_LABEL[page]}</span>}
                 {showBadge &&
                   (collapsed ? (
@@ -67,7 +67,7 @@ export function Nav({
                     />
                   ) : (
                     <span
-                      className="rounded-xs border border-border-strong bg-bg px-1.5 text-label-12 text-text"
+                      className="rounded-full bg-surface-active px-2 text-label-12 text-text"
                       aria-label={`首启进度 ${badge}`}
                       data-onboarding-badge=""
                     >

@@ -91,6 +91,8 @@ export type AdminDeps = {
   readonly openCode?: { readonly root: string; readonly probeVersion: VersionProbe };
   /** 订阅拉取注入点。生产走 `globalThis.fetch`，刻意不经出口 dispatcher 池。 */
   readonly subscriptionFetch?: FetchDeps;
+  /** 后台页面的实际端口（`resolveAdminPort`）；用于给出局域网访问地址。不传则不列地址。 */
+  readonly adminPort?: number;
   readonly log?: (message: string) => void;
 };
 

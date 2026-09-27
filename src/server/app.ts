@@ -13,6 +13,8 @@ import { isLoopbackGuard, loopbackOnly } from "./middleware/loopbackOnly.ts";
 import { createRelayRoutes, type StatsSink } from "./routes/relay.ts";
 import { createModelsRoutes } from "./routes/models.ts";
 import { createAdminRoutes, type AdminDeps } from "./routes/admin.ts";
+import { createLanRoutes, LAN_PUBLIC_PATHS, sessionCookie } from "./routes/admin/lan.ts";
+import { LanAccess } from "./admin/lanAccess.ts";
 
 const STARTED_AT = Date.now();
 export const VERSION = "0.1.0";
@@ -125,9 +127,29 @@ export function createApp(deps?: AppDeps): Hono {
    * 转发面的规则是「注册表里那些」，只有后者需要从真相推导。
    */
   const admin = new Hono();
-  admin.use("/*", loopbackOnly(deps.addressOf !== undefined ? { addressOf: deps.addressOf } : {}));
-  if (deps.admin !== undefined) {
+  // 局域网访问（口令会话）只有装配了管理面时才可能开启；闸门与登录端点共用同一个 LanAccess。
+  const lanAccess =
+    deps.admin !== undefined
+      ? new LanAccess(() => deps.admin!.configOf().gateway.lanPasswordHash, deps.clock)
+      : undefined;
+  admin.use(
+    "/*",
+    loopbackOnly({
+      ...(deps.addressOf !== undefined ? { addressOf: deps.addressOf } : {}),
+      ...(lanAccess !== undefined
+        ? {
+            lan: {
+              enabled: () => lanAccess.enabled(),
+              allowed: (c) => lanAccess.valid(sessionCookie(c)),
+              isPublic: (path) => LAN_PUBLIC_PATHS.has(path),
+            },
+          }
+        : {}),
+    }),
+  );
+  if (deps.admin !== undefined && lanAccess !== undefined) {
     admin.route("/", createAdminRoutes(deps.admin));
+    admin.route("/", createLanRoutes({ ...deps.admin, lan: lanAccess }));
   } else {
     admin.get("/ping", (c) => c.json({ ok: true }));
   }

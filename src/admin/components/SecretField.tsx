@@ -1,6 +1,7 @@
 import { useId, useState } from "react";
 import type { SecretPatch, SecretPresence } from "../../shared/contract.ts";
 import { Mono } from "./Panel.tsx";
+import { FIELD } from "../lib/styles.ts";
 
 /**
  * 已保存凭证的三态编辑：留空不改 / 设置新值 / 清空。
@@ -49,7 +50,7 @@ export function SecretField({
           field.setMode(e.target.value as SecretMode);
           if (e.target.value !== "set") field.setValue("");
         }}
-        className="min-h-[44px] rounded-sm border border-border-strong bg-bg px-3"
+        className={FIELD}
       >
         <option value="keep">留空不改</option>
         <option value="set">设置新值</option>
@@ -62,7 +63,7 @@ export function SecretField({
           aria-label={`新的${label}`}
           value={field.value}
           onChange={(e) => field.setValue(e.target.value)}
-          className="min-h-[44px] rounded-sm border border-border-strong bg-bg px-3"
+          className={FIELD}
         />
       )}
       <span id={hintId} className="text-label-13 text-text-muted">

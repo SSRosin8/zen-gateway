@@ -2,7 +2,7 @@ import { serve } from "@hono/node-server";
 import { buildHealth, createApp } from "./app.ts";
 import { loadConfig, saveConfig } from "../store/config.ts";
 import type { Config } from "../shared/schema.ts";
-import { resolvePort } from "../store/port.ts";
+import { resolveAdminPort, resolvePort } from "../store/port.ts";
 import { EgressService } from "../core/proxy/egress.ts";
 import { ModelCatalog, catalogIdentityOf } from "../core/models/catalog.ts";
 import { ConfigError } from "../store/config.ts";
@@ -18,6 +18,9 @@ import { ClashController } from "../core/proxy/clash/controller.ts";
 import { ensureCatalog } from "./routes/models.ts";
 import { probeOpenCodeVersion, writeOpenCodeConfig } from "./admin/opencode.ts";
 import { projectRoot } from "../store/paths.ts";
+import { createAdminSite, type AdminSite } from "./adminSite.ts";
+import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
 
 /**
  * 服务入口。先加载配置、后监听端口：否则坏配置会先占端口再崩，
@@ -131,6 +134,8 @@ async function main(): Promise<void> {
    * `saveConfig` 返回 `ConfigSchema.parse` 的新对象。
    */
   let configWrite: Promise<void> = Promise.resolve();
+  // 在 app 装配之后才建；`applyConfig` 先于它声明，所以这里留一个可空引用。
+  let adminSite: AdminSite | undefined;
   const applyConfig = async (next: Config, expected?: Config): Promise<void> => {
     const run = configWrite.then(async () => {
       if (expected !== undefined && config !== expected) {
@@ -141,6 +146,8 @@ async function main(): Promise<void> {
         next.gateway.headersTimeoutMs !== config.gateway.headersTimeoutMs ||
         next.gateway.bodyTimeoutMs !== config.gateway.bodyTimeoutMs;
       config = next;
+      // 局域网口令开关决定后台页面监听回环还是 0.0.0.0。
+      void adminSite?.sync(config.gateway.lanPasswordHash !== null);
       /*
        * 出口缓存失效：Controller 客户端与 dispatcher 按旧 apiBase/apiSecret/超时缓存，必须重建。
        * 失败只记日志，配置已写盘生效。
@@ -161,8 +168,10 @@ async function main(): Promise<void> {
 
   // 在装配管理 API 之前解析有效端口（含 ZG_PORT 覆盖），让 Overview 与实际监听一致。
   let port: number;
+  let adminPort: number;
   try {
     port = resolvePort();
+    adminPort = resolveAdminPort();
   } catch (err) {
     console.error(err instanceof Error ? err.message : String(err));
     process.exitCode = 1;
@@ -219,6 +228,7 @@ async function main(): Promise<void> {
       ensureCatalog: async () =>
         (await ensureCatalog(config, catalog, (cfg) => egress.upstreamDeps(cfg))).snapshot,
       openCode: { root: openCodeRoot, probeVersion: probeOpenCodeVersion },
+      ...(adminPort !== 0 ? { adminPort } : {}),
       // `/health` 的体从同一处构造（纪律 #4）。
       health: () => buildHealth(storeWriteFailures()),
       ...(stats !== undefined ? { stats } : {}),
@@ -235,6 +245,16 @@ async function main(): Promise<void> {
   // 端口被占时给一句能自查的话，而不是 EADDRINUSE 的整段栈。
   const server = serve({ fetch: app.fetch, port, hostname }, (info) => {
     console.log(`zen-gateway 已启动 → http://${hostname}:${info.port}`);
+    // 管理后台页面随网关一起启动（见 adminSite.ts）；`ZG_ADMIN_PORT=0` 关闭（测试用）。
+    if (adminPort !== 0) {
+      adminSite = createAdminSite({
+        root: join(dirname(fileURLToPath(import.meta.url)), "..", "..", "admin"),
+        port: adminPort,
+        gatewayFetch: app.fetch,
+        log: (message) => console.log(message),
+      });
+      void adminSite.sync(config.gateway.lanPasswordHash !== null);
+    }
     if (created) {
       console.log("已生成默认配置与 Relay Token;运行 npm run status 查看。");
       // 首启顺带生成项目级 opencode.json；已有文件绝不覆盖。日志不含 token。
@@ -279,7 +299,7 @@ async function main(): Promise<void> {
     stopping ??= (async () => {
       // 先等 HTTP 服务排空再关出口:undici 的池一旦开始 close 就无法再被 destroy,
       // 超时路径需要当前池仍可强断。
-      const drained = new Promise<void>((resolve) => server.close(() => resolve()))
+      const drained = Promise.all([new Promise<void>((resolve) => server.close(() => resolve())), adminSite?.close()])
         .then(() => egress.close())
         .then(() => true);
       let timer: NodeJS.Timeout | undefined;

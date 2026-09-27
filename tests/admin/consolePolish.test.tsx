@@ -3,6 +3,8 @@ import { render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { App } from "../../src/admin/App.tsx";
 import { OverviewPage, probeTargets } from "../../src/admin/pages/OverviewPage.tsx";
+import { useProbe } from "../../src/admin/lib/api.ts";
+import type { Overview } from "../../src/shared/contract.ts";
 import { ProxyPage } from "../../src/admin/pages/ProxyPage.tsx";
 import { UsagePage } from "../../src/admin/pages/UsagePage.tsx";
 import { parseHash } from "../../src/admin/lib/router.ts";
@@ -58,6 +60,12 @@ function withWorkers(workers: WorkerView[]) {
 
 type Pending = { body: string; resolve: (value: unknown) => void };
 
+/** 与 App 一样由外层持有探测状态，并在每探完一个时回调。 */
+function ProbeHarness({ data, onProgress }: { data: Overview; onProgress: () => void }) {
+  const probe = useProbe(onProgress);
+  return <OverviewPage data={data} probe={probe} />;
+}
+
 /** `/api/probe` 的请求挂起直到测试放行，用来观察「探到第几个」。 */
 function stubProbe() {
   const pending: Pending[] = [];
@@ -94,7 +102,7 @@ describe("概览：出口探测逐个进行", () => {
     const user = userEvent.setup();
     const probe = stubProbe();
     const refresh = vi.fn();
-    render(<OverviewPage data={withWorkers([worker("a"), worker("b")])} refresh={refresh} />);
+    render(<ProbeHarness data={withWorkers([worker("a"), worker("b")])} onProgress={refresh} />);
 
     await user.click(screen.getByRole("button", { name: "探测出口" }));
     await waitFor(() => expect(probe.pending).toHaveLength(1));
@@ -200,13 +208,8 @@ describe("代理池：单个节点探测", () => {
 });
 
 describe("Worker 页：新增表单只在明确要求时打开", () => {
-  it("从快速开始进入会打开一次，之后切走再回来不再打开", async () => {
-    const user = userEvent.setup();
-    const overview = fakeOverview({
-      catalog: { slots: [], freeCount: 3 },
-      workers: [],
-      pool: { ready: 0, total: 0, health: "empty" },
-    });
+  it("进入 Worker 页不会自动打开新增表单", async () => {
+    const overview = fakeOverview({ workers: [], pool: { ready: 0, total: 0, health: "empty" } });
     vi.stubGlobal(
       "fetch",
       vi.fn((path: string) => {
@@ -214,15 +217,48 @@ describe("Worker 页：新增表单只在明确要求时打开", () => {
         return new Promise(() => {});
       }),
     );
-    window.location.hash = "#start";
+    window.location.hash = "#workers";
     render(<App />);
-    await user.click(await screen.findByRole("button", { name: "新增 Worker" }));
-    expect(await screen.findByRole("form", { name: "新增 Worker" })).toBeInTheDocument();
-
-    await user.click(screen.getByRole("link", { name: "概览" }));
-    await user.click(screen.getByRole("link", { name: "Worker" }));
     await screen.findByRole("button", { name: "新增 Worker" });
     expect(screen.queryByRole("form", { name: "新增 Worker" })).not.toBeInTheDocument();
+  });
+});
+
+describe("出口探测归 App：离开概览不中断，侧栏显示进度", () => {
+  it("切到别的页面后探测继续，侧栏有任务指示；回到概览仍能看到本轮结果", async () => {
+    const user = userEvent.setup();
+    const pending: Pending[] = [];
+    const overview = withWorkers([worker("a"), worker("b")]);
+    vi.stubGlobal(
+      "fetch",
+      vi.fn((path: string, init?: RequestInit) => {
+        if (path === "/api/overview") return Promise.resolve({ ok: true, status: 200, json: () => Promise.resolve(overview) });
+        if (path === "/api/probe") return new Promise((resolve) => pending.push({ body: String(init?.body), resolve }));
+        return new Promise(() => {});
+      }),
+    );
+    window.location.hash = "#overview";
+    render(<App />);
+    await user.click(await screen.findByRole("button", { name: "探测出口" }));
+    await waitFor(() => expect(pending).toHaveLength(1));
+
+    await user.click(screen.getByRole("link", { name: "模型" }));
+    const task = await screen.findByRole("status", { name: "探测出口 0/2" });
+    expect(task).toHaveAttribute("href", "#overview");
+
+    const answer = (id: string) =>
+      pending.shift()!.resolve({
+        ok: true,
+        status: 200,
+        json: () => Promise.resolve({ ok: true, changed: true, results: [{ proxyId: id, ok: false, failureKind: "timeout", reason: "回显服务超时" }] }),
+      });
+    answer("p-a");
+    await waitFor(() => expect(pending).toHaveLength(1));
+    answer("p-b");
+    await waitFor(() => expect(screen.queryByRole("status", { name: /探测出口/ })).not.toBeInTheDocument());
+
+    await user.click(screen.getByRole("link", { name: "概览" }));
+    expect(await screen.findByText(/本轮探测了 2\/2 个出口/)).toBeInTheDocument();
   });
 });
 

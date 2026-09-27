@@ -7,6 +7,7 @@ import { SimpleTable, type Column } from "./DataTable.tsx";
 import { SecretField, useSecretField } from "./SecretField.tsx";
 import { ClashImportFlow } from "./ClashImportFlow.tsx";
 import { patchConfig } from "../lib/api.ts";
+import { FIELD } from "../lib/styles.ts";
 
 /**
  * 代理池页的 Clash 内核管理：总开关、选择模式、内核增删改，以及探测导入。
@@ -17,7 +18,7 @@ import { patchConfig } from "../lib/api.ts";
 type Clash = ProxyList["clash"];
 type Bridge = Clash["bridges"][number];
 
-const INPUT = "min-h-[44px] w-full rounded-sm border border-border-strong bg-bg px-3";
+const INPUT = `${FIELD} w-full`;
 
 export function ClashSection({ clash, refresh }: { clash: Clash; refresh: () => void }) {
   const [editing, setEditing] = useState<string | "new" | null>(null);
@@ -112,7 +113,7 @@ export function ClashSection({ clash, refresh }: { clash: Clash; refresh: () => 
               value={clash.selectionMode}
               disabled={busy}
               onChange={(e) => void save({ clash: { selectionMode: e.target.value as Clash["selectionMode"] } }, "已保存")}
-              className="min-h-[44px] rounded-sm border border-border-strong bg-bg px-3"
+              className={FIELD}
             >
               <option value="auto">自动（按优先级选健康内核）</option>
               <option value="manual">手动</option>
@@ -124,7 +125,7 @@ export function ClashSection({ clash, refresh }: { clash: Clash; refresh: () => 
               value={clash.activeBridgeId ?? ""}
               disabled={busy}
               onChange={(e) => void save({ clash: { activeBridgeId: e.target.value === "" ? null : e.target.value } }, "已保存")}
-              className="min-h-[44px] rounded-sm border border-border-strong bg-bg px-3"
+              className={FIELD}
             >
               <option value="">未指定</option>
               {clash.bridges.map((b) => (

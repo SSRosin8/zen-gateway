@@ -1,6 +1,9 @@
 import { useState, type ReactNode } from "react";
-import type { OpenCodeView, Overview } from "../../shared/contract.ts";
-import { Mono, SecondaryButton, Strong } from "../components/Panel.tsx";
+import type { OpenCodeView, Overview, ProxyList } from "../../shared/contract.ts";
+import { FormStatus, Mono, SecondaryButton, Strong, errorMessage, type FormMessage } from "../components/Panel.tsx";
+import { WorkerEditor } from "../components/WorkerEditor.tsx";
+import { BulkImportDialog } from "../components/BulkImportDialog.tsx";
+import { patchConfig } from "../lib/api.ts";
 import { StatusIndicator } from "../components/StatusIndicator.tsx";
 import { ClashImportFlow } from "../components/ClashImportFlow.tsx";
 import { OpenCodeConfigCard } from "../components/OpenCodeConfigCard.tsx";
@@ -55,17 +58,22 @@ export function StartPage({
   data,
   opencode,
   refresh,
-  onCreateWorker,
-  onBulkImport,
+  proxies,
 }: {
   data: Overview;
   opencode: FetchState<OpenCodeView>;
   refresh: () => void;
-  onCreateWorker: () => void;
-  onBulkImport: () => void;
+  /** 出口下拉与批量导入的数据源；新增 Worker 就在本页完成，不跳走。 */
+  proxies?: FetchState<ProxyList>;
 }) {
   const progress = onboardingProgress(data, opencode);
   const { steps } = progress;
+  const [creating, setCreating] = useState(false);
+  const [bulkOpen, setBulkOpen] = useState(false);
+  const [saving, setSaving] = useState(false);
+  const [message, setMessage] = useState<FormMessage>(null);
+  const [created, setCreated] = useState<FormMessage>(null);
+  const existingIds = data.workers.map((w) => w.id);
 
   return (
     <div className="space-y-4">
@@ -108,7 +116,7 @@ export function StartPage({
               ? `已有 ${data.proxies.total} 个出口代理。再次导入会更新已有节点，不会重复。`
               : "不配代理时 Worker 走本机直连。要让不同 Worker 使用不同出口，从本机 Clash 导入节点。"}
           </p>
-          <ClashImportFlow onImported={refresh} />
+          <ClashImportFlow onImported={refresh} onCreateWorkers={() => setBulkOpen(true)} />
         </Step>
 
         <Step n={3} id="workers" done={steps.workers} title="创建 Worker">
@@ -121,12 +129,58 @@ export function StartPage({
                   : "匿名 Worker 不需要 key；认证 Worker 填你自己的 Zen API key。保存后立即生效。"}
             </p>
             <span className="flex flex-wrap gap-2">
-              <SecondaryButton onClick={onCreateWorker}>新增 Worker</SecondaryButton>
+              <SecondaryButton
+                onClick={() => {
+                  setMessage(null);
+                  setCreated(null);
+                  setCreating((v) => !v);
+                }}
+              >
+                {creating ? "收起" : "新增 Worker"}
+              </SecondaryButton>
               {data.proxies.total > 0 && (
-                <SecondaryButton onClick={onBulkImport}>从 Clash 节点导入匿名 Worker</SecondaryButton>
+                <SecondaryButton onClick={() => setBulkOpen(true)}>从 Clash 节点导入匿名 Worker</SecondaryButton>
               )}
             </span>
+            <FormStatus message={created} />
           </div>
+          {creating && (
+            <div className="mt-3 border-t border-border pt-3">
+              <WorkerEditor
+                mode="create"
+                existingIds={existingIds}
+                saving={saving}
+                proxies={proxies}
+                message={message}
+                onCancel={() => setCreating(false)}
+                onSave={async (patch) => {
+                  setSaving(true);
+                  setMessage(null);
+                  try {
+                    await patchConfig(patch);
+                    setCreating(false);
+                    setCreated({ tone: "success", text: "已新增，立即生效" });
+                    refresh();
+                  } catch (err) {
+                    setMessage(errorMessage(err));
+                  } finally {
+                    setSaving(false);
+                  }
+                }}
+              />
+            </div>
+          )}
+          <BulkImportDialog
+            open={bulkOpen}
+            proxies={proxies}
+            existingIds={existingIds}
+            onClose={() => setBulkOpen(false)}
+            onDone={(n) => {
+              setBulkOpen(false);
+              setCreated({ tone: "success", text: `已从 Clash 节点新建 ${n} 个匿名 Worker` });
+              refresh();
+            }}
+          />
         </Step>
 
         <Step n={4} id="opencode" done={steps.opencode} title="OpenCode 项目配置">

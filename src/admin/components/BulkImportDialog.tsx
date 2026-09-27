@@ -4,16 +4,33 @@ import { FormStatus, Mono, PrimaryButton, SecondaryButton, Truncate, errorMessag
 import { StatusIndicator } from "./StatusIndicator.tsx";
 import { patchConfig, type FetchState } from "../lib/api.ts";
 import { WORKER_CREATE_MAX, bulkAnonymousWorkers } from "../lib/workerIds.ts";
+import { FIELD } from "../lib/styles.ts";
 
 /**
  * 从 Clash 节点批量创建匿名 Worker。
  *
  * 候选：来自 Clash（`controller` 来源或挂在某个内核上）、已启用、还没被任何
- * Worker 引用的节点。默认全选，可搜索、全选 / 全不选；一次 PATCH 提交整批，
- * 失败时整批不生效，不会留下半批。
+ * Worker 引用的节点。默认全选，可搜索、全选 / 全不选；回显 IP 与别的节点重复的标出来，
+ * 一键去掉（共用出口的 Worker 没有隔离意义）。一次 PATCH 提交整批，失败时整批不生效。
  */
 export function bulkCandidates(proxies: readonly ProxyView[]): ProxyView[] {
   return proxies.filter((p) => p.enabled && p.usedBy.length === 0 && (p.source === "controller" || p.bridgeId !== null));
+}
+
+/**
+ * 出口重复的候选：回显 IP 与已被 Worker 使用的节点相同，或与排在前面的另一个候选相同。
+ * 建出来的 Worker 会共用出口，隔离没有意义。每个 IP 保留第一个未被占用的候选。
+ * 未探测（`egressIp` 为 null）的不算重复：还不知道。
+ */
+export function duplicateEgress(proxies: readonly ProxyView[], candidates: readonly ProxyView[]): ReadonlySet<string> {
+  const taken = new Set(proxies.filter((p) => p.usedBy.length > 0 && p.egressIp !== null).map((p) => p.egressIp!));
+  const out = new Set<string>();
+  for (const p of candidates) {
+    if (p.egressIp === null) continue;
+    if (taken.has(p.egressIp)) out.add(p.id);
+    else taken.add(p.egressIp);
+  }
+  return out;
 }
 
 export function BulkImportDialog({
@@ -53,7 +70,7 @@ export function BulkImportDialog({
         event.preventDefault();
         onClose();
       }}
-      className="m-auto w-[min(48rem,calc(100vw-2rem))] rounded-lg border border-border-strong bg-surface p-0 text-text backdrop:bg-[#141413]/60"
+      className="m-auto w-[min(48rem,calc(100vw-2rem))] zg-scrim rounded-xl border border-border-strong bg-surface p-0 text-text shadow-float"
     >
       {open && (
         <div className="px-5 py-4">
@@ -63,6 +80,7 @@ export function BulkImportDialog({
           {proxies?.status === "ready" ? (
             <BulkBody
               candidates={bulkCandidates(proxies.data.proxies)}
+              all={proxies.data.proxies}
               existingIds={existingIds}
               searchRef={searchRef}
               onClose={onClose}
@@ -94,12 +112,14 @@ export function BulkImportDialog({
 
 function BulkBody({
   candidates,
+  all,
   existingIds,
   searchRef,
   onClose,
   onDone,
 }: {
   candidates: ProxyView[];
+  all: readonly ProxyView[];
   existingIds: readonly string[];
   searchRef: React.RefObject<HTMLInputElement | null>;
   onClose: () => void;
@@ -110,6 +130,7 @@ function BulkBody({
   const [saving, setSaving] = useState(false);
   const [message, setMessage] = useState<FormMessage>(null);
 
+  const duplicates = useMemo(() => duplicateEgress(all, candidates), [all, candidates]);
   const needle = q.trim().toLowerCase();
   const visible = useMemo(
     () =>
@@ -173,11 +194,14 @@ function BulkBody({
             value={q}
             onChange={(e) => setQ(e.target.value)}
             placeholder="按名称或地区筛选…"
-            className="min-h-[44px] rounded-sm border border-border-strong bg-bg px-3"
+            className={FIELD}
           />
         </label>
         <SecondaryButton onClick={() => setMany(visible.map((p) => p.id), true)}>全选</SecondaryButton>
         <SecondaryButton onClick={() => setMany(visible.map((p) => p.id), false)}>全不选</SecondaryButton>
+        {duplicates.size > 0 && (
+          <SecondaryButton onClick={() => setMany([...duplicates], false)}>去掉出口重复的（{duplicates.size}）</SecondaryButton>
+        )}
       </div>
       <p aria-live="polite">
         已选 <Mono>{chosen.length}</Mono> / {candidates.length} 个节点
@@ -185,16 +209,16 @@ function BulkBody({
       </p>
       <ul className="max-h-[50vh] space-y-0.5 overflow-y-auto rounded-md border border-border-strong bg-bg p-2" aria-label="候选节点">
         {visible.map((p) => (
-          <li key={p.id}>
-            <label className="flex min-h-[36px] items-center gap-2 rounded-xs px-2 hover:bg-surface-hover">
+          /* 出口信息放在 label 外：复选框的可访问名称只是节点名。 */
+          <li key={p.id} className="flex min-h-[36px] items-center gap-2 rounded-xs px-2 hover:bg-surface-hover">
+            <label className="flex min-w-0 flex-1 items-center gap-2">
               <input type="checkbox" checked={selected.has(p.id)} onChange={(e) => setMany([p.id], e.target.checked)} />
               <Truncate text={p.clashNodeName ?? p.name} maxWidth="28rem" />
-              {p.egressIp !== null && (
-                <span className="ml-auto text-label-13 text-text-muted">
-                  <Mono>{p.egressIp}</Mono>
-                </span>
-              )}
             </label>
+            <span className="inline-flex shrink-0 items-center gap-2 text-label-13 text-text-muted">
+              {duplicates.has(p.id) && <StatusIndicator tone="warn" icon="!" label="出口重复" />}
+              {p.egressIp === null ? "未探测" : <Mono>{p.egressIp}</Mono>}
+            </span>
           </li>
         ))}
         {visible.length === 0 && <li className="px-2 py-2 text-text-muted">没有匹配的节点。</li>}

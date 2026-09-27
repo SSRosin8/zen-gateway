@@ -6,10 +6,11 @@ import { ConfirmDialog } from "./ConfirmDialog.tsx";
 import { SecretField, useSecretField } from "./SecretField.tsx";
 import { patchConfig, useSubscriptionRefresh } from "../lib/api.ts";
 import { formatLocalTime } from "../lib/format.ts";
+import { FIELD } from "../lib/styles.ts";
 
 type Subscription = ProxyList["subscriptions"][number];
 
-const INPUT = "min-h-[44px] w-full rounded-sm border border-border-strong bg-bg px-3";
+const INPUT = `${FIELD} w-full`;
 
 /**
  * 订阅标签：列表、刷新、增删改。

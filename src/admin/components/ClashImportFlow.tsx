@@ -7,6 +7,7 @@ import {
   importClash,
   useAction,
 } from "../lib/consoleApi.ts";
+import { FIELD } from "../lib/styles.ts";
 
 /**
  * Clash 探测与导入 —— 快速开始与代理池页共用同一个组件。
@@ -17,7 +18,14 @@ import {
  *
  * 按钮都用描边：这个组件嵌在别的视图里，主操作归所在页面。
  */
-export function ClashImportFlow({ onImported }: { onImported?: () => void }) {
+export function ClashImportFlow({
+  onImported,
+  onCreateWorkers,
+}: {
+  onImported?: () => void;
+  /** 导入成功后「从这些节点创建 Worker」的去处；不传则只提示去 Worker 页。 */
+  onCreateWorkers?: () => void;
+}) {
   const discover = useAction(discoverClash);
   const preview = useAction(importClash);
   const apply = useAction(importClash);
@@ -50,7 +58,7 @@ export function ClashImportFlow({ onImported }: { onImported?: () => void }) {
           value={manualBase}
           onChange={(e) => setManualBase(e.target.value)}
           placeholder="http://127.0.0.1:9097"
-          className="min-h-[44px] w-72 max-w-full rounded-sm border border-border-strong bg-bg px-3"
+          className={`${FIELD} w-72 max-w-full`}
         />
         <SecondaryButton onClick={() => void runDiscover()} disabled={discover.state.status === "running"}>
           {discover.state.status === "running" ? "探测中…" : "探测 Clash"}
@@ -112,7 +120,7 @@ export function ClashImportFlow({ onImported }: { onImported?: () => void }) {
           <ImportSummary result={preview.state.data} />
         )}
         {apply.state.status === "error" && <FormStatus message={{ tone: "error", text: apply.state.message }} />}
-        {apply.state.status === "done" && <ImportSummary result={apply.state.data} />}
+        {apply.state.status === "done" && <ImportSummary result={apply.state.data} onCreateWorkers={onCreateWorkers} />}
       </div>
     </div>
   );
@@ -166,7 +174,7 @@ function ControllerRow({
             autoComplete="off"
             value={secret}
             onChange={(e) => onSecret(e.target.value)}
-            className="min-h-[44px] max-w-sm rounded-sm border border-border-strong bg-bg px-3"
+            className={`${FIELD} max-w-sm`}
           />
         </label>
       )}
@@ -174,7 +182,13 @@ function ControllerRow({
   );
 }
 
-function ImportSummary({ result }: { result: ClashImportResponse }) {
+function ImportSummary({
+  result,
+  onCreateWorkers,
+}: {
+  result: ClashImportResponse;
+  onCreateWorkers?: (() => void) | undefined;
+}) {
   const s = result.summary;
   return (
     <div data-import-summary={result.dryRun ? "preview" : "applied"}>
@@ -198,9 +212,16 @@ function ImportSummary({ result }: { result: ClashImportResponse }) {
         </ul>
       )}
       {!result.dryRun && (
-        <p className="mt-1 text-text-muted">
-          导入只写出口与内核，<Strong>不创建 Worker</Strong>；到 Worker 页从节点批量创建。
-        </p>
+        <div className="mt-2 flex flex-wrap items-center gap-x-3 gap-y-2">
+          <span className="text-text-muted">
+            导入只写出口与内核，<Strong>不创建 Worker</Strong>。
+          </span>
+          {onCreateWorkers !== undefined ? (
+            <SecondaryButton onClick={onCreateWorkers}>从这些节点创建匿名 Worker</SecondaryButton>
+          ) : (
+            <span className="text-text-muted">到 Worker 页从节点批量创建。</span>
+          )}
+        </div>
       )}
     </div>
   );
