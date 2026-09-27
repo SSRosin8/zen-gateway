@@ -166,7 +166,8 @@ describe("内存淘汰要镜像到库 —— 否则被淘汰的条目重启后�
     expect(hashes.has(h("s0"))).toBe(false);
     expect(hashes.has(h(`s${CAP}`))).toBe(true);
     expect(hashes.size).toBe(CAP);
-  });
+    // 一万次真实落库：本机约 0.1s，CI 的慢磁盘实测 5.3s，默认 5s 超时不够。
+  }, 30_000);
 
   it("被淘汰的**指纹**也不在库里(真的灌满 BLOB_CAP)", () => {
     /*
@@ -190,7 +191,7 @@ describe("内存淘汰要镜像到库 —— 否则被淘汰的条目重启后�
     expect(hashes.has(h("b0"))).toBe(false);
     expect(hashes.has(h(`b${CAP}`))).toBe(true);
     expect(hashes.size).toBe(CAP);
-  });
+  }, 30_000);
 
   it("prune 清掉的会话不在库里", () => {
     const map = new AffinityMap(store);
