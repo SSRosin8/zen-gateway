@@ -1,6 +1,8 @@
 import { describe, expect, it } from "vitest";
 import { render, screen, within } from "@testing-library/react";
-import { OverviewPage, workerStatus } from "../../src/admin/pages/OverviewPage.tsx";
+import { OverviewPage, attentionItems, workerStatus } from "../../src/admin/pages/OverviewPage.tsx";
+import { WorkersPage } from "../../src/admin/pages/WorkersPage.tsx";
+import { parseHash } from "../../src/admin/lib/router.ts";
 import type { Overview, WorkerView } from "../../src/shared/contract.ts";
 import { fakeOverview } from "./App.test.tsx";
 import { ROW_HEIGHT } from "../../src/admin/components/DataTable.tsx";
@@ -106,158 +108,127 @@ describe("状态必须同时有图标与文字", () => {
   });
 });
 
+/** Worker 页（Worker 表、出口列、共用标记现在都在这里）。 */
+function Workers({ data, view = "#workers" }: { data: Overview; view?: string }) {
+  return <WorkersPage data={data} view={parseHash(view)} navigate={() => {}} />;
+}
+
 /* ================================================================== *
- * 出口隔离
+ * 出口隔离（Worker 页）
  * ================================================================== */
 
-describe("出口隔离视图", () => {
-  it("共用出口必须被显眼报出来,并列出是哪几个 Worker", () => {
-    const data = withWorkers([worker({ id: "w1" }), worker({ id: "w2" })], {
-      isolation: {
-        groups: [{ egressIp: "198.51.100.1", workerIds: ["w1", "w2"], proxyIds: ["p1", "p2"] }],
-        unknownWorkerIds: [],
-        sharedGroups: [
-          { egressIp: "198.51.100.1", workerIds: ["w1", "w2"], proxyIds: ["p1", "p2"] },
-        ],
-        isolated: false,
-      },
-    });
-    render(<OverviewPage data={data} />);
+const SHARED = {
+  groups: [{ egressIp: "198.51.100.1", workerIds: ["w1", "w2"], proxyIds: ["p1", "p2"] }],
+  unknownWorkerIds: [],
+  sharedGroups: [{ egressIp: "198.51.100.1", workerIds: ["w1", "w2"], proxyIds: ["p1", "p2"] }],
+  isolated: false,
+};
 
-    expect(screen.getByText(/回显出口共用/)).toBeInTheDocument();
-    // 共用标在对应 Worker 的行上：用户要知道是哪几个。
+describe("出口隔离", () => {
+  it("共用出口标在对应 Worker 的行上，页头说出有几组", () => {
+    const data = withWorkers([worker({ id: "w1" }), worker({ id: "w2" })], { isolation: SHARED });
+    render(<Workers data={data} />);
+    expect(screen.getByText(/1 组共用出口/)).toBeInTheDocument();
     for (const id of ["w1", "w2"]) {
       const row = screen.getByText(id).closest("tr")!;
       expect(within(row).getByText("共用")).toBeInTheDocument();
     }
   });
 
-  it("未探测不显示为已隔离", () => {
-    const data = withWorkers([worker({ egressIp: null })], {
-      isolation: {
-        groups: [],
-        unknownWorkerIds: ["w1"],
-        sharedGroups: [],
-        isolated: false,
-      },
+  it("「共用出口」筛选只留下共用的 Worker，未探测的不算共用", () => {
+    const data = withWorkers([worker({ id: "w1" }), worker({ id: "w2" }), worker({ id: "w3", egressIp: null })], {
+      isolation: { ...SHARED, unknownWorkerIds: ["w3"] },
     });
-    render(<OverviewPage data={data} />);
-
-    // 「还不知道」与「确认不同」是两件事,混在一起会给出虚假的安全感。
-    expect(screen.getAllByText(/1 个出口未探测/).length).toBeGreaterThan(0);
-    /*
-     * 断言范围必须限定在**隔离面板**内。
-     *
-     * 两次收窄都是测试自己驳回来的:
-     *   1. 先写 `queryByText(/已隔离/)` —— 那句解释性文案
-     *      （「『还不知道』不算作已隔离」）本身含这三个字,子串碰撞。
-     *   2. 改成「整页不含 success 色调」—— 而 Worker 行**正当地**是
-     *      success:那个 Worker 确实就绪(`ready: true`),只是它的出口
-     *      没探测过。两件事互相独立,不能绑在一起断言。
-     *
-     * 真正要钉的是:**隔离这一条**不报成功。
-     */
-    /*
-     * 隔离状态行现在与 Worker 表同在一个面板里，而表里的行可以正当地是 success，
-     * 所以只看那条状态指示本身。
-     */
-    const indicator = screen.getAllByText(/1 个出口未探测/)[0]!.closest("[data-tone]")!;
-    expect(indicator.getAttribute("data-tone")).toBe("warn");
+    render(<Workers data={data} view="#workers?status=shared" />);
+    expect(screen.getByText("w1")).toBeInTheDocument();
+    expect(screen.getByText("w2")).toBeInTheDocument();
+    expect(screen.queryByText("w3")).not.toBeInTheDocument();
   });
 
-  it("回显出口独立时仍明确 Zen 实际出口未验证", () => {
-    const data = withWorkers([worker()], {
-      isolation: {
-        groups: [
-          { egressIp: "198.51.100.1", workerIds: ["w1"], proxyIds: ["p1"] },
-          { egressIp: "198.51.100.2", workerIds: ["w2"], proxyIds: ["p2"] },
-        ],
-        unknownWorkerIds: [],
-        sharedGroups: [],
-        isolated: true,
-      },
+  it("未探测的 Worker 标「未探测」，不显示成有出口", () => {
+    const data = withWorkers([worker({ egressIp: null })], {
+      isolation: { groups: [], unknownWorkerIds: ["w1"], sharedGroups: [], isolated: false },
     });
-    render(<OverviewPage data={data} />);
-    expect(screen.getByText(/回显出口独立 · 2 个出口/)).toBeInTheDocument();
-    expect(screen.getByText(/Zen 实际出口需核对发往 opencode.ai 的连接/)).toBeInTheDocument();
-    expect(screen.getByText(/最后一次成功探测结果，不代表当前仍然可用/)).toBeInTheDocument();
-    expect(screen.queryByText(/已隔离/)).not.toBeInTheDocument();
+    render(<Workers data={data} />);
+    const row = screen.getByText("w1").closest("tr")!;
+    expect(within(row).getByText("未探测")).toBeInTheDocument();
+    expect(within(row).queryByText("共用")).not.toBeInTheDocument();
   });
 });
 
 /* ================================================================== *
- * 凭证不显示
+ * 凭证不显示（Worker 页）
  * ================================================================== */
 
 describe("界面只显示凭证指纹", () => {
   it("显示 8 位指纹,不显示完整值", () => {
-    render(<OverviewPage data={withWorkers([worker()])} />);
-
-    // 指纹供人眼比对「是不是我刚填的那个」——用它而不是长度，因为等长的两个
-    // key 长度相同，于是「我改了没生效」在界面上不可见。
+    render(<Workers data={withWorkers([worker()])} />);
     expect(screen.getAllByText("abcd1234").length).toBeGreaterThan(0);
   });
 
   it("未配置 key 的 Worker 明确显示未配置", () => {
-    render(
-      <OverviewPage
-        data={withWorkers([worker({ apiKey: { present: false, fingerprint: null }, inPool: false })])}
-      />,
-    );
+    render(<Workers data={withWorkers([worker({ apiKey: { present: false, fingerprint: null }, inPool: false })])} />);
     expect(screen.getByText("未配置")).toBeInTheDocument();
   });
 });
 
 /* ================================================================== *
- * 空状态与目录
+ * 概览 = 分诊台
  * ================================================================== */
 
-describe("空状态与目录状态", () => {
-  it("没有 Worker 时给出下一步,而不只是说「空」", () => {
-    render(<OverviewPage data={withWorkers([])} />);
+describe("概览：需要处理", () => {
+  const ids = (data: Overview) => attentionItems(data, { status: "loading" }, null).map((i) => i.id);
 
-    expect(screen.getByText(/还没有配置 Worker/)).toBeInTheDocument();
-    // 空状态的价值在于下一步：指向 Worker 页，并说明匿名 Worker 不需要 key。
-    expect(screen.getByRole("link", { name: "Worker 页" })).toHaveAttribute("href", "#workers");
-    expect(screen.getByText(/匿名 Worker 不需要 key/)).toBeInTheDocument();
-    // setup 不创建 Worker，不能把它当作这里的下一步。
+  it("没有 Worker 时第一条就是它，并给出去新建的按钮；不提 setup", () => {
+    render(<OverviewPage data={withWorkers([])} />);
+    const item = screen.getByText(/还没有 Worker，客户端请求会得到 503/).closest("li")!;
+    expect(within(item).getByRole("link", { name: "新建 Worker" })).toHaveAttribute("href", "#workers");
     expect(screen.queryByText(/npm run setup/)).not.toBeInTheDocument();
   });
 
-  it("目录拉不到显示「—」而不是 0", () => {
+  it("目录拉不到显示「—」并列为 error；免费集为空是 warn，两者分开", () => {
     render(<OverviewPage data={withWorkers([worker()], { catalog: { slots: [], freeCount: null } })} />);
-
-    /*
-     * 「还没拿到目录」与「一个免费模型都没有」是两件事，后者才需要查
-     * freeSuffix。显示 0 会把用户引向错误方向 —— doctor 为此
-     * 专门分了两层。
-     */
     expect(screen.getByText("—")).toBeInTheDocument();
-    /*
-     * 「目录未拉到」既是指标卡的 hint 也是状态指示器的 label —— 两处都要有:
-     * 扫一眼指标区能看到「—」配一句解释,而状态行是那条需要处置的告警。
-     */
-    expect(screen.getAllByText("目录未拉到").length).toBe(2);
+    expect(screen.getByText("目录未拉到")).toBeInTheDocument();
+    expect(ids(withWorkers([worker()], { catalog: { slots: [], freeCount: null } }))).toContain("catalog");
+    expect(ids(withWorkers([worker()], { catalog: { slots: [], freeCount: 0 } }))).toContain("catalog-empty");
   });
 
-  it("目录可达但免费集为空时报警告,与拉不到区分开", () => {
-    render(<OverviewPage data={withWorkers([worker()], { catalog: { slots: [], freeCount: 0 } })} />);
-    expect(screen.getByText("目录可达但免费集为空")).toBeInTheDocument();
+  it("共用出口、缺 key、冷却、未探测、opencode 未指向、统计写失败、近期拒绝各成一条，按严重度排", () => {
+    const data = withWorkers(
+      [
+        worker({ id: "w1" }),
+        worker({ id: "w2" }),
+        worker({ id: "w3", kind: "authenticated", apiKey: { present: false, fingerprint: null }, inPool: false }),
+        worker({ id: "w4", ready: false, cooldownRemainingMs: 1000 }),
+      ],
+      {
+        isolation: { ...SHARED, unknownWorkerIds: ["w4"] },
+        catalog: { slots: [], freeCount: 3 },
+        health: { ok: true, version: "t", uptimeSeconds: 1, pid: 1, storeWriteFailures: 7 },
+      },
+    );
+    const opencode = {
+      status: "ready" as const,
+      data: { path: "opencode.json", exists: true, detectedVersion: null, shape: "v2" as const, pointsToGateway: false, unwritableReason: null },
+    };
+    const recent = { rejections: { not_free: 2 } } as unknown as Parameters<typeof attentionItems>[2];
+    const items = attentionItems(data, opencode, recent);
+    expect(items.map((i) => i.id)).toEqual(["shared", "no-key", "opencode", "cooling", "store", "rejected", "unprobed"]);
+    expect(items.find((i) => i.id === "shared")!.action.href).toBe("#workers?status=shared");
   });
 
-  it("统计写失败非 0 时必须显眼", () => {
-    const data = withWorkers([worker()], {
-      health: { ok: true, version: "t", uptimeSeconds: 1, pid: 1, storeWriteFailures: 7 },
-    });
+  it("没有要处理的事时说一切正常，且统计写失败为 0 不列出", () => {
+    const data = withWorkers([worker()], { catalog: { slots: [], freeCount: 3 }, isolation: { groups: [], unknownWorkerIds: [], sharedGroups: [], isolated: true } });
     render(<OverviewPage data={data} />);
-
-    // 一个一直写失败的库会安静地给出全 0 报表，而那看起来像「没人用」。
-    expect(screen.getByText(/统计写失败 7 次/)).toBeInTheDocument();
+    expect(screen.getByText("一切正常，没有需要处理的事")).toBeInTheDocument();
+    expect(screen.queryByText(/统计写失败/)).not.toBeInTheDocument();
   });
 
-  it("统计写失败为 0 时不显示那一条（0 是正常值）", () => {
+  it("概览不再有 Worker 表与探测按钮（它们在 Worker 页）", () => {
     render(<OverviewPage data={withWorkers([worker()])} />);
-    expect(screen.queryByText(/统计写失败/)).not.toBeInTheDocument();
+    expect(screen.queryByRole("table")).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /探测/ })).not.toBeInTheDocument();
   });
 });
 
@@ -267,7 +238,7 @@ describe("空状态与目录状态", () => {
 
 describe("无障碍与密度", () => {
   it("表格行高 36px，且与 tokens.css 的 --spacing-row 一致", () => {
-    const { container } = render(<OverviewPage data={withWorkers([worker()])} />);
+    const { container } = render(<Workers data={withWorkers([worker()])} />);
     const row = container.querySelector("tr[data-row]");
     expect(row).not.toBeNull();
     expect(ROW_HEIGHT).toBe(36);
@@ -276,17 +247,9 @@ describe("无障碍与密度", () => {
     expect(/--spacing-row:\s*(\d+)px/.exec(tokens)?.[1]).toBe(String(ROW_HEIGHT));
   });
 
-  it("主操作按钮触摸目标 ≥44px", () => {
-    const { container } = render(<OverviewPage data={withWorkers([worker()])} />);
-    const button = container.querySelector("button");
-    expect(button?.className).toContain("min-h-[44px]");
-  });
-
-  it("探测按钮在进行中禁用 —— 重复探测会互相切 selector", () => {
-    const { container } = render(<OverviewPage data={withWorkers([worker()])} />);
-    const button = container.querySelector("button") as HTMLButtonElement;
-    // 初始未运行，可点。
-    expect(button.disabled).toBe(false);
-    expect(button.textContent).toContain("探测出口");
+  it("「需要处理」的去处是链接，命中区 ≥44px", () => {
+    render(<OverviewPage data={withWorkers([])} />);
+    const link = screen.getByRole("link", { name: "新建 Worker" });
+    expect(link.className).toContain("min-h-[44px]");
   });
 });

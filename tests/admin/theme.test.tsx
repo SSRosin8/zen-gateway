@@ -4,7 +4,7 @@ import { join } from "node:path";
 import { render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { App } from "../../src/admin/App.tsx";
-import { THEME_KEY, resolveTheme, type ThemePreference } from "../../src/admin/lib/theme.ts";
+import { SKIN_KEY, THEME_KEY, resolveTheme, type ThemePreference } from "../../src/admin/lib/theme.ts";
 
 /** jsdom 环境下 import.meta.url 不是 file: 协议，按 vitest 的 root（仓库根）解析。 */
 const INDEX_HTML = join(process.cwd(), "src/admin/index.html");
@@ -105,5 +105,40 @@ describe("侧栏配色按钮", () => {
     render(<App />);
     expect(screen.getByRole("button", { name: /^配色：深色/ })).toBeInTheDocument();
     expect(document.documentElement.dataset.theme).toBe("dark");
+  });
+});
+
+describe("皮肤（与浅/深正交）", () => {
+  it("首屏脚本只认 warm，其余一律默认皮肤", () => {
+    stubMatchMedia(false);
+    for (const [stored, expected] of [["warm", "warm"], ["cool", undefined], ["garbage", undefined], [null, undefined]] as const) {
+      window.localStorage.clear();
+      if (stored !== null) window.localStorage.setItem(SKIN_KEY, stored);
+      delete document.documentElement.dataset.skin;
+      new Function(inlineThemeScript())();
+      expect(document.documentElement.dataset.skin).toBe(expected);
+    }
+  });
+
+  it("按钮在两套皮肤间切换，写入 data-skin 与 localStorage，不动浅/深", async () => {
+    stubMatchMedia(false);
+    vi.stubGlobal("fetch", vi.fn(() => new Promise(() => {})));
+    const user = userEvent.setup();
+    window.localStorage.setItem(THEME_KEY, "dark");
+    render(<App />);
+
+    const button = () => screen.getByRole("button", { name: /^皮肤：/ });
+    expect(button()).toHaveAccessibleName("皮肤：冷灰蓝，点击切换为暖米白");
+    expect(document.documentElement.dataset.skin).toBeUndefined();
+
+    await user.click(button());
+    expect(document.documentElement.dataset.skin).toBe("warm");
+    expect(window.localStorage.getItem(SKIN_KEY)).toBe("warm");
+    expect(document.documentElement.dataset.theme).toBe("dark");
+
+    // 回到默认皮肤时清掉存储与属性。
+    await user.click(button());
+    expect(document.documentElement.dataset.skin).toBeUndefined();
+    expect(window.localStorage.getItem(SKIN_KEY)).toBeNull();
   });
 });

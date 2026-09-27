@@ -67,7 +67,13 @@ function findBlocks(css: string, selector: string): string[] {
 
     const rest = css.slice(at + selector.length);
     const brace = /^\s*\{/.exec(rest);
-    if (!brace) {
+    /*
+     * 选择器必须是整条规则的开头（前面是块边界或空白），否则 `[data-theme="dark"]` 会匹配到
+     * `:root[data-skin="warm"][data-theme="dark"] {` 的尾巴，把暖色深色并进默认深色。
+     */
+    const before = css.slice(0, at).trimEnd();
+    const startsRule = before === "" || before.endsWith("}") || before.endsWith("{") || before.endsWith(";");
+    if (!brace || !startsRule) {
       from = at + selector.length;
       continue;
     }

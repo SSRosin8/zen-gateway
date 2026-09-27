@@ -1,20 +1,13 @@
 import { useState } from "react";
 import type { ModelList, ModelView } from "../../shared/contract.ts";
-import {
-  FormStatus,
-  Metric,
-  Mono,
-  Panel,
-  PrimaryButton,
-  Strong,
-  errorMessage,
-  type FormMessage,
-} from "../components/Panel.tsx";
+import { FormStatus, Metric, Mono, PageHeader, Panel, PrimaryButton, Strong, errorMessage, type FormMessage } from "../components/Panel.tsx";
 import { StatusIndicator, type StatusTone } from "../components/StatusIndicator.tsx";
 import { DataTable, TableFilters, type Column } from "../components/DataTable.tsx";
 import type { ViewState } from "../lib/router.ts";
 import { patchConfig } from "../lib/api.ts";
 import { FIELD, TEXTAREA } from "../lib/styles.ts";
+import { useFormState, useLeaveGuard } from "../lib/formState.ts";
+import { DirtyMark } from "../components/GatewaySettingsForms.tsx";
 
 /**
  * 模型页。
@@ -38,6 +31,27 @@ const REASON_LABEL: Record<string, string> = {
   retired: "已下架（依据成立但不在在架目录里）",
 };
 
+/** 协议的人话。取值与 `ModelViewSchema.protocol` 一一对应。 */
+const PROTOCOL_LABEL: Record<string, string> = {
+  chat: "Chat",
+  responses: "Responses",
+  messages: "Messages",
+  other: "网关不支持的协议",
+};
+
+/**
+ * 声明（models.dev）为主，实测（本网关 2xx）只在补充信息时显示：与声明一致就不重复。
+ * 拿不到声明与「没声明」分开说，免得把第三方故障读成模型没有协议。
+ */
+export function protocolText(m: ModelView, sourceAvailable: boolean): string {
+  const { declared, measured } = m.protocol;
+  const head =
+    declared !== null ? PROTOCOL_LABEL[declared] ?? declared : sourceAvailable ? "未声明" : "声明拿不到";
+  const extra = measured.filter((p) => p !== declared);
+  if (extra.length === 0) return head;
+  return `${head} · 实测：${measured.map((p) => PROTOCOL_LABEL[p] ?? p).join(" / ")}`;
+}
+
 function modelTone(m: ModelView): "success" | "warn" | "error" | "neutral" {
   if (m.free) return m.reason.endsWith("_unverified") ? "warn" : "success";
   // `retired` 与 `not_free` 的处置完全不同 —— 前者要删 extraFreeIds 条目。
@@ -56,9 +70,16 @@ export function ModelsPage({
   /** 刷新 `/api/models`。保存判定设置后调用。 */
   refresh?: () => void;
 }) {
-  const [freeSuffix, setFreeSuffix] = useState(data.rules.freeSuffix);
-  const [extraFreeIds, setExtraFreeIds] = useState(data.rules.extraFreeIds.join("\n"));
-  const [enforceCatalog, setEnforceCatalog] = useState(data.rules.enforceCatalog);
+  const form = useFormState({
+    freeSuffix: data.rules.freeSuffix,
+    extraFreeIds: data.rules.extraFreeIds.join("\n"),
+    enforceCatalog: data.rules.enforceCatalog,
+  });
+  const { freeSuffix, extraFreeIds, enforceCatalog } = form.value;
+  const setFreeSuffix = (v: string) => form.set((p) => ({ ...p, freeSuffix: v }));
+  const setExtraFreeIds = (v: string) => form.set((p) => ({ ...p, extraFreeIds: v }));
+  const setEnforceCatalog = (v: boolean) => form.set((p) => ({ ...p, enforceCatalog: v }));
+  useLeaveGuard(form.dirty);
   const [saving, setSaving] = useState(false);
   const [message, setMessage] = useState<FormMessage>(null);
   const q = view.q.trim().toLowerCase();
@@ -97,15 +118,10 @@ export function ModelsPage({
       ),
     },
     {
-      key: "surfaces",
-      header: "协议面",
-      /*
-       * `surfacesFor()` 的结果 —— **只作展示**，不是放行闸门。
-       *
-       * 默认值是 ["chat","responses"]，按它放行会让默认配置下所有模型的
-       * /v1/messages 被拒，而上游并不按模型区分协议面，当闸门缺乏依据。
-       */
-      render: (m) => <span className="text-text-muted">{m.surfaces.join(" · ")}</span>,
+      key: "protocol",
+      header: "协议",
+      // 只作展示，不是放行闸门：网关对每个模型都开放全部三个面。
+      render: (m) => <span className="text-text-muted">{protocolText(m, data.protocolSource.available)}</span>,
     },
   ];
 
@@ -138,7 +154,18 @@ export function ModelsPage({
 
   return (
     <div className="space-y-4">
-      <Panel title="免费判定">
+      <PageHeader title="模型" />
+      <Panel
+        title="免费判定"
+        hint={
+          <>
+            判定规则：（后缀命中 ∪ <Mono>extraFreeIds</Mono>）∩ 在架目录。交集是已下架模型自动失效的<Strong>唯一</Strong>机制：
+            少了它，一个下架的 <Mono>xxx-free</Mono> 会被放行，再由上游返回 400。反过来，
+            <Strong>新出现的无后缀免费模型无法自动发现</Strong>：上游的 <Mono>/models</Mono> 给在架性却不给价格，只能手工补进{" "}
+            <Mono>extraFreeIds</Mono>。
+          </>
+        }
+      >
         <div className="grid grid-cols-2 gap-6 sm:grid-cols-4">
           <Metric label="在架模型" value={String(listedCount)} hint="上游目录总数" />
           <Metric label="可用" value={String(freeCount)} hint="通过免费判定" />
@@ -153,27 +180,9 @@ export function ModelsPage({
             hint={`交集${data.rules.enforceCatalog ? "已开" : "已关"}`}
           />
         </div>
-
-        <p className="mt-5 border-t border-border pt-4 text-text-muted">
-          判定规则是 <Strong>（后缀命中 ∪ extraFreeIds）∩ 在架目录</Strong>。交集是已下架
-          模型自动失效的<Strong>唯一</Strong>机制 —— 少了它，一个下架的{" "}
-          <Mono>xxx-free</Mono> 会被放行，再由上游返回 400，而那条措辞指不到
-          「这个 id 已经下架了」。
-        </p>
-        <p className="mt-2 text-text-muted">
-          <Strong>有一个不对称</Strong>：交集能自动剔除下架的，但<Strong>新出现的无后缀免费模型
-          无法自动发现</Strong> —— 上游的 <Mono>/models</Mono> 给在架性却不给价格。
-          所以新的零费率无后缀模型只能手工补进{" "}
-          <Mono>extraFreeIds</Mono>（<Mono>big-pickle</Mono> 就是这么来的）。
-        </p>
-        {data.rules.extraFreeIds.length > 0 && (
-          <p className="mt-2 text-text-muted">
-            当前名单：{data.rules.extraFreeIds.map((id) => <Mono key={id}>{id} </Mono>)}
-          </p>
-        )}
       </Panel>
 
-      <Panel title="判定设置">
+      <Panel title="判定设置" action={<DirtyMark form={form} />}>
         <form
           className="grid gap-3 sm:grid-cols-2"
           onSubmit={(event) => {
@@ -188,6 +197,7 @@ export function ModelsPage({
               },
             })
               .then(() => {
+                form.markSaved();
                 setMessage({ tone: "success", text: "已保存" });
                 // 判定结果在 /api/models 上，保存后立即刷新这一页自己的数据。
                 refresh?.();
@@ -214,7 +224,16 @@ export function ModelsPage({
         </form>
       </Panel>
 
-      <Panel title={`模型（${filtered.length}/${data.models.length}）`}>
+      <Panel
+        title={`模型（${filtered.length}/${data.models.length}）`}
+        hint={
+          <>
+            「协议」列：声明取自 models.dev 的 OpenCode 条目（OpenCode 按它选择请求协议；第三方数据，
+            可能落后于 Zen）；「实测」是本网关{data.measuredSinceDay === null ? "（统计库不可用，暂无）" : `自 ${data.measuredSinceDay} 起`}
+            实际成功转发过的协议面。两者都不证明 Zen 当前接受哪个面，也不是放行条件。
+          </>
+        }
+      >
         <TableFilters
           q={view.q}
           onQ={(next) => navigate({ q: next, page_: 1 })}
@@ -230,6 +249,7 @@ export function ModelsPage({
         <DataTable
           label="模型列表"
           rows={filtered}
+          total={data.models.length}
           columns={columns}
           rowKey={(m) => m.id}
           rowTone={modelTone}

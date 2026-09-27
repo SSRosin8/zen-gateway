@@ -208,18 +208,6 @@ export const ModelRulesSchema = z.strictObject({
    */
   extraFreeIds: z.array(z.string().min(1).max(128)).max(256).default(["big-pickle"]),
   /**
-   * 默认声明支持的协议面：仅供 Models 页展示（经 `surfacesFor()`），不是放行闸门。
-   * 未观察到上游按模型区分协议面，接成闸门会在默认配置下拒掉所有 `/v1/messages`。
-   * 真正的流式放行判定在 `ProtocolSurface.streaming`，由 `relay.ts` 第 4 步执行。
-   */
-  defaultSurfaces: z.array(ProtocolIdSchema).min(1).default(["chat", "responses"]),
-  /** 按模型覆写协议面，同样只作展示。 */
-  surfaceOverrides: z
-    .record(z.string().min(1).max(128), z.array(ProtocolIdSchema))
-    // 与其他集合一样设上限，防止手工误粘贴造成启动期开销。
-    .refine((r) => Object.keys(r).length <= 512, { message: "最多 512 条覆写" })
-    .default({}),
-  /**
    * 在架目录缓存的新鲜期（非硬过期）：过期只触发后台刷新，拉不到继续用旧目录，
    * 见 `core/models/catalog.ts`。下限 1 分钟，避免转发链路频繁刷目录。
    */
@@ -236,6 +224,20 @@ export const ModelRulesSchema = z.strictObject({
   enforceCatalog: z.boolean().default(true),
 });
 export type ModelRules = z.infer<typeof ModelRulesSchema>;
+
+/**
+ * 已删除的模型规则键。旧版手工协议面提示（`defaultSurfaces` / `surfaceOverrides`）被
+ * models.dev 声明 + 本机实测取代；已有配置文件里还留着它们，`strictObject` 会因此拒绝启动，
+ * 所以加载时丢掉，下一次写盘自然消失。只丢这两个名字，其他未知键仍报错。
+ */
+const LEGACY_MODEL_RULE_KEYS = ["defaultSurfaces", "surfaceOverrides"] as const;
+
+function dropLegacyModelRuleKeys(value: unknown): unknown {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) return value;
+  const rest: Record<string, unknown> = { ...(value as Record<string, unknown>) };
+  for (const key of LEGACY_MODEL_RULE_KEYS) delete rest[key];
+  return rest;
+}
 
 export const RoutingStrategySchema = z.enum(["anonymous_first", "authenticated_first", "mixed"]);
 export type RoutingStrategy = z.infer<typeof RoutingStrategySchema>;
@@ -300,7 +302,7 @@ export const ConfigSchema = z
     gateway: GatewaySchema,
     // prefault 而非 default：见 RoutingConfigSchema.cooldown 处的说明。
     routing: RoutingConfigSchema.prefault({}),
-    models: ModelRulesSchema.prefault({}),
+    models: z.preprocess(dropLegacyModelRuleKeys, ModelRulesSchema.prefault({})),
     workers: z.array(WorkerSchema).max(MAX_WORKERS).default([]),
     proxies: z.array(ProxySchema).max(2048).default([]),
     subscriptions: z.array(SubscriptionSchema).max(64).default([]),

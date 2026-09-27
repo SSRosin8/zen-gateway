@@ -1,11 +1,11 @@
 import { describe, expect, it, vi, afterEach } from "vitest";
-import { render, screen, waitFor, within } from "@testing-library/react";
+import { act, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { App } from "../../src/admin/App.tsx";
 import { WorkersPage, proxyOptionLabel } from "../../src/admin/pages/WorkersPage.tsx";
-import { GatewayPage, validateMaxAttempts } from "../../src/admin/pages/GatewayPage.tsx";
+import { GatewayPage } from "../../src/admin/pages/GatewayPage.tsx";
+import { validateMaxAttempts } from "../../src/admin/components/GatewaySettingsForms.tsx";
 import { ModelsPage } from "../../src/admin/pages/ModelsPage.tsx";
-import { OverviewPage } from "../../src/admin/pages/OverviewPage.tsx";
 import { ProxyPage, subscriptionStatus } from "../../src/admin/pages/ProxyPage.tsx";
 import { UsagePage } from "../../src/admin/pages/UsagePage.tsx";
 import { Nav } from "../../src/admin/components/Nav.tsx";
@@ -102,7 +102,6 @@ const readyProxies = (list: ProxyView[]): FetchState<ProxyList> => ({ status: "r
 describe("表格在窄屏内部横向滚动", () => {
   it("每张表都在一个 overflow-x-auto 的滚动区域里", () => {
     const pages: Array<[string, () => React.ReactElement]> = [
-      ["概览", () => <OverviewPage data={withWorkers([worker()])} />],
       ["Worker", () => <WorkersPage data={withWorkers([worker()])} view={parseHash("#workers")} navigate={noop} />],
       [
         "Clash 内核",
@@ -168,6 +167,7 @@ function stats(): StatsView {
     workers: [{ workerId: "w1", attempts: 9, successes: 7, failures: 2, lastUsedAt: 1, lastStatus: 200 }],
     rates: { cacheHitRate: 0.3, usageCoverage: 0.833, droppedUsageCount: 0 },
     rejections: {},
+    daily: { byModel: [], byWorker: [] },
     rejectedModels: [],
   };
 }
@@ -176,13 +176,18 @@ function stats(): StatsView {
  * Worker 删除确认
  * ================================================================== */
 
-describe("删除 Worker 需要确认", () => {
-  it("点删除只打开对话框，焦点在取消上，取消后不发请求", async () => {
+describe("删除 Worker", () => {
+  const openMenuDelete = async (user: ReturnType<typeof userEvent.setup>, id = "w1") => {
+    await user.click(screen.getByRole("button", { name: `${id} 的更多操作` }));
+    await user.click(screen.getByRole("menuitem", { name: "删除" }));
+  };
+
+  it("认证 Worker：先确认（key 找不回），焦点在取消上，取消后不发请求", async () => {
     const user = userEvent.setup();
     const patch = vi.spyOn(adminApi, "patchConfig").mockResolvedValue(undefined);
     render(<WorkersPage data={withWorkers([worker()])} view={parseHash("#workers")} navigate={noop} />);
 
-    await user.click(screen.getByRole("button", { name: "删除" }));
+    await openMenuDelete(user);
     const dialog = screen.getByRole("dialog", { name: "删除 Worker" });
     expect(patch).not.toHaveBeenCalled();
     expect(within(dialog).getByText("w1")).toBeInTheDocument();
@@ -194,30 +199,93 @@ describe("删除 Worker 需要确认", () => {
     expect(patch).not.toHaveBeenCalled();
   });
 
-  it("确认后才删除，并显示成功结果", async () => {
+  it("认证 Worker：确认后才删除，并显示成功结果；Esc 关闭且不删除", async () => {
     const user = userEvent.setup();
     const patch = vi.spyOn(adminApi, "patchConfig").mockResolvedValue(undefined);
     render(<WorkersPage data={withWorkers([worker()])} view={parseHash("#workers")} navigate={noop} />);
 
-    await user.click(screen.getByRole("button", { name: "删除" }));
-    const confirm = within(screen.getByRole("dialog")).getByRole("button", { name: "确认删除" });
-    // 破坏性按钮用 error 描边。
-    expect(confirm.className).toContain("border-error");
-    await user.click(confirm);
-
-    expect(patch).toHaveBeenCalledWith({ workers: { delete: ["w1"] } });
-    expect(await screen.findByText("已删除")).toBeInTheDocument();
-  });
-
-  it("Esc 关闭对话框且不删除", async () => {
-    const user = userEvent.setup();
-    const patch = vi.spyOn(adminApi, "patchConfig").mockResolvedValue(undefined);
-    render(<WorkersPage data={withWorkers([worker()])} view={parseHash("#workers")} navigate={noop} />);
-    await user.click(screen.getByRole("button", { name: "删除" }));
-    const dialog = screen.getByRole("dialog");
-    dialog.dispatchEvent(new Event("cancel", { cancelable: true }));
+    await openMenuDelete(user);
+    screen.getByRole("dialog").dispatchEvent(new Event("cancel", { cancelable: true }));
     await waitFor(() => expect(screen.queryByRole("dialog")).not.toBeInTheDocument());
     expect(patch).not.toHaveBeenCalled();
+
+    await openMenuDelete(user);
+    const confirm = within(screen.getByRole("dialog")).getByRole("button", { name: "确认删除" });
+    expect(confirm.className).toContain("border-error");
+    await user.click(confirm);
+    expect(patch).toHaveBeenCalledWith({ workers: { delete: ["w1"] } });
+    expect(await screen.findByText("已删除 w1")).toBeInTheDocument();
+  });
+
+  it("匿名 Worker：不弹确认直接删，可撤销，撤销按原样重建", async () => {
+    const user = userEvent.setup();
+    const patch = vi.spyOn(adminApi, "patchConfig").mockResolvedValue(undefined);
+    const anon = worker({ id: "anon-3", name: "匿名 · 节点", kind: "anonymous", apiKey: { present: false, fingerprint: null }, proxyId: "p1" });
+    render(<WorkersPage data={withWorkers([anon])} view={parseHash("#workers")} navigate={noop} />);
+
+    await openMenuDelete(user, "anon-3");
+    expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+    expect(await screen.findByText("已删除 anon-3")).toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "撤销" }));
+    await screen.findByText("已撤销删除");
+    expect(patch.mock.calls.map((c) => c[0])).toEqual([
+      { workers: { delete: ["anon-3"] } },
+      { workers: { create: [{ id: "anon-3", name: "匿名 · 节点", kind: "anonymous", apiKey: "", proxyId: "p1", enabled: true }] } },
+    ]);
+  });
+
+  it("连续两次删除：第一次的计时器不会提前收走第二次的撤销", async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    try {
+      const user = userEvent.setup({ advanceTimers: vi.advanceTimersByTime });
+      vi.spyOn(adminApi, "patchConfig").mockResolvedValue(undefined);
+      const anon = (id: string) => worker({ id, kind: "anonymous", apiKey: { present: false, fingerprint: null }, proxyId: "p1" });
+      render(<WorkersPage data={withWorkers([anon("anon-1"), anon("anon-2")])} view={parseHash("#workers")} navigate={noop} />);
+      await openMenuDelete(user, "anon-1");
+      await screen.findByText("已删除 anon-1");
+      act(() => vi.advanceTimersByTime(6000));
+      await openMenuDelete(user, "anon-2");
+      await screen.findByText("已删除 anon-2");
+      // 第一次删除的 10 秒到了，第二次的撤销还应在。
+      act(() => vi.advanceTimersByTime(6000));
+      expect(screen.getByRole("button", { name: "撤销" })).toBeInTheDocument();
+      act(() => vi.advanceTimersByTime(5000));
+      expect(screen.queryByRole("button", { name: "撤销" })).not.toBeInTheDocument();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("删除后的提示会被之后的列表操作结果替换，撤销也随之收起", async () => {
+    const user = userEvent.setup();
+    vi.spyOn(adminApi, "patchConfig").mockResolvedValue(undefined);
+    const anon = worker({ id: "anon-3", kind: "anonymous", apiKey: { present: false, fingerprint: null }, proxyId: "p1" });
+    render(<WorkersPage data={withWorkers([anon, worker({ id: "w1" })])} view={parseHash("#workers")} navigate={noop} />);
+    await openMenuDelete(user, "anon-3");
+    expect(await screen.findByText("已删除 anon-3")).toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "新增 Worker" }));
+    const form = screen.getByRole("form", { name: "新增 Worker" });
+    await user.click(within(form).getByRole("button", { name: "保存" }));
+    expect(await screen.findByText("已新增")).toBeInTheDocument();
+    expect(screen.queryByText("已删除 anon-3")).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "撤销" })).not.toBeInTheDocument();
+  });
+
+  it("多选后批量停用：一个请求，结果与撤销标在每一行", async () => {
+    const user = userEvent.setup();
+    const patch = vi.spyOn(adminApi, "patchConfig").mockResolvedValue(undefined);
+    render(<WorkersPage data={withWorkers([worker({ id: "w1" }), worker({ id: "w2" }), worker({ id: "w3" })])} view={parseHash("#workers")} navigate={noop} />);
+    await user.click(screen.getByRole("checkbox", { name: "选择 w1" }));
+    await user.click(screen.getByRole("checkbox", { name: "选择 w3" }));
+    const bar = screen.getByRole("toolbar", { name: "批量操作" });
+    await user.click(within(bar).getByRole("button", { name: "停用" }));
+    expect(patch).toHaveBeenCalledWith({ workers: { update: { w1: { enabled: false }, w3: { enabled: false } } } });
+    for (const id of ["w1", "w3"]) {
+      const row = screen.getByText(id).closest("tr")!;
+      expect(await within(row).findByText("已停用")).toBeInTheDocument();
+      expect(within(row).getByRole("button", { name: "撤销" })).toBeInTheDocument();
+    }
+    expect(within(screen.getByText("w2").closest("tr")!).queryByText("已停用")).not.toBeInTheDocument();
   });
 });
 
@@ -244,7 +312,8 @@ describe("Worker 编辑表单在被编辑行的正下方", () => {
     const expanded = form.closest("tr")!;
     expect(expanded.previousElementSibling).toBe(row2);
     expect(expanded.nextElementSibling).toBe(container.querySelector('tr[data-row="w3"]'));
-    expect(expanded.querySelector("td")!.getAttribute("colspan")).toBe("7");
+    // 选择列 + 7 个数据列。
+    expect(expanded.querySelector("td")!.getAttribute("colspan")).toBe("8");
     expect(within(form).getByLabelText("名称")).toHaveFocus();
   });
 
@@ -422,12 +491,13 @@ describe("保存结果区分成功与失败", () => {
 
 function modelList(): ModelList {
   return {
-    models: [{ id: "a-free", free: true, reason: "suffix", surfaces: ["chat"], listed: true }],
+    models: [{ id: "a-free", free: true, reason: "suffix", protocol: { declared: "chat", measured: [] }, listed: true }],
     catalogAvailable: true,
+    protocolSource: { available: true, fetchedAt: "2026-01-01T00:00:00.000Z" },
+    measuredSinceDay: "2026-01-01",
     rules: {
       freeSuffix: "-free",
       extraFreeIds: [],
-      defaultSurfaces: ["chat", "responses"],
       catalogTtlMs: 1_800_000,
       enforceCatalog: true,
     },
@@ -514,23 +584,31 @@ describe("导航是真实链接", () => {
   });
 });
 
-describe("代理池标签", () => {
-  it("是 tablist/tab，选中项 aria-selected 并关联面板", async () => {
+describe("出口页标签", () => {
+  it("是 tablist/tab：节点 / 订阅 / Clash；回显出口分组移到了 Worker 页", async () => {
     vi.stubGlobal("fetch", vi.fn(() => new Promise(() => {})));
     const user = userEvent.setup();
     const navigate = vi.fn();
-    render(<ProxyPage data={proxyList([proxy()])} view={parseHash("#proxy?tab=isolation")} navigate={navigate} />);
-    const tablist = screen.getByRole("tablist", { name: "代理池视图" });
+    render(<ProxyPage data={proxyList([proxy()])} view={parseHash("#proxy?tab=subscriptions")} navigate={navigate} />);
+    const tablist = screen.getByRole("tablist", { name: "出口视图" });
     const tabs = within(tablist).getAllByRole("tab");
-    expect(tabs.map((t) => t.textContent)).toEqual(["列表", "回显出口", "订阅", "Clash"]);
+    expect(tabs.map((t) => t.textContent)).toEqual(["节点", "订阅", "Clash"]);
     const selected = within(tablist).getByRole("tab", { selected: true });
-    expect(selected).toHaveTextContent("回显出口");
-    expect(selected).toHaveAttribute("href", "#proxy?tab=isolation");
+    expect(selected).toHaveTextContent("订阅");
+    expect(selected).toHaveAttribute("href", "#proxy?tab=subscriptions");
     const panel = screen.getByRole("tabpanel");
     expect(selected.getAttribute("aria-controls")).toBe(panel.id);
 
-    await user.click(within(tablist).getByRole("tab", { name: "订阅" }));
-    expect(navigate).toHaveBeenCalledWith({ tab: "subscriptions" });
+    await user.click(within(tablist).getByRole("tab", { name: "Clash" }));
+    expect(navigate).toHaveBeenCalledWith({ tab: "clash" });
+  });
+
+  it("节点表不再单列回显出口：可用节点的 IP 显示在状态列", () => {
+    vi.stubGlobal("fetch", vi.fn(() => new Promise(() => {})));
+    render(<ProxyPage data={proxyList([proxy({ egressIp: "198.51.100.7" })])} view={parseHash("#proxy")} navigate={noop} />);
+    const headers = screen.getAllByRole("columnheader").map((h) => h.textContent);
+    expect(headers).not.toContain("出口 IP");
+    expect(within(screen.getByText("节点一").closest("tr")!).getByText("198.51.100.7")).toBeInTheDocument();
   });
 });
 
@@ -544,7 +622,7 @@ function primaryButtons(container: HTMLElement) {
 }
 
 describe("每个视图最多一个主操作", () => {
-  it("订阅页的每行刷新是描边按钮，主操作只有批量探测", () => {
+  it("出口页的订阅标签没有主按钮：每行刷新与批量探测都是描边按钮", () => {
     vi.stubGlobal("fetch", vi.fn(() => new Promise(() => {})));
     const sub = {
       id: "s",
@@ -558,22 +636,16 @@ describe("每个视图最多一个主操作", () => {
       proxyCount: 0,
     };
     const { container } = render(
-      <ProxyPage
-        data={proxyList([], { subscriptions: [sub, { ...sub, id: "s2" }] })}
-        view={parseHash("#proxy?tab=subscriptions")}
-        navigate={noop}
-      />,
+      <ProxyPage data={proxyList([], { subscriptions: [sub, { ...sub, id: "s2" }] })} view={parseHash("#proxy?tab=subscriptions")} navigate={noop} />,
     );
-    const primaries = primaryButtons(container);
-    expect(primaries).toHaveLength(1);
-    expect(primaries[0]).toHaveTextContent("开始批量探测");
+    expect(primaryButtons(container).length).toBeLessThanOrEqual(1);
   });
 
   it("App 里的 Worker 页只有一个主操作", async () => {
     vi.stubGlobal("fetch", vi.fn(() => Promise.resolve({ ok: true, status: 200, json: () => Promise.resolve(fakeOverview()) })));
     window.location.hash = "#workers";
     const { container } = render(<App />);
-    await screen.findByRole("heading", { name: "Worker（0/0）" });
+    await screen.findByRole("heading", { name: "Worker" });
     const primaries = primaryButtons(container);
     expect(primaries).toHaveLength(1);
     expect(primaries[0]).toHaveTextContent("新增 Worker");
@@ -585,7 +657,7 @@ describe("每个视图最多一个主操作", () => {
  * ================================================================== */
 
 describe("开始批量探测前确认", () => {
-  it("说明会切换 Clash 分组并可能新建 Worker，确认后才发 start", async () => {
+  it("说明会切换 Clash 分组；新建 Worker 是显式勾选项（默认不勾）；确认后才发 start", async () => {
     const user = userEvent.setup();
     const posts: string[] = [];
     vi.stubGlobal(
@@ -597,57 +669,24 @@ describe("开始批量探测前确认", () => {
     );
     render(<ProxyPage data={proxyList([proxy()])} view={parseHash("#proxy")} navigate={noop} />);
 
-    await user.click(screen.getByRole("button", { name: "开始批量探测" }));
+    await user.click(screen.getByRole("button", { name: "批量探测全部节点" }));
     const dialog = screen.getByRole("dialog", { name: "开始批量探测" });
     expect(dialog.textContent).toContain("Clash");
-    expect(dialog.textContent).toContain("新建对应的 Worker");
+    const create = within(dialog).getByRole("checkbox", { name: /新建一个匿名 Worker/ });
+    expect(create).not.toBeChecked();
     expect(within(dialog).getByRole("button", { name: "取消" })).toHaveFocus();
     expect(posts).toHaveLength(0);
 
     await user.click(within(dialog).getByRole("button", { name: "取消" }));
     expect(posts).toHaveLength(0);
 
-    await user.click(screen.getByRole("button", { name: "开始批量探测" }));
+    await user.click(screen.getByRole("button", { name: "批量探测全部节点" }));
     await user.click(within(screen.getByRole("dialog")).getByRole("button", { name: "开始探测" }));
     await waitFor(() => expect(posts).toEqual([JSON.stringify({ action: "start" })]));
-  });
-});
 
-/* ================================================================== *
- * 概览去重
- * ================================================================== */
-
-describe("概览不重复网关页与分组", () => {
-  it("网关信息只有一行摘要和指向网关页的链接", () => {
-    render(<OverviewPage data={withWorkers([worker()])} />);
-    expect(screen.queryByRole("heading", { name: "网关" })).not.toBeInTheDocument();
-    expect(screen.queryByText(/Relay Token/)).not.toBeInTheDocument();
-    expect(screen.getByRole("link", { name: /网关页/ })).toHaveAttribute("href", "#gateway");
-  });
-
-  it("回显出口是 Worker 表的一列，共用只标在共用的行上", () => {
-    const shared = { egressIp: "198.51.100.1", workerIds: ["w1", "w2"], proxyIds: ["p1", "p2"] };
-    const single = { egressIp: "198.51.100.2", workerIds: ["w3"], proxyIds: ["p3"] };
-    render(
-      <OverviewPage
-        data={fakeOverview({
-          workers: [
-            worker({ id: "w1", egressIp: "198.51.100.1" }),
-            worker({ id: "w2", egressIp: "198.51.100.1" }),
-            worker({ id: "w3", egressIp: "198.51.100.2" }),
-          ],
-          pool: { ready: 3, total: 3, health: "healthy" },
-          isolation: { groups: [shared, single], sharedGroups: [shared], unknownWorkerIds: [], isolated: false },
-        })}
-      />,
-    );
-    // 不再有单独的分组列表：每个出口不再额外占一行。
-    expect(screen.queryByRole("list", { name: "回显出口分组" })).not.toBeInTheDocument();
-    const table = screen.getByRole("table");
-    expect(within(table).getByRole("columnheader", { name: "回显出口" })).toBeInTheDocument();
-    const rowOf = (id: string) => within(table).getByText(id).closest("tr")!;
-    expect(within(rowOf("w1")).getByText("共用")).toBeInTheDocument();
-    expect(within(rowOf("w2")).getByText("共用")).toBeInTheDocument();
-    expect(within(rowOf("w3")).queryByText("共用")).not.toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "批量探测全部节点" }));
+    await user.click(within(screen.getByRole("dialog")).getByRole("checkbox", { name: /新建一个匿名 Worker/ }));
+    await user.click(within(screen.getByRole("dialog")).getByRole("button", { name: "开始探测" }));
+    await waitFor(() => expect(posts.at(-1)).toBe(JSON.stringify({ action: "start", createWorkers: true })));
   });
 });

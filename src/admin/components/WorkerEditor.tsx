@@ -3,7 +3,7 @@ import type { ConfigPatch, ProxyList, WorkerView } from "../../shared/contract.t
 import { FormStatus, PrimaryButton, SecondaryButton, type FormMessage } from "./Panel.tsx";
 import { StatusIndicator } from "./StatusIndicator.tsx";
 import type { FetchState } from "../lib/api.ts";
-import { suggestWorker, validateWorkerId } from "../lib/workerIds.ts";
+import { suggestWorker, validateWorkerId } from "../../shared/workerIds.ts";
 import { FIELD } from "../lib/styles.ts";
 
 

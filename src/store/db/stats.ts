@@ -119,11 +119,11 @@ function saturatingSum(column: string): string {
 function usageUnion(filtered: boolean): string {
   const where = filtered ? "WHERE day >= ?" : "";
   return `
-    SELECT model, input_tokens, output_tokens, cache_read_tokens, cache_write_tokens,
+    SELECT day, worker_id, model, input_tokens, output_tokens, cache_read_tokens, cache_write_tokens,
            requests_with_usage, requests_without_usage, requests_dropped_usage
     FROM model_usage ${where}
     UNION ALL
-    SELECT model, input_tokens, output_tokens, cache_read_tokens, cache_write_tokens, 0, 0, 0
+    SELECT day, worker_id, model, input_tokens, output_tokens, cache_read_tokens, cache_write_tokens, 0, 0, 0
     FROM session_usage ${where}
   `;
 }
@@ -144,6 +144,8 @@ export function normalizeRejectionModel(model: string | null): string {
   if (model === null || model === "") return UNKNOWN_MODEL;
   return /^[A-Za-z0-9._-]{1,64}$/.test(model) ? model : UNKNOWN_MODEL;
 }
+
+type DailyRow = { day: string; key: string; inputTokens: number; outputTokens: number; cacheReadTokens: number; requests: number };
 
 export class StatsStore {
   #db: DatabaseSync;
@@ -461,6 +463,61 @@ export class StatsStore {
     return out;
   }
 
+  /**
+   * 按天的用量，同时给出按模型与按 Worker 两种分组。与其他聚合共用 `usageUnion`（同一套
+   * 会话去重口径），且只扫一遍：按 (day, model, worker) 分组后在这里各自折叠。
+   */
+  daily(sinceDay?: string): { byModel: DailyRow[]; byWorker: DailyRow[] } {
+    const filtered = sinceDay !== undefined;
+    const stmt = this.#db.prepare(`
+      SELECT day, model, worker_id,
+             ${saturatingSum("input_tokens")} AS input_tokens,
+             ${saturatingSum("output_tokens")} AS output_tokens,
+             ${saturatingSum("cache_read_tokens")} AS cache_read_tokens,
+             ${saturatingSum("requests_with_usage + requests_without_usage + requests_dropped_usage")} AS requests
+      FROM (${usageUnion(filtered)})
+      GROUP BY day, model, worker_id
+    `);
+    const rows = (filtered ? stmt.all(sinceDay, sinceDay) : stmt.all()) as Array<Record<string, unknown>>;
+    const fold = (keyOf: (r: Record<string, unknown>) => string): DailyRow[] => {
+      const acc = new Map<string, DailyRow>();
+      for (const r of rows) {
+        const day = r["day"] as string;
+        const key = keyOf(r);
+        const id = `${day}\u0000${key}`;
+        const row = acc.get(id) ?? { day, key, inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, requests: 0 };
+        // 与 SQL 里的 saturatingSum 一致：不越过安全整数。
+        row.inputTokens = Math.min(Number.MAX_SAFE_INTEGER, row.inputTokens + (r["input_tokens"] as number));
+        row.outputTokens = Math.min(Number.MAX_SAFE_INTEGER, row.outputTokens + (r["output_tokens"] as number));
+        row.cacheReadTokens = Math.min(Number.MAX_SAFE_INTEGER, row.cacheReadTokens + (r["cache_read_tokens"] as number));
+        row.requests = Math.min(Number.MAX_SAFE_INTEGER, row.requests + (r["requests"] as number));
+        acc.set(id, row);
+      }
+      return [...acc.values()].sort((a, b) => (a.day === b.day ? (a.key < b.key ? -1 : a.key > b.key ? 1 : 0) : a.day < b.day ? -1 : 1));
+    };
+    return { byModel: fold((r) => r["model"] as string), byWorker: fold((r) => r["worker_id"] as string) };
+  }
+
+  /**
+   * 清空全部用量统计：请求与尝试明细、按模型与会话的 token、Worker 累计、网关拒绝。
+   * 保留出口探测历史与会话亲和（那是调度状态，不是用量）。一个事务：要么全清，要么都不动。
+   * 返回删除的行数。
+   */
+  reset(): number {
+    let removed = 0;
+    this.#db.exec("BEGIN IMMEDIATE");
+    try {
+      for (const table of ["upstream_attempts", "model_usage", "session_usage", "worker_stats", "gateway_rejections"]) {
+        removed += Number(this.#db.prepare(`DELETE FROM ${table}`).run().changes);
+      }
+      this.#db.exec("COMMIT");
+    } catch (err) {
+      this.#db.exec("ROLLBACK");
+      throw err;
+    }
+    return removed;
+  }
+
   /** 被拒的模型名与原因（不分协议面）。模型名已在写入时归一化，见 `normalizeRejectionModel`。 */
   rejectedModels(sinceDay?: string): Array<{ reason: string; model: string; count: number }> {
     const merged = new Map<string, { reason: string; model: string; count: number }>();
@@ -485,6 +542,29 @@ export class StatsStore {
       sinceDay === undefined ? stmt.get() : stmt.get(Date.parse(`${sinceDay}T00:00:00Z`))
     ) as { requests: number; attempts: number } | undefined;
     return { requests: row?.requests ?? 0, attempts: row?.attempts ?? 0 };
+  }
+
+  /**
+   * 每个模型在本网关实际得到过 2xx 的协议面。只看 2xx：失败尝试说明不了这个面对该模型可用。
+   * 来自 `upstream_attempts` 明细，受保留期清理限制；`sinceDay` 语义同其他聚合。
+   */
+  modelProtocols(sinceDay?: string): Map<string, string[]> {
+    const where = sinceDay === undefined ? "" : "AND at >= ?";
+    const stmt = this.#db.prepare(
+      `SELECT DISTINCT model, protocol FROM upstream_attempts
+       WHERE model IS NOT NULL AND status BETWEEN 200 AND 299 ${where}
+       ORDER BY model, protocol`,
+    );
+    const rows = (
+      sinceDay === undefined ? stmt.all() : stmt.all(Date.parse(`${sinceDay}T00:00:00Z`))
+    ) as Array<{ model: string; protocol: string }>;
+    const out = new Map<string, string[]>();
+    for (const r of rows) {
+      const list = out.get(r.model);
+      if (list === undefined) out.set(r.model, [r.protocol]);
+      else list.push(r.protocol);
+    }
+    return out;
   }
 
   /**

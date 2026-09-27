@@ -5,7 +5,7 @@ import { StatusIndicator } from "./StatusIndicator.tsx";
 import { FIELD } from "../lib/styles.ts";
 
 /**
- * 局域网访问：未登录的局域网访客看到登录页；本机在网关页设置或关闭访问口令。
+ * 局域网访问：未登录的局域网访客看到登录页；本机在客户端接入页设置或关闭访问口令。
  *
  * 登录状态由服务端 `HttpOnly` cookie 持有，前端只读 `/api/lan/status`，
  * 不在 localStorage 里存任何凭证。
@@ -94,7 +94,7 @@ function LanLogin({ enabled, onDone }: { enabled: boolean; onDone: () => void })
             </form>
           ) : (
             <p className="text-text-muted">
-              局域网访问还没有开启。在运行网关的电脑上打开后台，到网关页设置访问口令后再试。
+              局域网访问还没有开启。在运行网关的电脑上打开后台，到客户端接入页设置访问口令后再试。
             </p>
           )}
         </Panel>

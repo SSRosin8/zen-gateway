@@ -3,7 +3,7 @@ import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { DatabaseSync } from "node:sqlite";
-import { DiagnosticsSchema, ProbeReportSchema } from "../../src/shared/contract.ts";
+import { DiagnosticsSchema } from "../../src/shared/contract.ts";
 import { openRuntimeDb } from "../../src/store/db/open.ts";
 import { BatchProbeStore } from "../../src/store/db/batchProbeStore.ts";
 import { BatchProbeRunner } from "../../src/server/admin/batchRunner.ts";
@@ -15,7 +15,7 @@ import { CLASH_SECRET, get, makeApp, makeConfig, post } from "./helpers/adminFix
 import { dataDir, port, startServer, useScriptSandbox, writeConfig } from "./helpers/scriptSandbox.ts";
 
 /*
- * 进程内诊断 `GET /api/diagnostics` 与深度诊断 `POST /api/diagnostics/deep`，
+ * 进程内诊断 `GET /api/diagnostics`，以及出口探测与批量探测的互斥，
  * 以及首启自动写 opencode.json 的真实入口。
  */
 
@@ -101,7 +101,7 @@ describe("GET /api/diagnostics", () => {
   });
 });
 
-describe("POST /api/diagnostics/deep 与批量探测互斥", () => {
+describe("POST /api/probe 与批量探测互斥", () => {
   let root: string;
   let db: DatabaseSync;
 
@@ -139,23 +139,7 @@ describe("POST /api/diagnostics/deep 与批量探测互斥", () => {
     return { app, batch, release };
   }
 
-  it("**批测进行中时深度诊断得 409**，批测结束后可以运行", async () => {
-    const { app, batch, release } = setup();
-    expect(batch.start()).toBe(true);
-    const blocked = await post(app, "/api/diagnostics/deep");
-    expect(blocked.status).toBe(409);
-    expect((blocked.body as { error: { type: string } }).error.type).toBe("conflict");
-
-    release();
-    for (let i = 0; i < 100 && batch.snapshot().state !== "done"; i += 1) await new Promise((r) => setTimeout(r, 10));
-    expect(batch.snapshot().state).toBe("done");
-
-    const ok = await post(app, "/api/diagnostics/deep");
-    expect(ok.status).toBe(200);
-    expect(ProbeReportSchema.parse(ok.body).results[0]).toMatchObject({ ok: true, egressIp: "203.0.113.9" });
-  });
-
-  it("**批测进行中时 POST /api/probe 同样得 409** —— 单个出口探测也要切 selector", async () => {
+  it("**批测进行中时 POST /api/probe 得 409** —— 单个出口探测也要切 selector", async () => {
     const { app, batch, release } = setup();
     expect(batch.start()).toBe(true);
     const blocked = await post(app, "/api/probe", { proxyIds: ["__direct__"] });
@@ -165,9 +149,10 @@ describe("POST /api/diagnostics/deep 与批量探测互斥", () => {
     expect((await post(app, "/api/probe", { proxyIds: ["__direct__"] })).status).toBe(200);
   });
 
-  it("深度诊断进行中时批测无法启动", async () => {
+  it("出口探测进行中时批测无法启动；深度诊断端点已并入 /api/probe", async () => {
     const { app, batch, release } = setup();
-    const deep = post(app, "/api/diagnostics/deep");
+    expect((await app.request("http://127.0.0.1/api/diagnostics/deep", { method: "POST" })).status).toBe(404);
+    const deep = post(app, "/api/probe", { proxyIds: ["__direct__"] });
     await new Promise((r) => setTimeout(r, 20));
     expect(batch.start()).toBe(false);
     release();

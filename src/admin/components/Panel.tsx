@@ -1,5 +1,6 @@
 import type { ReactNode } from "react";
 import { StatusIndicator } from "./StatusIndicator.tsx";
+import { HintTip } from "./HintTip.tsx";
 
 /**
  * 面板 —— 内容层的实色卡片，层次靠「表面色调 + 1px 边框」，不用阴影。
@@ -8,17 +9,23 @@ import { StatusIndicator } from "./StatusIndicator.tsx";
  */
 export function Panel({
   title,
+  hint,
   action,
   children,
 }: {
   title: string;
+  /** 标题旁的 ⓘ 说明（`HintTip`）：规则类说明放这里，不占正文位置。 */
+  hint?: ReactNode;
   action?: ReactNode;
   children: ReactNode;
 }) {
   return (
     <section className="min-w-0 rounded-lg border border-border bg-surface dark:border-border-strong">
       <header className="flex flex-wrap items-center justify-between gap-3 border-b border-border px-4 py-3 sm:px-5 dark:border-border-strong">
-        <h2 className="text-heading-16 font-semibold tracking-tight">{title}</h2>
+        <h2 className="inline-flex items-center gap-1 text-heading-16 font-semibold tracking-tight">
+          {title}
+          {hint !== undefined && <HintTip label={`${title}说明`}>{hint}</HintTip>}
+        </h2>
         {action}
       </header>
       <div className="px-4 py-4 sm:px-5">{children}</div>
@@ -145,6 +152,18 @@ export function SecondaryButton({
   );
 }
 
+/** 外观与 `SecondaryButton` 一致的链接：是「去某处」，中键与新标签页照常可用。 */
+export function SecondaryLink({ href, children }: { href: string; children: ReactNode }) {
+  return (
+    <a
+      href={href}
+      className="inline-flex min-h-[44px] items-center rounded-sm border border-border-strong bg-surface px-3.5 text-text no-underline transition-colors hover:bg-surface-hover active:bg-surface-active"
+    >
+      {children}
+    </a>
+  );
+}
+
 /**
  * 表单保存结果。
  *
@@ -230,4 +249,21 @@ export function Skeleton({ className }: { className: string }) {
  */
 export function Strong({ children }: { children: ReactNode }) {
   return <strong className="font-medium">{children}</strong>;
+}
+
+/**
+ * 页头：标题 + 一行状态摘要 + 可选的主操作。替代先前用一个「标题叫页面名」的 Panel 当页头。
+ * 每个视图仍最多一个 PrimaryButton，页头的 action 就是它的首选位置。
+ */
+export function PageHeader({ title, status, hint, action }: { title: string; status?: ReactNode; hint?: ReactNode; action?: ReactNode }) {
+  return (
+    <header className="flex flex-wrap items-center gap-x-4 gap-y-2">
+      <h1 className="inline-flex items-center gap-1 text-heading-20 font-semibold tracking-tight">
+        {title}
+        {hint !== undefined && <HintTip label={`${title}说明`}>{hint}</HintTip>}
+      </h1>
+      {status !== undefined && <span className="text-text-muted">{status}</span>}
+      {action !== undefined && <span className="ml-auto flex flex-wrap gap-2">{action}</span>}
+    </header>
+  );
 }

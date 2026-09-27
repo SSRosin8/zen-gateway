@@ -4,9 +4,13 @@ import { INITIAL } from "../../shared/batchProbe.ts";
 import type { BatchProbeStore } from "../../store/db/batchProbeStore.ts";
 import type { EgressService } from "../../core/proxy/egress.ts";
 import { applyProbeResults } from "../../core/proxy/egress.ts";
-import { resolveProxy } from "../../core/proxy/pool.ts";
+import { describeResolveFailure, resolveProxy } from "../../core/proxy/pool.ts";
+import { DIRECT_EGRESS_ID } from "../../shared/schema.ts";
 import { usedProxyIds } from "../../core/routing/workerPool.ts";
+import { applyConfigPatch } from "./patch.ts";
+import { bulkAnonymousWorkers, duplicateEgressIds } from "../../shared/workerIds.ts";
 import { safeErrorMessage } from "../../shared/redact.ts";
+import type { BatchProgressView } from "../../shared/contract.ts";
 import { lockedBridgeFor, type BridgeHealth } from "../../core/proxy/clash/select.ts";
 
 /**
@@ -14,6 +18,13 @@ import { lockedBridgeFor, type BridgeHealth } from "../../core/proxy/clash/selec
  * `store/db/batchProbeStore.ts` 持久化。两段：筛选（`resolveProxy`，纯本地）→ 主探测（真发请求）。
  * 执行在后台、不 await：几十秒的 HTTP 请求会被中间层掐断，进度靠轮询拿。
  */
+
+/**
+ * 批测中一个节点的状态，取自线上契约（`BatchProgressSchema.nodes`），不另写一份。
+ * `skipped` = 筛选段被挡下（配置问题）或整批提前结束时没轮到。
+ */
+export type BatchNodeStatus = DistributiveOmit<BatchProgressView["nodes"][number], "proxyId">;
+type DistributiveOmit<T, K extends PropertyKey> = T extends unknown ? Omit<T, K> : never;
 
 export type BatchRunnerDeps = {
   readonly configOf: () => Config;
@@ -37,6 +48,11 @@ export class BatchProbeRunner {
   #running: Promise<void> | null = null;
   /** 暂停的等待点，`resume` 时 resolve；用 Promise 而非轮询，避免恢复延迟。 */
   #resumeSignal: (() => void) | null = null;
+  /**
+   * 本批逐个节点的状态，供代理池表格按行显示「探测中 / 成功 / 失败」。只在进程内存里：
+   * 它是进行中的视图，最终结果已写回配置（egressIp），重启后不需要恢复。
+   */
+  #nodes = new Map<string, BatchNodeStatus>();
 
   constructor(deps: BatchRunnerDeps) {
     this.#deps = deps;
@@ -54,8 +70,13 @@ export class BatchProbeRunner {
     return this.#progress;
   }
 
+  /** 本批逐个节点的状态（id → 状态），按探测顺序。 */
+  nodes(): ReadonlyArray<{ proxyId: string } & BatchNodeStatus> {
+    return [...this.#nodes].map(([proxyId, s]) => ({ proxyId, ...s }));
+  }
+
   /**
-   * 以批测互斥锁跑一个同样会切 selector 的操作（深度诊断）。已有一批或另一个独占操作在跑时
+   * 以批测互斥锁跑一个同样会切 selector 的操作（`POST /api/probe`）。已有一批或另一个独占操作在跑时
    * 返回 `null`，调用方回 409；运行期间 `start()` 也返回 false。两者并发会互相切 selector，
    * 回显报告就成了噪声。
    */
@@ -89,21 +110,27 @@ export class BatchProbeRunner {
   /**
    * 开始一批。返回 false 表示已有一批在跑或无可探出口，调用方回 409 而不排队：
    * 两批并发会互相切 selector。
+   *
+   * 范围是代理池里全部已启用节点（批测回答「池里哪些节点能用」），外加在用的本机直连。
+   * `createWorkers` 为 true 时，结束后为探测成功、未被引用、且回显 IP 与已有出口不重复的
+   * 节点各建一个匿名 Worker（显式选项，默认不建）。
    */
-  start(): boolean {
+  start(opts: { createWorkers?: boolean } = {}): boolean {
     if (this.#running !== null) return false;
 
     const config = this.#deps.configOf();
-    const proxyIds = usedProxyIds(config);
+    const proxyIds = batchTargets(config);
     if (proxyIds.length === 0) return false;
 
     this.#startedAt = this.#now();
     this.#progress = INITIAL;
+    this.#nodes = new Map(proxyIds.map((id) => [id ?? DIRECT_EGRESS_ID, { state: "queued" } as BatchNodeStatus]));
     this.#dispatch({ type: "start", screenTotal: proxyIds.length });
 
-    this.#running = this.#run(proxyIds)
+    this.#running = this.#run(proxyIds, opts.createWorkers === true)
       .catch((err) => {
         this.#deps.log?.(`批量探测异常: ${safeErrorMessage(err)}`);
+        this.#settleNodes("批测异常中断");
         this.#dispatch({ type: "finished", failureKind: "internal" });
       })
       .finally(() => {
@@ -147,7 +174,7 @@ export class BatchProbeRunner {
     });
   }
 
-  async #run(proxyIds: Array<string | null>): Promise<void> {
+  async #run(proxyIds: Array<string | null>, createWorkers: boolean): Promise<void> {
     // `let`：第 0 段可能写回 `activeBridgeId`，之后的筛选与探测必须用写回后的那份。
     let config = this.#deps.configOf();
 
@@ -185,12 +212,14 @@ export class BatchProbeRunner {
     const passed: Array<string | null> = [];
     for (const proxyId of proxyIds) {
       if (this.#progress.cancelRequested) {
+        this.#settleNodes("已取消");
         this.#dispatch({ type: "finished", failureKind: "cancelled" });
         return;
       }
       // 筛选复用 `resolveProxy`：纯本地判断，坏配置的代理不占真实探测，且与主探测不会分叉。
       const resolved = resolveProxy(config, proxyId);
       if (resolved.ok) passed.push(proxyId);
+      else this.#nodes.set(proxyId ?? DIRECT_EGRESS_ID, { state: "skipped", reason: describeResolveFailure(resolved.failure) });
       this.#dispatch({ type: "screened" });
     }
 
@@ -203,15 +232,22 @@ export class BatchProbeRunner {
       await this.#waitIfPaused();
 
       if (this.#progress.cancelRequested) {
-        this.#dispatch({ type: "finished", failureKind: "cancelled" });
-        // 已经探到的照样写回 —— 那些是真实测量，丢掉它们没有道理。
-        await this.#persist(outcomes);
+        await this.#finishCancelled(outcomes);
         return;
       }
 
       // 逐个串行：进度要逐个报，桥接探测本就被 selector 锁串行化。
+      const nodeId = proxyId ?? DIRECT_EGRESS_ID;
+      this.#nodes.set(nodeId, { state: "probing" });
       const result = await this.#deps.egress.probeProxy(config, proxyId);
       outcomes.set(result.proxyId, result.outcome);
+      const o = result.outcome;
+      this.#nodes.set(
+        nodeId,
+        o.ok
+          ? { state: "ok", egressIp: o.egressIp, latencyMs: o.latencyMs }
+          : { state: "failed", reason: `${o.failureKind}:${o.reason}` },
+      );
 
       /*
        * dispatch 前再做一次暂停检查：reducer 暂停时不推进 `probed`，
@@ -222,7 +258,71 @@ export class BatchProbeRunner {
     }
 
     await this.#persist(outcomes);
+    /*
+     * 循环只在每轮开头看取消：最后一个节点探测中或写回期间点的暂停/取消到这里才处理。
+     * 暂停先等；取消了就不再新建 Worker —— 用户要停的正是这一步。
+     */
+    await this.#waitIfPaused();
+    if (this.#progress.cancelRequested) {
+      await this.#finishCancelled(new Map());
+      return;
+    }
+    if (createWorkers) {
+      for (const id of await this.#createFor(outcomes)) this.#dispatch({ type: "workerAdded", workerId: id });
+    }
     this.#dispatch({ type: "finished" });
+  }
+
+  /**
+   * 取消生效：已探到的照样写回（那些是真实测量），没轮到的节点标为已取消。
+   * 先写回再给 `done`：`done` 会放开「开始」，新一批的写回不能与这次交错。
+   */
+  async #finishCancelled(outcomes: Map<string, Awaited<ReturnType<EgressService["probeProxy"]>>["outcome"]>): Promise<void> {
+    this.#settleNodes("已取消");
+    await this.#persist(outcomes);
+    this.#dispatch({ type: "finished", failureKind: "cancelled" });
+  }
+
+  /** 整批提前结束时，把还在排队或探测中的节点落到终态，否则表格会一直显示「排队中」。 */
+  #settleNodes(reason: string): void {
+    for (const [id, n] of this.#nodes) {
+      if (n.state === "queued" || n.state === "probing") this.#nodes.set(id, { state: "skipped", reason });
+    }
+  }
+
+  /**
+   * 为可用且出口不重复的节点建匿名 Worker，一次写盘。命名与后台的批量导入同一份
+   * （`shared/workerIds.ts`），id 接着 `anon-N`。只建直连或桥接节点，不建本机直连。
+   */
+  async #createFor(outcomes: Map<string, { ok: boolean; egressIp?: string }>): Promise<string[]> {
+    const config = this.#deps.configOf();
+    const used = new Set(config.workers.map((w) => w.proxyId).filter((p): p is string => p !== null));
+    const takenIps = new Set(config.proxies.filter((p) => used.has(p.id) && p.egressIp !== null).map((p) => p.egressIp!));
+    if (config.gateway.directEgressIp !== null && config.workers.some((w) => w.proxyId === null)) {
+      takenIps.add(config.gateway.directEgressIp);
+    }
+    // 候选 = 本批探测成功、未被引用的节点；出口去重与后台批量导入同一条规则。
+    const candidates = config.proxies.flatMap((proxy) => {
+      const o = outcomes.get(proxy.id);
+      return o?.ok === true && o.egressIp !== undefined && !used.has(proxy.id) ? [{ proxy, id: proxy.id, egressIp: o.egressIp }] : [];
+    });
+    const duplicate = duplicateEgressIds(takenIps, candidates);
+    const picked = candidates.filter((c) => !duplicate.has(c.id)).map(({ proxy }) => ({ id: proxy.id, name: proxy.clashNodeName ?? proxy.name }));
+    if (picked.length === 0) return [];
+    const create = bulkAnonymousWorkers(config.workers.map((w) => w.id), picked);
+    // 与后台保存走同一个合并（`applyConfigPatch`）：id 冲突、上限与引用检查只有一处。
+    const merged = applyConfigPatch(config, { workers: { create } });
+    if (!merged.ok) {
+      this.#deps.log?.(`批测后新建 Worker 失败: ${merged.failure.message}`);
+      return [];
+    }
+    try {
+      await this.#deps.applyConfig(merged.config, config);
+    } catch (err) {
+      this.#deps.log?.(`批测后新建 Worker 写入失败: ${safeErrorMessage(err)}`);
+      return [];
+    }
+    return create.map((w) => w.id);
   }
 
   /**
@@ -245,4 +345,11 @@ export class BatchProbeRunner {
       this.#deps.log?.(`批量探测结果写入失败: ${safeErrorMessage(err)}`);
     }
   }
+}
+
+/** 批测范围：全部已启用的代理节点 + 在用的本机直连（`null`）。 */
+export function batchTargets(config: Config): Array<string | null> {
+  const ids: Array<string | null> = config.proxies.filter((p) => p.enabled).map((p) => p.id);
+  if (usedProxyIds(config).includes(null)) ids.push(null);
+  return ids;
 }

@@ -57,7 +57,7 @@ describe("嵌套默认值真的生效（prefault 回归守卫）", () => {
   it("models 规则的默认值完整", () => {
     const cfg = ConfigSchema.parse(base());
     expect(cfg.models.freeSuffix).toBe("-free");
-    expect(cfg.models.defaultSurfaces).toContain("chat");
+    expect(cfg.models.enforceCatalog).toBe(true);
   });
 
   it("extraFreeIds 出厂默认只含上游目录里真实存在的无后缀免费模型", () => {
@@ -350,18 +350,25 @@ describe("校验消息不回显用户数据", () => {
   });
 });
 
-describe("集合上限", () => {
-  it("surfaceOverrides 有键数上限", () => {
-    // 其他集合都有上限;配置文件可手工编辑,无界 record 会让一次误粘贴
-    // 变成启动期的内存与校验开销。
-    const many: Record<string, string[]> = {};
-    for (let i = 0; i < 600; i += 1) many[`m${i}`] = ["chat"];
-    expect(ConfigSchema.safeParse(base({ models: { surfaceOverrides: many } })).success).toBe(false);
+describe("已删除的模型规则键", () => {
+  const legacy = {
+    freeSuffix: "-free",
+    defaultSurfaces: ["chat", "responses"],
+    surfaceOverrides: { "big-pickle": ["messages"] },
+  };
+
+  it("旧配置里的 defaultSurfaces / surfaceOverrides 仍能加载，且解析结果里不再有它们", () => {
+    const result = ConfigSchema.safeParse(base({ models: legacy }));
+    expect(result.success).toBe(true);
+    const models = result.data!.models as Record<string, unknown>;
+    expect(models).not.toHaveProperty("defaultSurfaces");
+    expect(models).not.toHaveProperty("surfaceOverrides");
+    // 丢的只是那两个键，同一对象里的其余字段照常生效。
+    expect(result.data!.models.freeSuffix).toBe("-free");
   });
 
-  it("正常规模的覆写可用", () => {
-    const few = { "big-pickle": ["chat", "responses", "messages"] };
-    expect(ConfigSchema.safeParse(base({ models: { surfaceOverrides: few } })).success).toBe(true);
+  it("只丢那两个名字：models 里的其他未知键仍然报错", () => {
+    expect(ConfigSchema.safeParse(base({ models: { freeSufix: "-free" } })).success).toBe(false);
   });
 });
 

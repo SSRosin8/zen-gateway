@@ -115,7 +115,7 @@ async function catalogLayer(deps: DiagnosticsDeps): Promise<LayerResult> {
       detail: `${caLine}\n服务日志里有被脱敏的具体原因(形如 fetch failed ← unable to get local issuer certificate)。`,
       nextStep: missingCa
         ? "企业网络下需要带 CA 重启:npm stop && NODE_EXTRA_CA_CERTS=/path/to/ca-bundle.pem npm start"
-        : "CA 已设,查出口与网络:服务日志中的「目录拉取」行,或运行深度诊断。",
+        : "CA 已设,查出口与网络:服务日志中的「目录拉取」行,或到 Worker 页点「探测在用出口」。",
     };
   }
 

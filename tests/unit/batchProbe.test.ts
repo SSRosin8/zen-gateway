@@ -62,7 +62,8 @@ describe("状态机的合法转移", () => {
       { type: "start", screenTotal: 2 },
       { type: "screened" },
       { type: "screenDone", mainTotal: 2 },
-      { type: "probed", addedWorkerId: "w9" },
+      { type: "probed" },
+      { type: "workerAdded", workerId: "w9" },
       { type: "finished", failureKind: "cancelled" },
     ]);
     expect(first.addedWorkerIds).toEqual(["w9"]);
@@ -312,10 +313,16 @@ describe("addedWorkerIds", () => {
       { type: "start", screenTotal: 1 },
       { type: "screened" },
       { type: "screenDone", mainTotal: 3 },
-      { type: "probed", addedWorkerId: "w1" },
       { type: "probed" },
-      { type: "probed", addedWorkerId: "w2" },
+      { type: "workerAdded", workerId: "w1" },
+      { type: "probed" },
+      { type: "workerAdded", workerId: "w2" },
     ]);
     expect(p.addedWorkerIds).toEqual(["w1", "w2"]);
+    // 结束后不再接收（整批已收尾）。
+    expect(reduce({ ...p, state: "done" }, { type: "workerAdded", workerId: "w3" }).addedWorkerIds).toEqual(["w1", "w2"]);
+    // Worker 已写进配置：暂停或取消中到达的也要记下。
+    expect(reduce({ ...p, state: "paused" }, { type: "workerAdded", workerId: "w3" }).addedWorkerIds).toEqual(["w1", "w2", "w3"]);
+    expect(reduce({ ...p, state: "cancelling" }, { type: "workerAdded", workerId: "w3" }).addedWorkerIds).toEqual(["w1", "w2", "w3"]);
   });
 });

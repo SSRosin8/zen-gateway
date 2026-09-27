@@ -5,6 +5,7 @@ import type { Config } from "../shared/schema.ts";
 import { resolveAdminPort, resolvePort } from "../store/port.ts";
 import { EgressService } from "../core/proxy/egress.ts";
 import { ModelCatalog, catalogIdentityOf } from "../core/models/catalog.ts";
+import { ProtocolDeclarations } from "../core/models/protocols.ts";
 import { ConfigError } from "../store/config.ts";
 import { Scheduler } from "../core/routing/scheduler.ts";
 import { openRuntimeDb } from "../store/db/open.ts";
@@ -127,6 +128,7 @@ async function main(): Promise<void> {
   };
 
   const catalog = new ModelCatalog({ log: (message) => console.error(message) });
+  const protocols = new ProtocolDeclarations({ log: (message) => console.error(message) });
 
   /*
    * 配置热更新的唯一写入点。先写盘再换引用：反过来写盘失败会留下「一半生效」。
@@ -220,6 +222,7 @@ async function main(): Promise<void> {
       effectivePort: () => port,
       runtimeWorkers: () => scheduler.runtimeWorkers(config, Date.now()),
       catalog,
+      protocols,
       // 与转发面同一个实例（不变量 #7 的延伸）。
       egress,
       ...(batchRunner !== undefined ? { batch: batchRunner } : {}),
@@ -279,6 +282,8 @@ async function main(): Promise<void> {
       config,
       (cfg) => egress.upstreamDeps(cfg),
     );
+    // 模型页的协议声明（models.dev）同样后台预热，失败只记日志，模型页访问时再试。
+    void protocols.refreshIfStale();
   });
 
   server.on("error", (err: NodeJS.ErrnoException) => {

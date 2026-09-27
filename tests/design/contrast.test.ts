@@ -14,6 +14,9 @@ const CSS = readFileSync(new URL("../../src/admin/styles/tokens.css", import.met
 
 const LIGHT = parseTokenBlock(CSS, ":root");
 const DARK = parseTokenBlock(CSS, '[data-theme="dark"]');
+/** 暖米白皮肤：同一套 token 名，由 `:root[data-skin="warm"]` 覆盖。 */
+const WARM_LIGHT = parseTokenBlock(CSS, ':root[data-skin="warm"]');
+const WARM_DARK = parseTokenBlock(CSS, ':root[data-skin="warm"][data-theme="dark"]');
 
 // 防回归：若 parseTokenBlock 按选择器首次出现取块，而
 // `[data-theme="dark"]` 也出现在 @custom-variant 声明里，深色主题就会
@@ -50,11 +53,21 @@ const GLASS = ["glass"] as const;
  */
 const STRUCTURAL = ["border", "border-strong", "accent-fill", "accent-fill-hover", "on-accent-fill", "scrim"] as const;
 
-const CLASSIFIED = [...FOREGROUNDS, ...SURFACES, ...GLASS, ...STRUCTURAL] as const;
+/**
+ * 图表系列色：只做标记（线、柱、色块），文字一律用文字 token，所以不参与 4.5 的笛卡尔积。
+ * 它们在各自表面上的区分度与 CVD 由 dataviz 校验脚本验过；这里只要求每个都 ≥ 1.5:1，
+ * 不会淡到看不见（浅色下几个亮色低于 3:1，由图例与数据表补足，见用量页）。
+ */
+const SERIES = ["series-1", "series-2", "series-3", "series-4", "series-5", "series-6", "series-7", "series-8"] as const;
 
+const CLASSIFIED = [...FOREGROUNDS, ...SURFACES, ...GLASS, ...STRUCTURAL, ...SERIES] as const;
+
+/** 每个皮肤 × 主题一套，全部断言对四套都跑。 */
 const THEMES: Array<[string, TokenMap]> = [
   ["light", LIGHT],
   ["dark", DARK],
+  ["warm-light", WARM_LIGHT],
+  ["warm-dark", WARM_DARK],
 ];
 
 describe("token 解析本身", () => {
@@ -107,9 +120,11 @@ describe("设计 token 对比度", () => {
     expect(missing).toEqual([]);
   });
 
-  it("两个主题定义同一组 token", () => {
-    // 先前写成「每个主题都和 LIGHT 比」，其中 light 那一次是和自己比，是个恒真断言。
-    expect(Object.keys(DARK).sort()).toEqual(Object.keys(LIGHT).sort());
+  it("每个皮肤 × 主题定义同一组 token", () => {
+    // 与 LIGHT 比时跳过 LIGHT 自身：自己和自己比是恒真断言。
+    for (const [name, tokens] of THEMES.slice(1)) {
+      expect(Object.keys(tokens).sort(), name).toEqual(Object.keys(LIGHT).sort());
+    }
   });
 
   // 核心断言：前景 × 表面 的笛卡尔积全部 ≥4.5:1。
@@ -284,8 +299,7 @@ describe("禁用态仍然可读", () => {
     { name: "描边按钮 on bg", fg: "text-muted", bg: "bg" },
   ] as const;
 
-  for (const theme of ["light", "dark"] as const) {
-    const tokens: TokenMap = theme === "light" ? LIGHT : DARK;
+  for (const [theme, tokens] of THEMES) {
     for (const pair of DISABLED_PAIRS) {
       it(`${theme} · ${pair.name} ≥4.5`, () => {
         const fg = tokens[pair.fg];
@@ -359,6 +373,8 @@ describe("毛玻璃合成后仍 ≥4.5:1", () => {
   const ALPHAS: Array<[string, Record<string, number>, TokenMap]> = [
     ["light", parseAlphaBlock(CSS, ":root"), LIGHT],
     ["dark", parseAlphaBlock(CSS, '[data-theme="dark"]'), DARK],
+    ["warm-light", parseAlphaBlock(CSS, ':root[data-skin="warm"]'), WARM_LIGHT],
+    ["warm-dark", parseAlphaBlock(CSS, ':root[data-skin="warm"][data-theme="dark"]'), WARM_DARK],
   ];
 
   it.each(ALPHAS)("%s：两种材质与遮罩的透明度都已声明", (_name, alphas) => {
@@ -439,4 +455,14 @@ describe("玻璃与阴影的使用范围", () => {
     }
     expect(bad).toEqual([]);
   });
+});
+
+describe("图表系列色", () => {
+  for (const [theme, tokens] of THEMES) {
+    it(`${theme}：八个系列色互不相同，且在 surface 上看得见（≥1.5:1）`, () => {
+      const values = SERIES.map((k) => tokens[k]!);
+      expect(new Set(values).size).toBe(SERIES.length);
+      for (const k of SERIES) expect(contrastRatio(tokens[k]!, tokens["surface"]!), k).toBeGreaterThanOrEqual(1.5);
+    });
+  }
 });

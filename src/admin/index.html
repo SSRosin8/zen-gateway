@@ -6,7 +6,7 @@
     <title>zen-gateway</title>
     <!-- 网关不伺服静态资源；空图标避免浏览器每次请求 /favicon.ico 得到 404。 -->
     <link rel="icon" href="data:," />
-    <!-- 首屏前解析配色，避免 React 挂载前先闪一帧浅色。键名与判定须与 lib/theme.ts 一致。 -->
+    <!-- 首屏前解析配色与皮肤，避免 React 挂载前先闪一帧。键名与判定须与 lib/theme.ts 一致。 -->
     <script>
       (function () {
         var pref = null;
@@ -19,6 +19,9 @@
             typeof window.matchMedia === "function" &&
             window.matchMedia("(prefers-color-scheme: dark)").matches);
         document.documentElement.setAttribute("data-theme", dark ? "dark" : "light");
+        try {
+          if (window.localStorage.getItem("zg-skin") === "warm") document.documentElement.setAttribute("data-skin", "warm");
+        } catch (e) {}
       })();
     </script>
   </head>

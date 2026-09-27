@@ -330,57 +330,26 @@ describe("执行器", () => {
     expect(getConfig().proxies[0]!.egressIp).toBeNull();
   }, 30_000);
 
-  it("不可解析的代理在筛选段就被挡掉，不占一次真实探测", async () => {
+  it("不可解析的代理在筛选段就被挡掉，不占一次真实探测；逐个节点的状态可见", async () => {
     /*
-     * 这是分两段的**全部意义**:一个配置坏了的代理不该占一次几秒的真实探测。
+     * 分两段的意义：配置坏了的节点不该占一次几秒的真实探测。
      *
-     * ## 为什么不用「只能桥接的代理 + `clash.enabled: false`」
-     *
-     * 那种配置会被 `ConfigSchema` 的 `superRefine` 拒掉（它有一条「该代理
-     * 只能经 Clash 桥接，但 clash.enabled 为 false」）。**那是 schema 在做它该做的事**：那种配置
-     * 加载时就该失败，所以它不可能作为一份合法配置存在。
-     *
-     * 所以用**已停用**的代理:`resolveProxy` 对 `disabled` 也返回失败，
-     * 而 `enabled: false` 的代理在 schema 里完全合法（那是用户的正常操作）。
-     * 于是筛选段的「挡掉」行为有了一条**真实可达**的路径。
-     *
-     * Worker 仍然引用它（引用一个停用的代理是合法的 —— schema 只查 id 存在），
-     * 所以它会进 `proxyIds` 列表并在筛选段被挡下。
+     * 批测范围是全部**已启用**的节点，所以停用的根本不进来；筛选段真实可达的失败是
+     * 「只能桥接、Clash 开着但没有可用内核」（`no_bridge`）—— 内核被停用是合法配置。
      */
     const config = ConfigSchema.parse({
       version: CONFIG_VERSION,
       gateway: { relayToken: "batch-test-relay-token-x", port: 19992 },
-      workers: [
-        { id: "ok", kind: "authenticated", apiKey: KEY, proxyId: "good" },
-        { id: "bad", kind: "authenticated", apiKey: KEY, proxyId: "off" },
-      ],
+      workers: [{ id: "ok", kind: "authenticated", apiKey: KEY, proxyId: "good" }],
       proxies: [
-        {
-          id: "good",
-          name: "直连",
-          type: "http",
-          host: "127.0.0.1",
-          port: echoPort,
-          source: "manual",
-          direct: true,
-          bridgeable: false,
-          egressIp: null,
-        },
-        {
-          id: "off",
-          name: "已停用的直连",
-          type: "http",
-          host: "127.0.0.1",
-          port: echoPort,
-          source: "manual",
-          // 停用 → `resolveProxy` 返回 `{ kind: "disabled" }`。
-          enabled: false,
-          direct: true,
-          bridgeable: false,
-          egressIp: null,
-        },
+        { id: "good", name: "直连", type: "http", host: "127.0.0.1", port: echoPort, source: "manual", direct: true, bridgeable: false, egressIp: null },
+        { id: "bridged", name: "只能桥接", type: "anytls", host: "127.0.0.1", port: 1, source: "controller", bridgeId: "b1", direct: false, bridgeable: true, egressIp: null },
+        { id: "off", name: "已停用", type: "http", host: "127.0.0.1", port: echoPort, source: "manual", enabled: false, direct: true, bridgeable: false, egressIp: null },
       ],
-      clash: { enabled: false, bridges: [] },
+      clash: {
+        enabled: true,
+        bridges: [{ id: "b1", name: "停用的内核", enabled: false, apiBase: "http://127.0.0.1:1", localProxyPort: 7890 }],
+      },
     });
 
     const { runner, getConfig } = makeRunner(config);
@@ -388,17 +357,61 @@ describe("执行器", () => {
     await waitDone(runner);
 
     const p = runner.snapshot();
-    // 筛选了 2 个。
+    // 停用的不在范围里：只筛了 2 个，其中 1 个进了主探测。
     expect(p.screenTotal).toBe(2);
-    expect(p.screenDone).toBe(2);
-    // 但只有 1 个进了主探测 —— 另一个被挡在筛选段。
     expect(p.mainTotal).toBe(1);
     expect(p.mainDone).toBe(1);
+    const nodes = Object.fromEntries(runner.nodes().map((n) => [n.proxyId, n]));
+    expect(Object.keys(nodes).sort()).toEqual(["bridged", "good"]);
+    expect(nodes["good"]).toMatchObject({ state: "ok" });
+    expect(nodes["bridged"]).toMatchObject({ state: "skipped" });
 
-    // 被挡掉的那个不该有实测 IP（它根本没被探）。
     const after = getConfig();
-    expect(after.proxies.find((x) => x.id === "off")!.egressIp).toBeNull();
+    expect(after.proxies.find((x) => x.id === "bridged")!.egressIp).toBeNull();
     expect(after.proxies.find((x) => x.id === "good")!.egressIp).not.toBeNull();
+  }, 30_000);
+
+  it("范围包含未被 Worker 引用的节点；createWorkers 只为可用、未引用、出口不重复的节点建 Worker", async () => {
+    let n = 0;
+    const ips = ["198.51.100.10", "198.51.100.10", "198.51.100.11"];
+    const echo2 = createServer((_req, res) => {
+      res.writeHead(200, { "content-type": "text/plain" });
+      res.end(ips[n++ % ips.length]);
+    });
+    await new Promise<void>((r) => echo2.listen(0, "127.0.0.1", () => r()));
+    const port2 = (echo2.address() as { port: number }).port;
+    try {
+      const px = (id: string) => ({ id, name: `节点 ${id}`, type: "http" as const, host: "127.0.0.1", port: port2, source: "manual" as const, direct: true, bridgeable: false, egressIp: null });
+      const config = ConfigSchema.parse({
+        version: CONFIG_VERSION,
+        gateway: { relayToken: "batch-test-relay-token-x", port: 19993 },
+        workers: [{ id: "anon-1", kind: "anonymous", proxyId: "a" }],
+        proxies: [px("a"), px("b"), px("c")],
+        clash: { enabled: false, bridges: [] },
+      });
+      let current = config;
+      const egress = new EgressService({
+        timeouts: { headersTimeoutMs: 5000, bodyTimeoutMs: 5000 },
+        services: [{ url: `http://127.0.0.1:${port2}/`, extract: (t) => t.trim() }],
+        probeTimeoutMs: 3000,
+      });
+      const runner = new BatchProbeRunner({ configOf: () => current, applyConfig: async (next) => { current = next; }, egress, store });
+      expect(runner.start({ createWorkers: true })).toBe(true);
+      await waitDone(runner);
+      // a 已被 anon-1 用（IP .10）；b 同为 .10 → 重复不建；c 是 .11 → 建一个。
+      expect(runner.snapshot().mainDone).toBe(3);
+      expect(runner.snapshot().addedWorkerIds).toEqual(["anon-2"]);
+      expect(current.workers.find((w) => w.id === "anon-2")).toMatchObject({ kind: "anonymous", proxyId: "c" });
+
+      // 不勾选时不建。
+      n = 0;
+      const before = current.workers.length;
+      expect(runner.start()).toBe(true);
+      await waitDone(runner);
+      expect(current.workers).toHaveLength(before);
+    } finally {
+      await new Promise<void>((r) => echo2.close(() => r()));
+    }
   }, 30_000);
 
   it("中途暂停再恢复后，进度不丢 —— 完成时 mainDone 必须追平 mainTotal", async () => {
@@ -501,6 +514,125 @@ describe("执行器", () => {
     // 而且计数不是空转出来的 —— 两个代理都拿到了实测 IP。
     expect(current.proxies.find((x) => x.id === "p1")!.egressIp).toBe("198.51.100.11");
     expect(current.proxies.find((x) => x.id === "p2")!.egressIp).toBe("198.51.100.22");
+  }, 30_000);
+});
+
+describe("批测结尾的暂停与取消", () => {
+  /** 三个未被引用的节点、IP 各不相同；探测由测试逐发放行，写回可选地卡住。 */
+  function gatedRunner(opts: { holdPersist?: boolean } = {}) {
+    const px = (id: string) => ({ id, name: `节点 ${id}`, type: "http" as const, host: "127.0.0.1", port: echoPort, source: "manual" as const, direct: true, bridgeable: false, egressIp: null });
+    let current = ConfigSchema.parse({
+      version: CONFIG_VERSION,
+      gateway: { relayToken: "batch-test-relay-token-x", port: 19994 },
+      proxies: [px("a"), px("b"), px("c")],
+      clash: { enabled: false, bridges: [] },
+    });
+    const gate: { release: (() => void) | null; persist: (() => void) | null } = { release: null, persist: null };
+    let inFlight = 0;
+    let writes = 0;
+    const egress = {
+      probeProxy: async (_c: Config, proxyId: string | null) => {
+        inFlight += 1;
+        await new Promise<void>((r) => (gate.release = r));
+        const ip = { a: "198.51.100.1", b: "198.51.100.2", c: "198.51.100.3" }[proxyId as "a" | "b" | "c"];
+        return { proxyId: proxyId!, outcome: { ok: true as const, egressIp: ip, latencyMs: 5 } };
+      },
+    } as unknown as EgressService;
+    const runner = new BatchProbeRunner({
+      configOf: () => current,
+      applyConfig: async (next) => {
+        writes += 1;
+        if (opts.holdPersist === true && writes === 1) await new Promise<void>((r) => (gate.persist = r));
+        current = next;
+      },
+      egress,
+      store,
+    });
+    const until = async (cond: () => boolean) => {
+      const deadline = Date.now() + 5000;
+      while (!cond() && Date.now() < deadline) await new Promise((r) => setTimeout(r, 2));
+      expect(cond()).toBe(true);
+    };
+    return { runner, gate, inFlight: () => inFlight, until, getConfig: () => current };
+  }
+
+  it("最后一个节点探测中取消：不新建 Worker，以 cancelled 结束", async () => {
+    const t = gatedRunner();
+    t.runner.start({ createWorkers: true });
+    for (const n of [1, 2]) {
+      await t.until(() => t.inFlight() === n);
+      t.gate.release?.();
+    }
+    await t.until(() => t.inFlight() === 3);
+    t.runner.cancel();
+    t.gate.release?.();
+    await waitDone(t.runner);
+    expect(t.runner.snapshot().failureKind).toBe("cancelled");
+    expect(t.getConfig().workers).toEqual([]);
+    // 已探到的三个照样写回。
+    expect(t.getConfig().proxies.map((p) => p.egressIp)).toEqual(["198.51.100.1", "198.51.100.2", "198.51.100.3"]);
+  }, 30_000);
+
+  it("取消时先写回再进 done：放开「开始」时上一批的写回已经落地", async () => {
+    const t = gatedRunner({ holdPersist: true });
+    t.runner.start();
+    await t.until(() => t.inFlight() === 1);
+    t.runner.cancel();
+    t.gate.release?.();
+    await t.until(() => t.gate.persist !== null);
+    // 写回还卡着：此时不能是 done，否则新一批可以开始并与这次写回交错。
+    expect(t.runner.snapshot().state).toBe("cancelling");
+    t.gate.persist?.();
+    await waitDone(t.runner);
+    expect(t.getConfig().proxies[0]!.egressIp).toBe("198.51.100.1");
+  }, 30_000);
+
+  it("中途取消：没轮到的节点不再停在「排队中」", async () => {
+    const t = gatedRunner();
+    t.runner.start();
+    await t.until(() => t.inFlight() === 1);
+    t.runner.cancel();
+    t.gate.release?.();
+    await waitDone(t.runner);
+    const nodes = Object.fromEntries(t.runner.nodes().map((n) => [n.proxyId, n]));
+    expect(nodes["a"]).toMatchObject({ state: "ok" });
+    expect(nodes["b"]).toMatchObject({ state: "skipped", reason: "已取消" });
+    expect(nodes["c"]).toMatchObject({ state: "skipped", reason: "已取消" });
+  }, 30_000);
+
+  it("写回期间暂停：恢复后才新建 Worker，且新建的 id 都记进进度", async () => {
+    const t = gatedRunner({ holdPersist: true });
+    t.runner.start({ createWorkers: true });
+    for (const n of [1, 2, 3]) {
+      await t.until(() => t.inFlight() === n);
+      t.gate.release?.();
+    }
+    await t.until(() => t.gate.persist !== null);
+    t.runner.pause();
+    t.gate.persist?.();
+    await new Promise((r) => setTimeout(r, 30));
+    // 暂停期间不新建。
+    expect(t.getConfig().workers).toEqual([]);
+    expect(t.runner.snapshot().state).toBe("paused");
+    t.runner.resume();
+    await waitDone(t.runner);
+    expect(t.runner.snapshot().addedWorkerIds).toEqual(["anon-1", "anon-2", "anon-3"]);
+    expect(t.getConfig().workers.map((w) => w.id)).toEqual(["anon-1", "anon-2", "anon-3"]);
+  }, 30_000);
+
+  it("写回期间取消：不新建 Worker", async () => {
+    const t = gatedRunner({ holdPersist: true });
+    t.runner.start({ createWorkers: true });
+    for (const n of [1, 2, 3]) {
+      await t.until(() => t.inFlight() === n);
+      t.gate.release?.();
+    }
+    await t.until(() => t.gate.persist !== null);
+    t.runner.cancel();
+    t.gate.persist?.();
+    await waitDone(t.runner);
+    expect(t.runner.snapshot().failureKind).toBe("cancelled");
+    expect(t.getConfig().workers).toEqual([]);
   }, 30_000);
 });
 

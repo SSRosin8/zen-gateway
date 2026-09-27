@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import type { Config, Proxy } from "../../shared/schema.ts";
+import { ProtocolIdSchema, type Config, type ProtocolId, type Proxy } from "../../shared/schema.ts";
 import type {
   ModelView,
   Overview,
@@ -10,7 +10,8 @@ import type {
 } from "../../shared/contract.ts";
 import { isUsable } from "../../core/routing/workerPool.ts";
 import { describeResolveFailure, resolveProxy } from "../../core/proxy/pool.ts";
-import { judgeFree, surfacesFor } from "../../core/models/free.ts";
+import { judgeFree } from "../../core/models/free.ts";
+import type { ProtocolSnapshot } from "../../core/models/protocols.ts";
 import { redactUrl } from "../../shared/redact.ts";
 import type { CatalogSnapshot } from "../../core/models/catalog.ts";
 
@@ -205,23 +206,31 @@ export function proxyViews(config: Config): ProxyView[] {
   });
 }
 
+/** 模型页协议列的两个来源，见 `ModelViewSchema.protocol`。 */
+export type ModelProtocolSources = {
+  readonly declared: ProtocolSnapshot | null;
+  /** model → 得到过 2xx 的协议面（`StatsStore.modelProtocols`）。 */
+  readonly measured: ReadonlyMap<string, readonly string[]>;
+};
+
 /**
  * 模型列表的投影。付费的也列出来：Models 页要回答「为什么这个模型不能用」。
  * `reason` 直接取自 `judgeFree`，不另造措辞（纪律 #4）。
  */
-export function modelViews(config: Config, snapshot: CatalogSnapshot | null): ModelView[] {
+export function modelViews(
+  config: Config,
+  snapshot: CatalogSnapshot | null,
+  protocols: ModelProtocolSources,
+): ModelView[] {
   if (snapshot === null) return [];
 
   const view = { ids: snapshot.ids };
   /*
-   * 额外列出配置里记着但已从目录消失的免费模型（extraFreeIds 与 surfaceOverrides），
-   * 否则 `retired` 在生产响应中永远不出现。只来自当前配置，不从历史数据猜。
+   * 额外列出配置里记着但已从目录消失的免费模型，否则 `retired` 在生产响应中永远不出现。
+   * 只来自当前配置，不从历史数据猜。
    */
   const entries = new Map(snapshot.entries.map((entry) => [entry.id, entry] as const));
   for (const id of config.models.extraFreeIds) entries.set(id, entries.get(id) ?? { id });
-  for (const id of Object.keys(config.models.surfaceOverrides)) {
-    entries.set(id, entries.get(id) ?? { id });
-  }
 
   return [...entries.values()].map((entry): ModelView => {
     const verdict = judgeFree(entry.id, config.models, view);
@@ -229,11 +238,13 @@ export function modelViews(config: Config, snapshot: CatalogSnapshot | null): Mo
       id: entry.id,
       free: verdict.free,
       reason: verdict.reason,
-      /*
-       * `surfacesFor` 只作展示，不接成放行闸门：默认值不含 messages，
-       * 按它放行会拒掉所有 `/v1/messages` 请求，而上游并不按模型区分面。
-       */
-      surfaces: [...surfacesFor(entry.id, config.models)],
+      protocol: {
+        declared: protocols.declared?.byModel.get(entry.id) ?? null,
+        // 库里的 protocol 列是字符串；只认网关现有的面，旧数据里的未知值不外泄成契约外取值。
+        measured: (protocols.measured.get(entry.id) ?? []).filter(
+          (p): p is ProtocolId => ProtocolIdSchema.safeParse(p).success,
+        ),
+      },
       listed: snapshot.ids.has(entry.id),
     };
   });

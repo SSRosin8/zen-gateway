@@ -75,6 +75,10 @@ export function makeApp(
   config: Config,
   opts: {
     stats?: boolean;
+    /** 覆盖假统计源的 `reset`（重置端点的测试用）。 */
+    statsReset?: () => number;
+    /** 假统计源的 `modelProtocols` 返回值（模型页实测协议）。 */
+    modelProtocols?: Map<string, string[]>;
     onApply?: (c: Config) => void;
     address?: string;
     /** 注入假 IP 回显服务 —— 不打真实网络。 */
@@ -121,6 +125,15 @@ export function makeApp(
     rejectedModels: (d?: string) => {
       seen.push(d);
       return [{ reason: "not_free", model: "fake-paid-model", count: 3 }];
+    },
+    daily: (d?: string) => {
+      seen.push(d);
+      return { byModel: [], byWorker: [] };
+    },
+    reset: () => opts.statsReset?.() ?? 0,
+    modelProtocols: (d?: string) => {
+      seen.push(d);
+      return opts.modelProtocols ?? new Map<string, string[]>();
     },
     requestCounts: (d?: string) => {
       seen.push(d);

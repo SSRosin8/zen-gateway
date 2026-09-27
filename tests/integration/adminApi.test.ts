@@ -2,6 +2,7 @@ import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
 import { Response as UndiciResponse } from "undici";
 import { catalogIdentityOf } from "../../src/core/models/catalog.ts";
+import { ProtocolDeclarations } from "../../src/core/models/protocols.ts";
 import { DispatcherPool } from "../../src/core/proxy/dispatcher.ts";
 import { SelectorLockRegistry } from "../../src/core/proxy/selectorLock.ts";
 import { ConfigSchema, CONFIG_VERSION } from "../../src/shared/schema.ts";
@@ -12,7 +13,7 @@ import {
   StatsViewSchema,
 } from "../../src/shared/contract.ts";
 import { allSecretValues, displayFingerprint } from "../../src/server/admin/project.ts";
-import { KEY_A, KEY_B, get, makeApp, makeConfig } from "./helpers/adminFixture.ts";
+import { KEY_A, KEY_B, get, makeApp, makeConfig, post } from "./helpers/adminFixture.ts";
 
 /*
  * 管理 API 的读端点：凭证不出进程、overview、统计、代理 / 模型 / 批测列表。
@@ -249,6 +250,26 @@ describe("/api/stats", () => {
     expect((await get(app, "/api/stats?days=abc")).status).toBe(400);
   });
 
+  it("重置必须带 { confirm: true }：没带体、带错体都不清库", async () => {
+    let calls = 0;
+    const { app } = makeApp(makeConfig(), { statsReset: () => (calls++, 42) });
+    for (const body of [undefined, {}, { confirm: false }, { confirm: true, extra: 1 }, "not json"]) {
+      expect((await post(app, "/api/stats/reset", body)).status).toBe(400);
+    }
+    expect(calls).toBe(0);
+    const ok = await post(app, "/api/stats/reset", { confirm: true });
+    expect(ok.status).toBe(200);
+    expect(ok.body).toEqual({ ok: true, removed: 42 });
+    expect(calls).toBe(1);
+  });
+
+  it("重置时统计库不可用返回 500，而不是假装成功", async () => {
+    const { app } = makeApp(makeConfig(), { stats: false });
+    const { status, body } = await post(app, "/api/stats/reset", { confirm: true });
+    expect(status).toBe(500);
+    expect(JSON.stringify(body)).toContain("统计库不可用");
+  });
+
   it("统计库不可用时报错,**不返回全 0**", async () => {
     const { app } = makeApp(makeConfig(), { stats: false });
     const { status, body } = await get(app, "/api/stats");
@@ -350,6 +371,93 @@ describe("/api/models", () => {
       listed: true,
     });
     await pool.close();
+  });
+
+  /** 预置一份在架目录：两个模型。 */
+  async function seedCatalog(config: ReturnType<typeof makeConfig>, catalog: ReturnType<typeof makeApp>["catalog"]) {
+    const pool = new DispatcherPool({ headersTimeoutMs: 1000, bodyTimeoutMs: 1000 });
+    await catalog.ensure(catalogIdentityOf(config), config, () => ({
+      config,
+      dispatchers: pool,
+      locks: new SelectorLockRegistry(),
+      controllerFor: () => null,
+      fetchImpl: async () =>
+        new UndiciResponse(JSON.stringify({ data: [{ id: "a-free" }, { id: "b-free" }] }), { status: 200 }),
+    }));
+    await pool.close();
+  }
+
+  it("协议列：声明来自 models.dev 缓存，实测来自统计库，两者分开给", async () => {
+    const config = makeConfig();
+    for (const worker of config.workers) worker.proxyId = null;
+    const protocols = new ProtocolDeclarations({
+      url: "http://127.0.0.1:9/unused",
+      fetchImpl: (async () =>
+        new UndiciResponse(
+          JSON.stringify({ opencode: { npm: "@ai-sdk/openai-compatible", models: { "a-free": { provider: { npm: "@ai-sdk/anthropic" } } } } }),
+          { status: 200 },
+        )) as never,
+    });
+    await protocols.refreshIfStale();
+    const { app, catalog, seenSinceDay } = makeApp(config, {
+      admin: { protocols },
+      // 旧库里可能有未知面名：不能漏到契约外。
+      modelProtocols: new Map([["a-free", ["chat", "bogus"]]]),
+    });
+    await seedCatalog(config, catalog);
+
+    const parsed = ModelListSchema.parse((await get(app, "/api/models")).body);
+    expect(parsed.protocolSource.available).toBe(true);
+    expect(parsed.models.find((m) => m.id === "a-free")!.protocol).toEqual({ declared: "messages", measured: ["chat"] });
+    expect(parsed.models.find((m) => m.id === "b-free")!.protocol).toEqual({ declared: null, measured: [] });
+    // 实测查询带了窗口，不做全表扫。
+    expect(parsed.measuredSinceDay).not.toBeNull();
+    expect(seenSinceDay).toContain(parsed.measuredSinceDay);
+  });
+
+  it("实测协议查询缓存一分钟：连续轮询不重复扫明细", async () => {
+    const config = makeConfig();
+    for (const worker of config.workers) worker.proxyId = null;
+    const { app, catalog, seenSinceDay } = makeApp(config, { modelProtocols: new Map([["a-free", ["chat"]]]) });
+    await seedCatalog(config, catalog);
+    await get(app, "/api/models");
+    const after = seenSinceDay.length;
+    await get(app, "/api/models");
+    await get(app, "/api/models");
+    expect(seenSinceDay.length).toBe(after);
+  });
+
+  it("没有声明缓存、没有统计库时如实报不可用，不伪造协议", async () => {
+    const config = makeConfig();
+    for (const worker of config.workers) worker.proxyId = null;
+    const { app, catalog } = makeApp(config, { stats: false });
+    await seedCatalog(config, catalog);
+
+    const parsed = ModelListSchema.parse((await get(app, "/api/models")).body);
+    expect(parsed.protocolSource).toEqual({ available: false, fetchedAt: null });
+    expect(parsed.measuredSinceDay).toBeNull();
+    for (const m of parsed.models) expect(m.protocol).toEqual({ declared: null, measured: [] });
+  });
+
+  it("模型页请求触发声明的后台刷新，但不等它", async () => {
+    const config = makeConfig();
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => (release = resolve));
+    let calls = 0;
+    const protocols = new ProtocolDeclarations({
+      fetchImpl: (async () => {
+        calls += 1;
+        await gate;
+        return new UndiciResponse(JSON.stringify({ opencode: { models: { "a-free": {} } } }), { status: 200 });
+      }) as never,
+    });
+    const { app } = makeApp(config, { admin: { protocols } });
+    const parsed = ModelListSchema.parse((await get(app, "/api/models")).body);
+    expect(calls).toBe(1);
+    expect(parsed.protocolSource.available).toBe(false);
+    release();
+    await protocols.refreshIfStale();
+    expect(protocols.cached()).not.toBeNull();
   });
 
   it("关闭目录交集时，缺失显式免费项仍可用而不是误称 retired", async () => {

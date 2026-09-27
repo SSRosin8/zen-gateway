@@ -4,11 +4,12 @@ import { render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { WorkersPage } from "../../src/admin/pages/WorkersPage.tsx";
 import { GatewayPage } from "../../src/admin/pages/GatewayPage.tsx";
+import { ClientPage } from "../../src/admin/pages/ClientPage.tsx";
 import { ProxyPage } from "../../src/admin/pages/ProxyPage.tsx";
 import { ClashSection } from "../../src/admin/components/ClashSection.tsx";
 import { ClashImportFlow } from "../../src/admin/components/ClashImportFlow.tsx";
 import { OpenCodeConfigCard } from "../../src/admin/components/OpenCodeConfigCard.tsx";
-import { bulkAnonymousWorkers, bulkWorkerName, nextIndex, tidyNodeName, suggestWorker, validateWorkerId, WORKER_NAME_MAX } from "../../src/admin/lib/workerIds.ts";
+import { bulkAnonymousWorkers, bulkWorkerName, nextIndex, tidyNodeName, suggestWorker, validateWorkerId, WORKER_NAME_MAX } from "../../src/shared/workerIds.ts";
 import { versionFromDetected } from "../../src/admin/lib/consoleApi.ts";
 import { parseHash } from "../../src/admin/lib/router.ts";
 import * as adminApi from "../../src/admin/lib/api.ts";
@@ -380,7 +381,7 @@ describe("Relay Token 轮换", () => {
         return Promise.resolve({ ok: true, status: 200, json: () => Promise.resolve(opencodeView({ exists: true, pointsToGateway: true })) });
       }),
     );
-    render(<GatewayPage data={fakeOverview()} opencode={ready(opencodeView({ exists: true, pointsToGateway: true, detectedVersion: "2.0.12" }))} />);
+    render(<ClientPage data={fakeOverview()} opencode={ready(opencodeView({ exists: true, pointsToGateway: true, detectedVersion: "2.0.12" }))} />);
 
     await user.click(screen.getByRole("button", { name: "轮换 Relay Token" }));
     const dialog = screen.getByRole("dialog", { name: "轮换 Relay Token" });
@@ -407,7 +408,7 @@ describe("Relay Token 轮换", () => {
       }),
     );
     const { rerender } = render(
-      <GatewayPage data={fakeOverview()} opencode={ready(opencodeView({ exists: true, pointsToGateway: true, detectedVersion: "2.0.12" }))} />,
+      <ClientPage data={fakeOverview()} opencode={ready(opencodeView({ exists: true, pointsToGateway: true, detectedVersion: "2.0.12" }))} />,
     );
     expect(screen.queryByText(/没有指向本网关/)).not.toBeInTheDocument();
     await user.click(screen.getByRole("button", { name: "轮换 Relay Token" }));
@@ -419,7 +420,7 @@ describe("Relay Token 轮换", () => {
     expect(writes).toEqual([]);
 
     // 服务端判据变为「未指向」后（例如轮换后刷新），提示出现；重写后文件指向当前 token。
-    rerender(<GatewayPage data={fakeOverview()} opencode={ready(opencodeView({ exists: true, pointsToGateway: false, detectedVersion: "2.0.12" }))} />);
+    rerender(<ClientPage data={fakeOverview()} opencode={ready(opencodeView({ exists: true, pointsToGateway: false, detectedVersion: "2.0.12" }))} />);
     const prompt = screen.getByText(/没有指向本网关/).closest("[data-rewrite-prompt]") as HTMLElement;
     await user.click(within(prompt).getByRole("button", { name: "重写 opencode.json" }));
     await within(prompt).findByText("已重写 opencode.json");
@@ -429,7 +430,7 @@ describe("Relay Token 轮换", () => {
   it("取消不发请求", async () => {
     const user = userEvent.setup();
     const { spy } = spyPatch();
-    render(<GatewayPage data={fakeOverview()} />);
+    render(<ClientPage data={fakeOverview()} />);
     await user.click(screen.getByRole("button", { name: "轮换 Relay Token" }));
     await user.click(within(screen.getByRole("dialog")).getByRole("button", { name: "取消" }));
     expect(spy).not.toHaveBeenCalled();
@@ -552,6 +553,17 @@ describe("Clash 内核 secret 三态", () => {
   });
 });
 
+describe("Clash 内核列表", () => {
+  it("超过一页时能翻到后面的内核", async () => {
+    const user = userEvent.setup();
+    const bridges = Array.from({ length: 20 }, (_, i) => ({ ...bridgeView, id: `b${i + 1}`, name: `内核 ${String(i + 1).padStart(2, "0")}` }));
+    render(<ClashSection clash={{ enabled: true, selectionMode: "auto", activeBridgeId: "b1", bridges }} refresh={noop} />);
+    expect(screen.queryByText("内核 20")).not.toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "下一页" }));
+    expect(screen.getByText("内核 20")).toBeInTheDocument();
+  });
+});
+
 describe("订阅 URL 三态", () => {
   const sub = {
     id: "sub1",
@@ -634,11 +646,15 @@ describe("代理节点操作", () => {
     );
     const row1 = container.querySelector('[data-row="p1"]') as HTMLElement;
     const row2 = container.querySelector('[data-row="p2"]') as HTMLElement;
-    const del1 = within(row1).getByRole("button", { name: "删除" });
+    // 删除在行的「更多」菜单里；被引用时仍列出，但禁用并说明原因。
+    await user.click(within(row1).getByRole("button", { name: "甲 的更多操作" }));
+    const del1 = screen.getByRole("menuitem", { name: /^删除/ });
     expect(del1).toBeDisabled();
-    expect(del1.closest("[title]")).toHaveAttribute("title", "被 anon-1 引用，先改绑这些 Worker");
+    expect(del1).toHaveAttribute("title", "被 anon-1 引用，先改绑这些 Worker");
+    await user.keyboard("{Escape}");
 
-    await user.click(within(row2).getByRole("button", { name: "删除" }));
+    await user.click(within(row2).getByRole("button", { name: "乙 的更多操作" }));
+    await user.click(screen.getByRole("menuitem", { name: "删除" }));
     await user.click(within(screen.getByRole("dialog", { name: "删除代理节点" })).getByRole("button", { name: "确认删除" }));
     await user.click(within(row1).getByRole("button", { name: "停用" }));
     await waitFor(() =>

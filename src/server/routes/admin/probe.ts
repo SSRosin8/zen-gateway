@@ -10,9 +10,8 @@ import { adminError, readJsonBody } from "./common.ts";
 /**
  * 探测在用的出口并把实测 IP 写回配置：隔离报告按 `config.proxies[].egressIp` 分组，
  * 只探测不写回则隔离永远无法成立。探测走服务自己的 `EgressService`（不变量 #7 的延伸）。
- * `POST /api/probe` 与深度诊断共用。
  *
- * 请求体可带 `proxyIds` 只探指定出口（前端逐个探测以显示进度，代理池单行探测）；
+ * 请求体可带 `proxyIds` 只探指定出口（前端逐个探测以显示进度，出口页单行探测）；
  * 未知 id 整体 404，不探一半。省略时探全部在用出口。
  */
 export async function probeUsedEgress(c: Context, deps: AdminDeps): Promise<Response> {
@@ -82,7 +81,6 @@ export async function probeUsedEgress(c: Context, deps: AdminDeps): Promise<Resp
 
 /**
  * 与批量探测互斥地运行一次探测：两者都会切 Clash selector，交错时探到的 IP 不属于被测节点。
- * `POST /api/probe` 与深度诊断共用。
  */
 export async function probeExclusive(c: Context, deps: AdminDeps): Promise<Response> {
   if (deps.batch === undefined) return await probeUsedEgress(c, deps);

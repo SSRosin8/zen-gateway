@@ -64,7 +64,7 @@ describe("App 首次启动", () => {
     expect(screen.queryByText("全部就绪")).not.toBeInTheDocument();
   });
 
-  it("空池用中性色调,不用成功色", async () => {
+  it("空池不用成功色，并列为需要处理", async () => {
     stubOverview(fakeOverview());
     window.location.hash = "#overview";
     const { container } = render(<App />);
@@ -81,9 +81,9 @@ describe("App 首次启动", () => {
     const tones = [...container.querySelectorAll("[data-tone]")].map((el) =>
       el.getAttribute("data-tone"),
     );
-    // 空池那一条必须是中性；整页不得出现成功色（否则首启第一眼就是绿的）。
-    expect(tones).toContain("neutral");
+    // 整页不得出现成功色（否则首启第一眼就是绿的）；「还没有 Worker」是需要处理的第一条。
     expect(tones).not.toContain("success");
+    expect(screen.getByText(/还没有 Worker，客户端请求会得到 503/)).toBeInTheDocument();
   });
 
   it("请求在途时不替 Worker 池下结论", () => {

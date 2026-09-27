@@ -4,6 +4,7 @@ import type { ConfigPatch, Overview } from "../../shared/contract.ts";
 import { FormStatus, Panel, PrimaryButton, SecondaryButton, errorMessage, type FormMessage } from "./Panel.tsx";
 import { patchConfig } from "../lib/api.ts";
 import { FIELD } from "../lib/styles.ts";
+import { useFormState, useLeaveGuard } from "../lib/formState.ts";
 
 /**
  * 网关页的两张设置表单：运行参数与调度。
@@ -95,7 +96,7 @@ function Field({ label, unit, children }: { label: string; unit?: Unit; children
   );
 }
 
-function useSave(refresh: (() => void) | undefined) {
+function useSave(refresh: (() => void) | undefined, onSaved?: () => void) {
   const [saving, setSaving] = useState(false);
   const [message, setMessage] = useState<FormMessage>(null);
   const save = (patch: ConfigPatch) => {
@@ -103,6 +104,7 @@ function useSave(refresh: (() => void) | undefined) {
     setMessage(null);
     void patchConfig(patch)
       .then(() => {
+        onSaved?.();
         setMessage({ tone: "success", text: "已保存" });
         refresh?.();
       })
@@ -113,13 +115,24 @@ function useSave(refresh: (() => void) | undefined) {
 }
 
 export function RuntimeSettingsForm({ data, refresh }: { data: Overview; refresh?: (() => void) | undefined }) {
-  const [maxAttempts, setMaxAttempts] = useState(String(data.gateway.maxAttempts));
-  const [headers, setHeaders] = useState(formatDuration(data.gateway.headersTimeoutMs, "s"));
-  const [body, setBody] = useState(formatDuration(data.gateway.bodyTimeoutMs, "s"));
-  const { saving, message, setMessage, save } = useSave(refresh);
+  const form = useFormState({
+    maxAttempts: String(data.gateway.maxAttempts),
+    headers: formatDuration(data.gateway.headersTimeoutMs, "s"),
+    body: formatDuration(data.gateway.bodyTimeoutMs, "s"),
+  });
+  const { maxAttempts, headers, body } = form.value;
+  const setMaxAttempts = (v: string) => form.set((p) => ({ ...p, maxAttempts: v }));
+  const setHeaders = (v: string) => form.set((p) => ({ ...p, headers: v }));
+  const setBody = (v: string) => form.set((p) => ({ ...p, body: v }));
+  const { saving, message, setMessage, save } = useSave(refresh, form.markSaved);
+  useLeaveGuard(form.dirty);
 
   return (
-    <Panel title="运行参数">
+    <Panel
+      title="运行参数"
+      hint="超时修改后新请求使用新连接池，已开始的流按原设置完成。响应体超时是字节之间的空闲上限，不是总时长。"
+      action={<DirtyMark form={form} />}
+    >
       <form
         aria-label="运行参数"
         className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4"
@@ -159,25 +172,32 @@ export function RuntimeSettingsForm({ data, refresh }: { data: Overview; refresh
           <FormStatus message={message} />
         </div>
       </form>
-      <p className="mt-3 max-w-3xl text-text-muted">
-        超时修改后新请求使用新连接池，已开始的流按原设置完成。响应体超时是字节之间的空闲上限，不是总时长。
-      </p>
     </Panel>
   );
 }
 
 export function RoutingSettingsForm({ data, refresh }: { data: Overview; refresh?: (() => void) | undefined }) {
-  const [strategy, setStrategy] = useState(data.routing.strategy);
-  const [affinity, setAffinity] = useState(formatDuration(data.routing.affinityTtlMs, "min"));
-  const [cooldown, setCooldown] = useState<Record<CooldownKey, string>>(() => {
-    const out = {} as Record<CooldownKey, string>;
-    for (const key of Object.keys(COOLDOWN_FIELDS) as CooldownKey[]) out[key] = formatDuration(data.routing.cooldown[key], "s");
-    return out;
+  const initialCooldown = {} as Record<CooldownKey, string>;
+  for (const key of Object.keys(COOLDOWN_FIELDS) as CooldownKey[]) initialCooldown[key] = formatDuration(data.routing.cooldown[key], "s");
+  const form = useFormState({
+    strategy: data.routing.strategy,
+    affinity: formatDuration(data.routing.affinityTtlMs, "min"),
+    cooldown: initialCooldown,
   });
-  const { saving, message, setMessage, save } = useSave(refresh);
+  const { strategy, affinity, cooldown } = form.value;
+  const setStrategy = (v: typeof strategy) => form.set((p) => ({ ...p, strategy: v }));
+  const setAffinity = (v: string) => form.set((p) => ({ ...p, affinity: v }));
+  const setCooldown = (f: (prev: Record<CooldownKey, string>) => Record<CooldownKey, string>) =>
+    form.set((p) => ({ ...p, cooldown: f(p.cooldown) }));
+  const { saving, message, setMessage, save } = useSave(refresh, form.markSaved);
+  useLeaveGuard(form.dirty);
 
   return (
-    <Panel title="调度">
+    <Panel
+      title="调度"
+      hint="限流冷却在上游给出 Retry-After 时以上游为准；传输失败从起始退避开始指数增长，不超过最长退避。"
+      action={<DirtyMark form={form} />}
+    >
       <form
         aria-label="调度"
         className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4"
@@ -225,9 +245,24 @@ export function RoutingSettingsForm({ data, refresh }: { data: Overview; refresh
           <FormStatus message={message} />
         </div>
       </form>
-      <p className="mt-3 max-w-3xl text-text-muted">
-        限流冷却在上游给出 Retry-After 时以上游为准；传输失败从起始退避开始指数增长，不超过最长退避。
-      </p>
     </Panel>
+  );
+}
+
+/**
+ * 表单面板右上角的状态：「未保存」，以及本地改过而服务端值又变了时的「载入最新」。
+ * 与 `useFormState` 配套，模型页也用它。
+ */
+export function DirtyMark({ form }: { form: { dirty: boolean; serverChanged: boolean; reset: () => void } }) {
+  if (!form.dirty) return null;
+  return (
+    <span className="inline-flex items-center gap-2" data-dirty="">
+      <span className="text-label-13 text-warn">● 未保存</span>
+      {form.serverChanged && (
+        <SecondaryButton compact onClick={form.reset}>
+          服务端已变化 · 载入最新
+        </SecondaryButton>
+      )}
+    </span>
   );
 }

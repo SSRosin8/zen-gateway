@@ -197,9 +197,10 @@ describe("空单元格用词，不用符号", () => {
       workers: [{ workerId: "w1", attempts: 1, successes: 0, failures: 1, lastUsedAt: 1, lastStatus: null }],
       rates: { cacheHitRate: null, usageCoverage: null, droppedUsageCount: 0 },
       rejections: {},
+      daily: { byModel: [], byWorker: [] },
       rejectedModels: [],
     };
-    render(<UsagePage data={data} days="all" onDays={noop} />);
+    render(<UsagePage data={data} days="all" onDays={noop} view={{ by: "worker", shape: "line", metric: "tokens" }} />);
     expect(screen.getByText("无响应")).toBeInTheDocument();
     // 指标卡的「—」是「还没有数据」的约定，与表格空单元格不同。
     expect(screen.getAllByText("—")).toHaveLength(2);

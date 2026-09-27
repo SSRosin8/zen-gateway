@@ -4,6 +4,7 @@ import {
   ClashImportResponseSchema,
   OpenCodeViewSchema,
   ProbeReportSchema,
+  StatsResetResponseSchema,
   type OpenCodeView,
   type ProbeReport,
 } from "../../shared/contract.ts";
@@ -66,10 +67,11 @@ export function probeEgress(proxyIds: readonly string[]): Promise<ProbeReport> {
   return request("POST", "/api/probe", ProbeReportSchema, { proxyIds });
 }
 
-/** 深度出口测试：与 `/api/probe` 同形；批量探测进行中时服务端回 409。 */
-export function runDeepEgressTest(): Promise<ProbeReport> {
-  return request("POST", "/api/diagnostics/deep", ProbeReportSchema);
+/** 清空全部用量统计（服务端要求显式确认体）。 */
+export function resetStats(): Promise<{ ok: true; removed: number }> {
+  return request("POST", "/api/stats/reset", StatsResetResponseSchema, { confirm: true });
 }
+
 
 export function writeOpenCodeConfig(version?: "1" | "2"): Promise<OpenCodeView> {
   return request("POST", "/api/opencode/write", OpenCodeViewSchema, version === undefined ? {} : { version });

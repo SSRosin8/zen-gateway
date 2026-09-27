@@ -369,46 +369,27 @@ describe("诊断页", () => {
     expect(container.querySelectorAll("[data-layer]")).toHaveLength(4);
   });
 
-  it("深度出口测试先确认；409 时说明批量探测占用", async () => {
-    const user = userEvent.setup();
-    const posts: string[] = [];
-    vi.stubGlobal(
-      "fetch",
-      vi.fn((path: string, init?: { method?: string }) => {
-        if (init?.method === "POST") posts.push(path);
-        return Promise.resolve({
-          ok: false,
-          status: 409,
-          json: () => Promise.resolve({ error: { type: "conflict", message: "批量探测进行中" } }),
-        });
-      }),
-    );
+  it("出口实测不在诊断页重复一份，只给去 Worker 页与出口页的链接", () => {
     render(<DiagnosticsView data={structuredClone(layers) as never} refresh={noop} />);
-    await user.click(screen.getByRole("button", { name: "深度出口测试" }));
-    const dialog = screen.getByRole("dialog", { name: "开始深度出口测试" });
-    expect(dialog.textContent).toContain("切换 Clash 分组");
-    expect(within(dialog).getByRole("button", { name: "取消" })).toHaveFocus();
-    expect(posts).toHaveLength(0);
-
-    await user.click(within(dialog).getByRole("button", { name: "开始测试" }));
-    const alert = await screen.findByRole("alert");
-    expect(alert).toHaveTextContent("批量探测正在运行");
-    expect(posts).toEqual(["/api/diagnostics/deep"]);
+    expect(screen.queryByRole("button", { name: /深度出口测试/ })).not.toBeInTheDocument();
+    expect(screen.getByRole("link", { name: "去 Worker 页探测" })).toHaveAttribute("href", "#workers");
+    expect(screen.getByRole("link", { name: "去出口页批量探测" })).toHaveAttribute("href", "#proxy");
   });
 
-  it("其他错误原样显示，不套用 409 的说明", async () => {
-    const user = userEvent.setup();
-    vi.stubGlobal(
-      "fetch",
-      vi.fn(() =>
-        Promise.resolve({ ok: false, status: 500, json: () => Promise.resolve({ error: { type: "internal_error", message: "出口服务不可用" } }) }),
-      ),
-    );
+  it("未通过的层在「下一步」旁给出去对应页面的链接", () => {
     render(<DiagnosticsView data={structuredClone(layers) as never} refresh={noop} />);
-    await user.click(screen.getByRole("button", { name: "深度出口测试" }));
-    await user.click(within(screen.getByRole("dialog")).getByRole("button", { name: "开始测试" }));
-    const alert = await screen.findByRole("alert");
-    expect(alert).toHaveTextContent("出口服务不可用");
-    expect(alert).not.toHaveTextContent("批量探测正在运行");
+    const clash = document.querySelector('[data-layer="clash"]') as HTMLElement;
+    expect(within(clash).getByRole("link", { name: /Clash 标签/ })).toHaveAttribute("href", "#proxy?tab=clash");
+  });
+});
+
+describe("用量页的时间范围来自 URL", () => {
+  it("认不出的值按 30 天请求，不把原值拼进查询串", async () => {
+    const fn = routeFetch({ "/api/overview": fakeOverview(), "/api/opencode": opencodeView() });
+    window.location.hash = "#usage?status=1%26x";
+    render(<App />);
+    await waitFor(() => expect(fn.mock.calls.some(([p]) => String(p).startsWith("/api/stats"))).toBe(true));
+    const stats = fn.mock.calls.map(([p]) => String(p)).filter((p) => p.startsWith("/api/stats"));
+    expect(stats).toEqual(["/api/stats?days=30"]);
   });
 });

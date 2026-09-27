@@ -35,8 +35,8 @@ doctor 核对内核报告的 `mixed-port` 与配置；内核没有报告有效�
 
 ## 4. 未探测
 
-写 `proxies[].egressIp` 的只有 `POST /api/probe`（概览页逐个探测、代理池单行「探测」、
-深度诊断）与批量探测（代理池页），
+写 `proxies[].egressIp` 的只有 `POST /api/probe`（Worker 页「探测在用出口」、出口页
+单行或多选「探测」）与批量探测（出口页），
 两者都经 `applyProbeResults`（`src/core/proxy/egress.ts`）。报告为空时先确认是否
 执行过探测、服务是否写回了配置，再怀疑分组逻辑。
 

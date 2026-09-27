@@ -231,6 +231,20 @@ describe("保存", () => {
     expect(reloaded.workers[0]!.id).toBe("w1");
   });
 
+  it("旧版的 defaultSurfaces / surfaceOverrides 能加载，写回盘后文件里不再有它们", async () => {
+    const { config } = await loadConfig(root);
+    const raw = JSON.parse(await readFile(configPath(root), "utf8")) as Record<string, Record<string, unknown>>;
+    raw["models"] = { ...raw["models"], defaultSurfaces: ["chat", "responses"], surfaceOverrides: { "x-free": ["messages"] } };
+    await writeRaw(JSON.stringify(raw));
+
+    const { config: loaded } = await loadConfig(root);
+    expect(loaded.gateway.relayToken).toBe(config.gateway.relayToken);
+    await saveConfig(loaded, root);
+    const text = await readFile(configPath(root), "utf8");
+    expect(text).not.toContain("defaultSurfaces");
+    expect(text).not.toContain("surfaceOverrides");
+  });
+
   it("写盘前先过 schema —— 非法配置不落盘", async () => {
     const { config } = await loadConfig(root);
     const before = await readFile(configPath(root), "utf8");

@@ -15,10 +15,11 @@ import { Shell } from "./components/Shell.tsx";
 import { FallbackView, StaleBanner } from "./components/StatusViews.tsx";
 import { OverviewPage } from "./pages/OverviewPage.tsx";
 import { GatewayPage } from "./pages/GatewayPage.tsx";
+import { ClientPage } from "./pages/ClientPage.tsx";
 import { ProxyPage } from "./pages/ProxyPage.tsx";
 import { WorkersPage } from "./pages/WorkersPage.tsx";
 import { ModelsPage } from "./pages/ModelsPage.tsx";
-import { UsagePage } from "./pages/UsagePage.tsx";
+import { USAGE_RANGES, UsagePage, formatUsageView, parseUsageView } from "./pages/UsagePage.tsx";
 import { StartPage, onboardingProgress } from "./pages/StartPage.tsx";
 import { DiagnosticsPage } from "./pages/DiagnosticsPage.tsx";
 import { useEndpoint, useOverview, useProbe, type FetchState, type Polled, type ProbeRun } from "./lib/api.ts";
@@ -63,7 +64,7 @@ export function App() {
       current={view.page}
       badge={progress === null || progress.complete ? null : `${progress.done}/${progress.total}`}
       version={state.status === "ready" ? state.data.health.version : null}
-      task={probe.running ? { label: `探测出口 ${probe.done}/${probe.total ?? 0}`, href: "#overview" } : null}
+      task={probe.running ? { label: `探测出口 ${probe.done}/${probe.total ?? 0}`, href: "#workers" } : null}
     >
       <StaleBanner stale={overview.stale} />
       {state.status === "ready" ? (
@@ -136,22 +137,18 @@ function Body({
         <StartTab data={data} opencode={opencode.state} refresh={refreshAll} />
       )}
       {view.page === "overview" && (
-        <OverviewPage data={data} page={view.page_} onPage={(next) => navigate({ page_: next })} probe={probe} />
+        <OverviewTab data={data} opencode={opencode.state} />
       )}
-      {view.page === "gateway" && <GatewayPage data={data} refresh={refreshAll} opencode={opencode.state} />}
+      {view.page === "gateway" && <GatewayPage data={data} refresh={refreshAll} />}
+      {view.page === "client" && <ClientPage data={data} refresh={refreshAll} opencode={opencode.state} />}
       {view.page === "workers" && (
-        <WorkersTab
-          data={data}
-          view={view}
-          navigate={navigate}
-          refresh={refresh}
-        />
+        <WorkersTab data={data} view={view} navigate={navigate} refresh={refresh} probe={probe} />
       )}
       {view.page === "proxy" && (
         <ProxyTab view={view} navigate={navigate} hideStale={overviewStale} refreshOverview={refresh} />
       )}
       {view.page === "models" && <ModelsTab view={view} navigate={navigate} hideStale={overviewStale} />}
-      {view.page === "usage" && <UsageTab hideStale={overviewStale} />}
+      {view.page === "usage" && <UsageTab view={view} navigate={navigate} hideStale={overviewStale} />}
       {view.page === "diagnostics" && <DiagnosticsPage />}
     </div>
   );
@@ -168,10 +165,15 @@ function WorkersTab({
   view,
   navigate,
   refresh,
-}: ViewProps & { data: Overview; refresh: () => void }) {
+  probe,
+}: ViewProps & { data: Overview; refresh: () => void; probe: ProbeRun }) {
   const proxies = useEndpoint<ProxyList>("/api/proxies", ProxyListSchema, 30_000);
+  // 详情侧栏里的用量：只在打开详情时拉（30 天窗口）。
+  const stats = useEndpoint<StatsView>(view.detail === null ? null : "/api/stats?days=30", StatsViewSchema, 30_000);
   return (
     <WorkersPage
+      probe={probe}
+      stats={stats.state.status === "ready" ? stats.state.data : null}
       data={data}
       view={view}
       navigate={navigate}
@@ -184,14 +186,31 @@ function WorkersTab({
   );
 }
 
+/** 概览额外拉近 1 天的统计，只用来数网关拒绝（「需要处理」里的一条）。 */
+function OverviewTab({ data, opencode }: { data: Overview; opencode: FetchState<OpenCodeView> }) {
+  const recent = useEndpoint<StatsView>("/api/stats?days=1", StatsViewSchema, 60_000);
+  return <OverviewPage data={data} opencode={opencode} recent={recent.state.status === "ready" ? recent.state.data : null} />;
+}
+
 /**
  * 快速开始就地新建 Worker（单个或从 Clash 节点批量），需要代理列表做出口下拉与候选。
  * 用户不必跳到 Worker 页再回来，引导的上下文不丢。
  */
 function StartTab({ data, opencode, refresh }: { data: Overview; opencode: FetchState<OpenCodeView>; refresh: () => void }) {
   const proxies = useEndpoint<ProxyList>("/api/proxies", ProxyListSchema, 30_000);
+  /*
+   * 只为回答「请求到过网关没有」：一旦看到就锁存并停止轮询 —— 之后统计表越来越大，
+   * 每 10 秒跑一遍 30 天聚合只为一个不会再变的布尔值。没请求之前表是空的，轮询很便宜。
+   */
+  const [seen, setSeen] = useState(false);
+  const stats = useEndpoint<StatsView>(seen ? null : "/api/stats?days=30", StatsViewSchema, 10_000);
+  const seenNow = stats.state.status === "ready" && stats.state.data.requests > 0;
+  useEffect(() => {
+    if (seenNow) setSeen(true);
+  }, [seenNow]);
   return (
     <StartPage
+      seenRequests={seen || seenNow ? true : stats.state.status === "ready" ? false : null}
       data={data}
       opencode={opencode}
       proxies={proxies.state}
@@ -203,7 +222,7 @@ function StartTab({ data, opencode, refresh }: { data: Overview; opencode: Fetch
   );
 }
 
-/** 代理池页的数据在它自己的端点上 —— 只在这一页打开时才拉。 */
+/** 出口页的数据在它自己的端点上 —— 只在这一页打开时才拉。 */
 function ProxyTab({
   view,
   navigate,
@@ -214,7 +233,7 @@ function ProxyTab({
   if (state.status !== "ready") return <FallbackView state={state} />;
   return (
     <>
-      <StaleBanner stale={hideStale ? null : stale} />
+      <StaleBanner stale={stale} hidden={hideStale} />
       <ProxyPage
         data={state.data}
         view={view}
@@ -237,24 +256,29 @@ function ModelsTab({ view, navigate, hideStale }: ViewProps & { hideStale: boole
   if (state.status !== "ready") return <FallbackView state={state} />;
   return (
     <>
-      <StaleBanner stale={hideStale ? null : stale} />
+      <StaleBanner stale={stale} hidden={hideStale} />
       <ModelsPage data={state.data} view={view} navigate={navigate} refresh={refresh} />
     </>
   );
 }
 
-function UsageTab({ hideStale }: { hideStale: boolean }) {
-  /*
-   * 时间窗是这一页自己的状态，不进 URL：搜索词/页码是「我在看列表的哪一部分」，
-   * 分享链接时要带上；时间窗更像一个显示选项，且只对这一页有意义。
-   */
-  const [days, setDays] = useState("30");
-  const { state, stale } = useEndpoint<StatsView>(`/api/stats?days=${days}`, StatsViewSchema, 10_000);
+function UsageTab({ view, navigate, hideStale }: ViewProps & { hideStale: boolean }) {
+  /* 时间范围、系列、图形与指标都在 URL 里（`status` 存时间范围，`view` 存图表视图）：分享链接即同一张图。 */
+  const days = USAGE_RANGES.find((r) => r.value === view.status)?.value ?? "30";
+  const usageView = parseUsageView(view.view);
+  const { state, stale, refresh } = useEndpoint<StatsView>(`/api/stats?days=${days}`, StatsViewSchema, 10_000);
   if (state.status !== "ready") return <FallbackView state={state} />;
   return (
     <>
-      <StaleBanner stale={hideStale ? null : stale} />
-      <UsagePage data={state.data} days={days} onDays={setDays} />
+      <StaleBanner stale={stale} hidden={hideStale} />
+      <UsagePage
+        data={state.data}
+        days={days}
+        onDays={(next) => navigate({ status: next === "30" ? null : next })}
+        view={usageView}
+        onView={(next) => navigate({ view: formatUsageView(next) })}
+        onReset={refresh}
+      />
     </>
   );
 }

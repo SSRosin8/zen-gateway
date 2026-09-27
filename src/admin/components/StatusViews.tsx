@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { StatusIndicator } from "./StatusIndicator.tsx";
 import { Skeleton } from "./Panel.tsx";
 import { TableSkeleton } from "./DataTable.tsx";
@@ -21,8 +21,39 @@ function useNow(): number {
  * 不阻断页面：数据仍然显示，表单仍然可填，只是用户要知道看到的不是现在。
  * `role="status"` 而不是 alert —— 每秒更新的秒数不该反复打断屏幕阅读器。
  */
-export function StaleBanner({ stale }: { stale: StaleInfo | null }) {
-  if (stale === null) return null;
+export function StaleBanner({ stale, hidden = false }: { stale: StaleInfo | null; hidden?: boolean }) {
+  /*
+   * 恢复后显示 3 秒「已重新连接」再消失：横幅静悄悄消失时，用户不确定是恢复了还是自己看漏了。
+   */
+  const [recovered, setRecovered] = useState(false);
+  const wasStale = useRef(false);
+  useEffect(() => {
+    // 外层已显示同一次断连（概览的横幅）时这里不显示，也不把「被隐藏」当成「已恢复」：
+    // 否则外层恢复的同时，这里会再报一次「已重新连接」，或在其实仍断着时误报。
+    if (hidden) {
+      wasStale.current = false;
+      setRecovered(false);
+      return;
+    }
+    if (stale !== null) {
+      wasStale.current = true;
+      setRecovered(false);
+      return;
+    }
+    if (!wasStale.current) return;
+    wasStale.current = false;
+    setRecovered(true);
+    const t = setTimeout(() => setRecovered(false), 3000);
+    return () => clearTimeout(t);
+  }, [stale, hidden]);
+  if (hidden) return null;
+  if (stale === null) {
+    return recovered ? (
+      <div role="status" className="mb-4 rounded-md border border-success bg-surface px-4 py-3">
+        <StatusIndicator tone="success" icon="✓" label="已重新连接，数据已刷新" />
+      </div>
+    ) : null;
+  }
   return <StaleBannerInner stale={stale} />;
 }
 
