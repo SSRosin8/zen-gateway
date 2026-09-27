@@ -14,7 +14,7 @@ import {
   errorMessage,
   type FormMessage,
 } from "../components/Panel.tsx";
-import { DataTable, TableFilters, type Column } from "../components/DataTable.tsx";
+import { DataTable, SEGMENTED_TRACK, TableFilters, segmentClass, type Column } from "../components/DataTable.tsx";
 import { ConfirmDialog } from "../components/ConfirmDialog.tsx";
 import { toHash, type ViewState } from "../lib/router.ts";
 import { patchConfig, useBatchProbe } from "../lib/api.ts";
@@ -498,7 +498,7 @@ export function ProxyPage({
 
       <BatchPanel progress={batch.progress} control={batch} />
 
-      <div className="flex flex-wrap gap-1" role="tablist" aria-label="代理池视图">
+      <div className={SEGMENTED_TRACK} role="tablist" aria-label="代理池视图">
         {TABS.map((t) => (
           <TabLink
             key={t.id}
@@ -628,9 +628,7 @@ function TabLink({
         event.preventDefault();
         onSelect();
       }}
-      className={`inline-flex min-h-[44px] items-center rounded-sm border px-4 no-underline transition-colors hover:bg-surface-hover active:bg-surface-active ${
-        active ? "border-accent-fg text-accent-fg font-medium" : "border-border-strong text-text-muted hover:text-text"
-      }`}
+      className={segmentClass(active)}
     >
       {label}
     </a>

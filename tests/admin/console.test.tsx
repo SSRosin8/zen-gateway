@@ -243,7 +243,7 @@ describe("首次打开的落点", () => {
 describe("快速开始的步骤判据", () => {
   it("全空时四步都待完成", () => {
     const { container } = render(
-      <StartPage data={fakeOverview()} opencode={ready(opencodeView())} refresh={noop} onCreateWorker={noop} onBulkImport={noop} />,
+      <StartPage data={fakeOverview()} opencode={ready(opencodeView())} refresh={noop} />,
     );
     const steps = [...container.querySelectorAll("[data-step]")].map((el) => el.getAttribute("data-step"));
     expect(steps).toEqual(["catalog", "clash", "workers", "opencode", "verify"]);
@@ -260,7 +260,7 @@ describe("快速开始的步骤判据", () => {
     ];
     for (const [id, data, oc] of cases) {
       const { container, unmount } = render(
-        <StartPage data={data} opencode={oc} refresh={noop} onCreateWorker={noop} onBulkImport={noop} />,
+        <StartPage data={data} opencode={oc} refresh={noop} />,
       );
       const done = [...container.querySelectorAll("[data-done]")].map((el) => el.getAttribute("data-step"));
       expect(done, id).toEqual([id]);
@@ -290,7 +290,7 @@ describe("快速开始的步骤判据", () => {
 
   it("验证命令可复制，并说明从项目根目录运行", async () => {
     const user = userEvent.setup();
-    render(<StartPage data={fakeOverview()} opencode={ready(opencodeView())} refresh={noop} onCreateWorker={noop} onBulkImport={noop} />);
+    render(<StartPage data={fakeOverview()} opencode={ready(opencodeView())} refresh={noop} />);
     await user.click(screen.getByRole("button", { name: "复制命令" }));
     expect(await navigator.clipboard.readText()).toBe('opencode run --model opencode/big-pickle "Reply with exactly: OK"');
     expect(screen.getByText(/网关项目根目录/, { selector: "strong" })).toBeInTheDocument();
@@ -299,27 +299,47 @@ describe("快速开始的步骤判据", () => {
   it("只差 OpenCode 配置时写入按钮是唯一主操作；否则没有主按钮", () => {
     const primaries = (c: HTMLElement) => [...c.querySelectorAll("button")].filter((b) => b.className.includes("bg-accent-fill"));
     const almost = fakeOverview({ catalog: { slots: [], freeCount: 5 }, pool: { ready: 1, total: 1, health: "healthy" } });
-    const a = render(<StartPage data={almost} opencode={ready(opencodeView())} refresh={noop} onCreateWorker={noop} onBulkImport={noop} />);
+    const a = render(<StartPage data={almost} opencode={ready(opencodeView())} refresh={noop} />);
     expect(primaries(a.container).map((b) => b.textContent)).toEqual(["写入 opencode.json"]);
     a.unmount();
-    const b = render(<StartPage data={fakeOverview()} opencode={ready(opencodeView())} refresh={noop} onCreateWorker={noop} onBulkImport={noop} />);
+    const b = render(<StartPage data={fakeOverview()} opencode={ready(opencodeView())} refresh={noop} />);
     expect(primaries(b.container)).toHaveLength(0);
   });
 
-  it("有代理时给出从 Clash 节点批量导入的入口", async () => {
+  it("有代理时给出从 Clash 节点批量导入的入口，在本页打开对话框", async () => {
     const user = userEvent.setup();
-    const onBulk = vi.fn();
     render(
       <StartPage
         data={fakeOverview({ proxies: { total: 3, enabled: 3, withEgressIp: 0 } })}
         opencode={ready(opencodeView())}
         refresh={noop}
-        onCreateWorker={noop}
-        onBulkImport={onBulk}
       />,
     );
     await user.click(screen.getByRole("button", { name: "从 Clash 节点导入匿名 Worker" }));
-    expect(onBulk).toHaveBeenCalledTimes(1);
+    expect(screen.getByRole("dialog", { name: "从 Clash 节点导入匿名 Worker" })).toBeInTheDocument();
+  });
+
+  it("新增 Worker 在本页展开编辑器，保存后收起并报告，不跳到 Worker 页", async () => {
+    const user = userEvent.setup();
+    const bodies: unknown[] = [];
+    vi.stubGlobal(
+      "fetch",
+      vi.fn((path: string, init?: { method?: string; body?: string }) => {
+        if (path === "/api/config" && init?.method === "PATCH") bodies.push(JSON.parse(init.body ?? "null"));
+        return Promise.resolve({ ok: true, status: 200, json: () => Promise.resolve({ ok: true, changed: true }) });
+      }),
+    );
+    const refresh = vi.fn();
+    window.location.hash = "#start";
+    render(<StartPage data={fakeOverview()} opencode={ready(opencodeView())} refresh={refresh} />);
+    await user.click(screen.getByRole("button", { name: "新增 Worker" }));
+    const form = screen.getByRole("form", { name: "新增 Worker" });
+    await user.click(within(form).getByRole("button", { name: /保存|新增/ }));
+    expect(await screen.findByText("已新增，立即生效")).toBeInTheDocument();
+    expect(screen.queryByRole("form", { name: "新增 Worker" })).not.toBeInTheDocument();
+    expect(bodies).toHaveLength(1);
+    expect(refresh).toHaveBeenCalled();
+    expect(window.location.hash).toBe("#start");
   });
 });
 

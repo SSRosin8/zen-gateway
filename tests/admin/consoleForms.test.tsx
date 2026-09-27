@@ -1,3 +1,4 @@
+import { bulkCandidates, duplicateEgress } from "../../src/admin/components/BulkImportDialog.tsx";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
@@ -265,6 +266,17 @@ describe("从 Clash 节点批量导入匿名 Worker", () => {
     expect(await screen.findByText("已从 Clash 节点新建 2 个匿名 Worker")).toBeInTheDocument();
   });
 
+  it("回显 IP 与已用节点或前面的候选重复时标出，并可一键去掉", async () => {
+    const all = [
+      proxy({ id: "used", name: "已用", clashNodeName: "已用", usedBy: ["anon-1"], egressIp: "198.51.100.1" }),
+      proxy({ id: "a", name: "甲", clashNodeName: "甲", egressIp: "198.51.100.1" }),
+      proxy({ id: "b", name: "乙", clashNodeName: "乙", egressIp: "198.51.100.2" }),
+      proxy({ id: "c", name: "丙", clashNodeName: "丙", egressIp: "198.51.100.2" }),
+      proxy({ id: "d", name: "丁", clashNodeName: "丁", egressIp: null }),
+    ];
+    expect([...duplicateEgress(all, bulkCandidates(all))].sort()).toEqual(["a", "c"]);
+  });
+
   it("一个都没选时提交按钮禁用", async () => {
     const { user, dialog, patches } = await openDialog();
     await user.click(within(dialog).getByRole("button", { name: "全不选" }));
@@ -356,14 +368,15 @@ describe("OpenCode 项目配置写入", () => {
  * ================================================================== */
 
 describe("Relay Token 轮换", () => {
-  it("先确认；确认后发 rotate，并提示重写 opencode.json", async () => {
+  it("先确认；默认勾选同时重写 opencode.json，确认后先 rotate 再写文件", async () => {
     const user = userEvent.setup();
     const { patches, spy } = spyPatch();
     const writes: unknown[] = [];
     vi.stubGlobal(
       "fetch",
       vi.fn((path: string, init?: { body?: string }) => {
-        writes.push({ path, body: JSON.parse(init?.body ?? "null") });
+        // 只记写请求：同页的局域网卡片会 GET /api/lan/status。
+        if (path !== "/api/lan/status") writes.push({ path, body: JSON.parse(init?.body ?? "null") });
         return Promise.resolve({ ok: true, status: 200, json: () => Promise.resolve(opencodeView({ exists: true, pointsToGateway: true })) });
       }),
     );
@@ -373,14 +386,41 @@ describe("Relay Token 轮换", () => {
     const dialog = screen.getByRole("dialog", { name: "轮换 Relay Token" });
     expect(dialog.textContent).toContain("401");
     expect(within(dialog).getByRole("button", { name: "取消" })).toHaveFocus();
+    expect(within(dialog).getByRole("checkbox", { name: /同时把新 token 写入/ })).toBeChecked();
     expect(spy).not.toHaveBeenCalled();
-    expect(screen.queryByText(/还是旧 token/)).not.toBeInTheDocument();
 
     await user.click(within(dialog).getByRole("button", { name: "确认轮换" }));
-    expect(await screen.findByText("已轮换，新 token 立即生效")).toBeInTheDocument();
+    expect(await screen.findByText("已轮换，并已把新 token 写入 opencode.json")).toBeInTheDocument();
     expect(patches()).toEqual([{ gateway: { relayToken: { rotate: true } } }]);
+    expect(writes).toEqual([{ path: "/api/opencode/write", body: { version: "2" } }]);
+  });
 
-    const prompt = screen.getByText(/还是旧 token/).closest("[data-rewrite-prompt]") as HTMLElement;
+  it("取消勾选则只轮换；opencode.json 未指向网关时重写提示常驻（由服务端判据驱动）", async () => {
+    const user = userEvent.setup();
+    const { patches } = spyPatch();
+    const writes: unknown[] = [];
+    vi.stubGlobal(
+      "fetch",
+      vi.fn((path: string, init?: { body?: string }) => {
+        if (path !== "/api/lan/status") writes.push({ path, body: JSON.parse(init?.body ?? "null") });
+        return Promise.resolve({ ok: true, status: 200, json: () => Promise.resolve(opencodeView({ exists: true, pointsToGateway: true })) });
+      }),
+    );
+    const { rerender } = render(
+      <GatewayPage data={fakeOverview()} opencode={ready(opencodeView({ exists: true, pointsToGateway: true, detectedVersion: "2.0.12" }))} />,
+    );
+    expect(screen.queryByText(/没有指向本网关/)).not.toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "轮换 Relay Token" }));
+    const dialog = screen.getByRole("dialog", { name: "轮换 Relay Token" });
+    await user.click(within(dialog).getByRole("checkbox", { name: /同时把新 token 写入/ }));
+    await user.click(within(dialog).getByRole("button", { name: "确认轮换" }));
+    expect(await screen.findByText("已轮换，新 token 立即生效")).toBeInTheDocument();
+    expect(patches()).toHaveLength(1);
+    expect(writes).toEqual([]);
+
+    // 服务端判据变为「未指向」后（例如轮换后刷新），提示出现；重写后文件指向当前 token。
+    rerender(<GatewayPage data={fakeOverview()} opencode={ready(opencodeView({ exists: true, pointsToGateway: false, detectedVersion: "2.0.12" }))} />);
+    const prompt = screen.getByText(/没有指向本网关/).closest("[data-rewrite-prompt]") as HTMLElement;
     await user.click(within(prompt).getByRole("button", { name: "重写 opencode.json" }));
     await within(prompt).findByText("已重写 opencode.json");
     expect(writes).toEqual([{ path: "/api/opencode/write", body: { version: "2" } }]);

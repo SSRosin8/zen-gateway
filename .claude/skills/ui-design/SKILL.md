@@ -12,7 +12,8 @@ paths:
 ## 硬规则（测试强制，改前先跑 `tests/design/contrast.test.ts`）
 
 - 每个前景 token × 每个表面 token ≥ 4.5:1，浅色深色都算；表面含 `surface-hover` / `surface-active`。新 token 必须归类进测试。
-- 层次只靠表面色调 + 1px 边框，不用 box-shadow。
+- 内容层（卡片、表格、表单、对话框正文）实色，层次只靠表面色调 + 1px 边框；阴影只有 `shadow-float`（对话框）与 `shadow-thumb`（分段滑块），源码扫描会拦其他阴影、`/NN` 透明色与字面色值。
+- 毛玻璃只在导航层：侧栏 `zg-glass`、窄屏顶栏 `zg-glass-thick`、对话框遮罩 `zg-scrim`（只允许 Shell 与两个对话框使用）。透明度写在 `--zg-*-alpha`，测试按最坏背景算合成对比度；减少透明度 / 提高对比度时退回实色。
 - 禁用态换实色（`disabled:bg-border-strong` 等），不用 `disabled:opacity-*`（源码扫描会拦）。
 - `accent-fill` 只做填充，唯一前景是 `on-accent-fill`；不做整行或大面积背景。
 - 状态用 `StatusIndicator`（图标 + 文字，空值会抛），行状态用 `RowMark` 左边框，不用背景色块。
@@ -37,6 +38,7 @@ paths:
 - 表格行高 36px（`--spacing-row`，`ROW_HEIGHT`），正文 14px，`PAGE_SIZE = 16`；三者一起改。
 - 独立控件（按钮、输入框、筛选片、导航、标签）最小 44px；表格行内按钮用 `SecondaryButton compact`（32px，≥24px）。
 - 单元格内容单行（`whitespace-nowrap`）；需要第二个信息就加列或同行排。
+- 长任务（出口探测）状态归 `App`，离开页面不中断，`Shell` 底部显示任务指示。
 - 外壳 `Shell`：md 及以上左侧栏常驻，展开 220px / 收起 64px（只剩图标，偏好存 localStorage）；导航项「图标 + 文字 + 徽标」固定间距对齐，收起时名称给 `aria-label` + `title`。底部是主题循环按钮与收起按钮（44px 图标按钮）。内容区流式铺满剩余宽度，不设 `max-w-*`；长段落在面板内用 `max-w-3xl` 限行长。
 - 宽屏上能并排的就并排：状态 + 事实 + 操作同一行（`flex-wrap`），分步页左列标题、右列内容。
 - md 以下侧栏收成顶栏 + 展开式抽屉（同一个 `<aside>`，不渲染两份导航）：打开时焦点进第一个导航项，Esc 关闭并还焦点给菜单按钮，点导航项自动收起。
@@ -49,7 +51,8 @@ paths:
 - `SecretField`：已保存凭证的三态编辑（留空不改 / 设置新值 / 清空），必填凭证 `allowClear={false}`。
 - `WorkerEditor`、`BulkImportDialog`：Worker 新增编辑与从 Clash 节点批量导入（一次 `workers.create`）。
 - `PrimaryButton` / `SecondaryButton`（`danger`、`compact`）：唯一主操作 / 其余操作。
-- `FilterChip`：互斥筛选或时间范围（`aria-pressed`）。
+- `FilterChip` / `segmentClass` + `SEGMENTED_TRACK`：分段控件，筛选与时间范围用 `aria-pressed`，页内标签用 tablist；选中段是实色滑块 + 加粗。
+- `FIELD` / `TEXTAREA`（`lib/styles.ts`）：输入框、下拉框、文本域的唯一类名。
 - `DataTable`：分页 + 行内展开；`SimpleTable`：不分页小表；`TableFilters`：搜索 + 状态筛选。
 - `TableSkeleton` / `Skeleton`：首次加载占位。
 - `Truncate`：任何需要截断的文字（自动带 `title`）。
@@ -78,7 +81,7 @@ paths:
 
 ## 交互与可访问性
 
-- 导航与标签是真实 `<a href="#...">`（导航 `aria-current` + 3px 左边框，标签 tablist / `aria-selected` / `aria-controls`）。
+- 导航与标签是真实 `<a href="#...">`（导航选中是实色圆角胶囊 + `aria-current`，标签 tablist / `aria-selected` / `aria-controls`）。
 - 首启未完成且 URL 没指定页面时落到快速开始（判据等 `/api/opencode` 到齐）；侧栏徽标显示进度，完成后消失。
 - 截断必须可找回：用 `Truncate`，不要裸写 `truncate` 类（测试扫描）。
 - 骨架 `aria-hidden`，加载文字给读屏；打开行内表单时焦点移到第一个字段；焦点环 2px `accent-fg`。

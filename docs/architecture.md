@@ -6,7 +6,7 @@
 
 zen-gateway 是本机单用户 HTTP 网关。请求经过 Relay Token 鉴权、原始体读取、免费模型判定、协议能力判定、Worker 选择、上游尝试和流式透传，再经配置的直连出口或本机 Clash 出口访问 OpenCode Zen。
 
-网关不提供多用户账户系统、管理面远程认证、provider 抽象、静态网站托管或部署编排。上游地址、免费规则、Worker、出口和运行参数由配置文件决定。
+网关不提供多用户账户系统、公网远程管理、provider 抽象、静态网站托管或部署编排。上游地址、免费规则、Worker、出口和运行参数由配置文件决定。
 
 ## 模块
 
@@ -18,7 +18,7 @@ zen-gateway 是本机单用户 HTTP 网关。请求经过 Relay Token 鉴权、�
 - core/proxy：dispatcher 池、Clash Controller、selector 锁、出口探测、订阅解析和导入；clash/setupImport.ts 是 Controller 发现与合并（setup 与管理面共用），clash/diagnose.ts 是 Clash 层诊断（doctor 与管理面共用）。
 - server：启动装配、Hono 路由、Relay/loopback 守卫、配置补丁（patch.ts 与 patchSections.ts）、管理投影、批量探测执行、进程内诊断和 opencode.json 读写；routes/admin/ 下按功能拆分 clash、diagnostics、opencode 等管理路由。
 - store：配置读写、端口解析、SQLite 迁移、统计和亲和持久化。
-- admin：React/Vite 管理后台，包括快速开始、概览、网关、代理池、Worker、模型、用量和诊断页。
+- admin：React/Vite 管理后台，构建产物由网关进程在独立端口伺服（server/adminSite.ts；设了局域网口令时监听 0.0.0.0），包括快速开始、概览、网关、代理池、Worker、模型、用量和诊断页。
 
 shared 不能导入 node:*，因为它会被浏览器构建。Node 专属能力只放在 server、store 和运行时 core 模块。
 
@@ -94,7 +94,7 @@ Clash 支持 manual 和 auto。转发路径由 pickBridge 按配置取内核、�
 
 ## 管理 API 与后台
 
-管理 API 只接受 loopback TCP 对端地址，不信任 X-Forwarded-For。管理体上限 1 MiB，转发体上限 64 MiB，均边读边限。端点清单见 [usage.md 的管理 API](usage.md#管理-api)。
+管理 API 只接受 loopback TCP 对端地址，不信任 X-Forwarded-For。局域网访问不改变这一点：管理后台页面（server/adminSite.ts，与网关同进程、独立端口）把非回环对端的请求换成回环地址并打上 `LAN_PEER` 标记后交给网关 app；带标记的请求一律按局域网处理（Host 写成回环也无效），且 Host 须为私网 IP 字面量、Origin 同源，loopbackOnly 要求 LanAccess（server/admin/lanAccess.ts）签发的会话 cookie；口令以 scrypt 哈希存于 `gateway.lanPasswordHash`，会话在进程内存中并绑定签发时的哈希，改口令即失效；只有本机请求能改口令。管理体上限 1 MiB，转发体上限 64 MiB，均边读边限。端点清单见 [usage.md 的管理 API](usage.md#管理-api)。
 
 凭证投影只返回存在性和短指纹。secret 补丁是缺席不动、set 替换、clear 清空三态；Relay Token 另有 rotate，由服务端用首启同一个生成器生成。响应返回前再次过契约 schema。
 

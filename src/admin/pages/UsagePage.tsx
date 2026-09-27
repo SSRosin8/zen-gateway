@@ -1,6 +1,6 @@
 import { UNKNOWN_MODEL, type StatsView } from "../../shared/contract.ts";
 import { Metric, Mono, Panel, Strong } from "../components/Panel.tsx";
-import { FilterChip, SimpleTable, type Column } from "../components/DataTable.tsx";
+import { FilterChip, SEGMENTED_TRACK, SimpleTable, type Column } from "../components/DataTable.tsx";
 import { StatusIndicator } from "../components/StatusIndicator.tsx";
 
 /**
@@ -111,7 +111,7 @@ export function UsagePage({
       <Panel
         title="用量"
         action={
-          <div className="flex gap-1" role="group" aria-label="时间范围">
+          <div className={SEGMENTED_TRACK} role="group" aria-label="时间范围">
             {[
               { value: "7", label: "7 天" },
               { value: "30", label: "30 天" },

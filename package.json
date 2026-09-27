@@ -20,7 +20,7 @@
     "build:admin": "vite build",
     "check:sensitive": "node scripts/check-sensitive-files.mjs",
     "typecheck": "npm run check:sensitive && tsc -p tsconfig.server.json --noEmit && tsc -p tsconfig.admin.json --noEmit && tsc -p tsconfig.test.json",
-    "test": "NODE_OPTIONS=\"--import ./tests/support/offlineGuard.mjs\" vitest run",
+    "test": "ZG_ADMIN_PORT=0 NODE_OPTIONS=\"--import ./tests/support/offlineGuard.mjs\" vitest run",
     "test:watch": "vitest",
     "validate": "npm run typecheck && npm run build && npm run test",
     "start": "npm run build && node scripts/service.mjs start",

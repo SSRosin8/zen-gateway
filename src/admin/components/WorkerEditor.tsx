@@ -4,8 +4,9 @@ import { FormStatus, PrimaryButton, SecondaryButton, type FormMessage } from "./
 import { StatusIndicator } from "./StatusIndicator.tsx";
 import type { FetchState } from "../lib/api.ts";
 import { suggestWorker, validateWorkerId } from "../lib/workerIds.ts";
+import { FIELD } from "../lib/styles.ts";
 
-const INPUT = "min-h-[44px] rounded-sm border border-border-strong bg-bg px-3";
+
 
 type Kind = "anonymous" | "authenticated";
 
@@ -38,7 +39,7 @@ function ProxyField({
       <div className="flex flex-col gap-1">
         <label className="flex flex-col gap-1">
           <span className="text-text-muted">出口代理 ID（留空为本机直连）</span>
-          <input value={value} onChange={(e) => onChange(e.target.value)} aria-describedby={hintId} className={INPUT} />
+          <input value={value} onChange={(e) => onChange(e.target.value)} aria-describedby={hintId} className={FIELD} />
         </label>
         <span id={hintId} className="text-text-muted">
           {why}
@@ -53,7 +54,7 @@ function ProxyField({
   return (
     <label className="flex flex-col gap-1">
       <span className="text-text-muted">出口代理</span>
-      <select value={value} onChange={(e) => onChange(e.target.value)} className={INPUT}>
+      <select value={value} onChange={(e) => onChange(e.target.value)} className={FIELD}>
         <option value="">本机直连</option>
         {missing && <option value={value}>{value} · 不在代理列表中</option>}
         {list.map((p) => (
@@ -181,7 +182,7 @@ export function WorkerEditor({
     >
       <label className="flex flex-col gap-1">
         <span className="text-text-muted">类型</span>
-        <select value={kind} onChange={(e) => changeKind(e.target.value as Kind)} className={INPUT}>
+        <select value={kind} onChange={(e) => changeKind(e.target.value as Kind)} className={FIELD}>
           <option value="anonymous">匿名 Worker</option>
           <option value="authenticated">认证 Worker</option>
         </select>
@@ -200,7 +201,7 @@ export function WorkerEditor({
                 setTouched((t) => ({ ...t, id: true }));
                 if (idError !== null) setIdError(validateWorkerId(e.target.value, new Set(existingIds)));
               }}
-              className={`${INPUT} font-mono`}
+              className={`${FIELD} font-mono`}
             />
           </label>
           {idError !== null && (
@@ -219,7 +220,7 @@ export function WorkerEditor({
             setName(e.target.value);
             setTouched((t) => ({ ...t, name: true }));
           }}
-          className={INPUT}
+          className={FIELD}
         />
       </label>
       {kind === "authenticated" && (
@@ -231,7 +232,7 @@ export function WorkerEditor({
             value={apiKey}
             onChange={(e) => setApiKey(e.target.value)}
             placeholder={mode === "edit" && worker?.apiKey.present ? "留空表示不修改" : "必填"}
-            className={INPUT}
+            className={FIELD}
           />
         </label>
       )}

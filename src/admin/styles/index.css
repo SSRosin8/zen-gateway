@@ -24,6 +24,11 @@
   body {
     margin: 0;
     background-color: var(--zg-bg);
+    /* 背景色场：毛玻璃后面要有柔和的色彩变化，模糊才看得出来；色标与 bg 只差 1.05 左右。 */
+    background-image:
+      radial-gradient(60% 60% at 0% 0%, var(--zg-backdrop-1), transparent 70%),
+      radial-gradient(50% 50% at 100% 100%, var(--zg-backdrop-2), transparent 70%);
+    background-attachment: fixed;
     color: var(--zg-text);
     font-family: var(--font-sans);
     font-size: var(--text-label-14);
@@ -47,6 +52,52 @@
   :focus-visible {
     outline: 2px solid var(--zg-accent-fg);
     outline-offset: 2px;
+  }
+
+  /*
+   * 毛玻璃材质。默认先写实色：不支持 backdrop-filter、要求减少透明度或提高对比度时就是实色。
+   * chrome 用于侧栏（背后只有固定的色场），thick 用于窄屏顶栏（内容会从它下面滚过，
+   * 所以更不透明）。
+   */
+  .zg-glass,
+  .zg-glass-thick {
+    background-color: var(--zg-surface);
+  }
+
+  @supports (backdrop-filter: blur(1px)) or (-webkit-backdrop-filter: blur(1px)) {
+    .zg-glass {
+      background-color: color-mix(in srgb, var(--zg-glass) var(--zg-glass-alpha), transparent);
+      -webkit-backdrop-filter: blur(24px) saturate(1.5);
+      backdrop-filter: blur(24px) saturate(1.5);
+    }
+
+    .zg-glass-thick {
+      background-color: color-mix(in srgb, var(--zg-glass) var(--zg-glass-thick-alpha), transparent);
+      -webkit-backdrop-filter: blur(20px) saturate(1.5);
+      backdrop-filter: blur(20px) saturate(1.5);
+    }
+  }
+
+  /* 原生 <dialog> 的遮罩。 */
+  .zg-scrim::backdrop {
+    background-color: color-mix(in srgb, var(--zg-scrim) var(--zg-scrim-alpha), transparent);
+    -webkit-backdrop-filter: blur(6px);
+    backdrop-filter: blur(6px);
+  }
+
+  @media (prefers-reduced-transparency: reduce), (prefers-contrast: more), (forced-colors: active) {
+    .zg-glass,
+    .zg-glass-thick {
+      background-color: var(--zg-surface);
+      -webkit-backdrop-filter: none;
+      backdrop-filter: none;
+    }
+
+    .zg-scrim::backdrop {
+      background-color: color-mix(in srgb, var(--zg-scrim) 60%, transparent);
+      -webkit-backdrop-filter: none;
+      backdrop-filter: none;
+    }
   }
 
   /* 骨架：延迟 300ms 再淡入 —— 本机请求多数在此之前返回，骨架根本不出现，

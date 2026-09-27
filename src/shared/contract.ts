@@ -227,8 +227,10 @@ export const AdminErrorSchema = z.object({
       "not_found",
       /** 与进行中的操作冲突（批量探测、订阅刷新），不排队，稍后重试。 */
       "conflict",
-      /** Clash Controller 连得上但要求 secret。 */
+      /** Clash Controller 连得上但要求 secret；局域网登录口令不对也用它。 */
       "auth_required",
+      /** 局域网访问尚未登录或会话已过期（回环闸门直接返回）。 */
+      "lan_login_required",
       "internal_error",
     ]),
     message: z.string(),
@@ -660,6 +662,22 @@ export type OpenCodeView = z.infer<typeof OpenCodeViewSchema>;
  */
 export const ProbeRequestSchema = z.strictObject({
   proxyIds: z.array(z.string().min(1).max(256)).min(1).max(MAX_WORKERS).optional(),
+});
+
+/** 局域网访问状态。`local` = 本机浏览器；`addresses` 只返回给本机。 */
+export const LanStatusSchema = z.object({
+  enabled: z.boolean(),
+  local: z.boolean(),
+  authenticated: z.boolean(),
+  addresses: z.array(z.string()),
+});
+export type LanStatus = z.infer<typeof LanStatusSchema>;
+
+export const LanLoginRequestSchema = z.strictObject({ password: z.string().min(1).max(256) });
+
+/** 设置局域网访问口令；null = 关闭局域网访问。至少 8 位：它是整个局域网面前唯一的门。 */
+export const LanPasswordRequestSchema = z.strictObject({
+  password: z.string().min(8, { message: "口令至少 8 位" }).max(256).nullable(),
 });
 
 export const OpenCodeWriteRequestSchema = z.strictObject({

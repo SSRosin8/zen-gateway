@@ -13,6 +13,7 @@ const STATUS: Record<AdminErrorType, 400 | 401 | 404 | 409 | 422 | 500> = {
   not_found: 404,
   conflict: 409,
   auth_required: 401,
+  lan_login_required: 401,
   internal_error: 500,
 };
 

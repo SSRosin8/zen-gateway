@@ -3,6 +3,7 @@ import react from "@vitejs/plugin-react";
 import tailwindcss from "@tailwindcss/vite";
 import { fileURLToPath } from "node:url";
 import { resolvePort } from "./src/store/port.ts";
+import { DEFAULT_ADMIN_PORT } from "./src/store/port.ts";
 
 // Tailwind 4 通过 Vite 插件接入：没有 tailwind.config.js，也没有 PostCSS 链。
 // token 定义在 src/admin/styles/tokens.css 的 @theme 块里。
@@ -28,6 +29,10 @@ export function resolveViteServerPort(): number {
 /** 导出构造函数，让测试能在临时 ZG_DATA_DIR 下验证真正的代理 target。 */
 export function createViteConfig() {
   const serverPort = resolveViteServerPort();
+  const proxy = {
+    "/health": { target: `http://127.0.0.1:${serverPort}`, changeOrigin: false },
+    "/api": { target: `http://127.0.0.1:${serverPort}`, changeOrigin: false },
+  };
   return defineConfig({
     root: fileURLToPath(new URL("src/admin", import.meta.url)),
     plugins: [react(), tailwindcss()],
@@ -37,16 +42,18 @@ export function createViteConfig() {
       sourcemap: true,
     },
     server: {
-      port: 5173,
+      port: DEFAULT_ADMIN_PORT,
       strictPort: true,
-      // 管理面仅 loopback：dev server 也不对外监听。
+      /*
+       * 开发用（热更新）。只在本机监听，**不能**开到局域网：它按需伺服项目目录下的任意源文件
+       * （`/@fs/`），`data/config.json` 里的 API key 也在其中。日常使用与局域网访问走
+       * `npm start` 起的后台页面（server/adminSite.ts），它只伺服构建产物。
+       * 与 `npm start` 同时运行时两者抢 5173：先起的占住，网关会报后台端口被占。
+       */
       host: "127.0.0.1",
       // `/health` 是 doctor.mjs 与 service.mjs 健康等待所用的同一个路径，
       // 不加 /api 前缀，dev 下需单独转发。
-      proxy: {
-        "/health": { target: `http://127.0.0.1:${serverPort}`, changeOrigin: false },
-        "/api": { target: `http://127.0.0.1:${serverPort}`, changeOrigin: false },
-      },
+      proxy,
     },
   });
 }

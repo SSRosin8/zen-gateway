@@ -50,7 +50,7 @@ export function ConfirmDialog({
         event.preventDefault();
         onCancel();
       }}
-      className="m-auto w-[min(32rem,calc(100vw-2rem))] rounded-lg border border-border-strong bg-surface p-0 text-text backdrop:bg-[#141413]/60"
+      className="m-auto w-[min(32rem,calc(100vw-2rem))] zg-scrim rounded-xl border border-border-strong bg-surface p-0 text-text shadow-float"
     >
       {open && (
         <div className="px-5 py-4">

@@ -3,10 +3,12 @@ import type { OpenCodeView, Overview } from "../../shared/contract.ts";
 import { FormStatus, Mono, Panel, SecondaryButton, errorMessage, type FormMessage } from "../components/Panel.tsx";
 import { ConfirmDialog } from "../components/ConfirmDialog.tsx";
 import { OpenCodeConfigCard } from "../components/OpenCodeConfigCard.tsx";
+import { LanAccessPanel } from "../components/LanAccess.tsx";
 import { RoutingSettingsForm, RuntimeSettingsForm } from "../components/GatewaySettingsForms.tsx";
 import { patchConfig, type FetchState } from "../lib/api.ts";
 import { versionFromDetected, writeOpenCodeConfig } from "../lib/consoleApi.ts";
 import { openCodeConfigSnippet, type OpenCodeVersion } from "../lib/openCodeConfig.ts";
+import { FIELD } from "../lib/styles.ts";
 
 /**
  * 网关页 —— 连接信息、运行参数、调度、Relay Token 与客户端配置。
@@ -19,8 +21,8 @@ import { openCodeConfigSnippet, type OpenCodeVersion } from "../lib/openCodeConf
  *
  * ## 轮换 Relay Token 之后要重写 opencode.json
  *
- * 轮换立即生效，旧 token 的客户端会拿到 401。所以成功后紧跟一个重写按钮，
- * 而不是让用户自己想起来。
+ * 轮换立即生效，旧 token 的客户端会拿到 401。确认框里默认勾选「同时写入 opencode.json」；
+ * 没勾或写入失败时，服务端判据（`pointsToGateway`）让重写提示常驻，直到文件指向当前 token。
  */
 export { validateMaxAttempts } from "../components/GatewaySettingsForms.tsx";
 
@@ -39,6 +41,7 @@ export function GatewayPage({
       <OpenCodePanel opencode={opencode} refresh={refresh} port={data.gateway.port} />
       <RuntimeSettingsForm data={data} refresh={refresh} />
       <RoutingSettingsForm data={data} refresh={refresh} />
+      <LanAccessPanel />
     </div>
   );
 }
@@ -55,21 +58,41 @@ function ConnectionPanel({
   const [confirming, setConfirming] = useState(false);
   const [rotating, setRotating] = useState(false);
   const [message, setMessage] = useState<FormMessage>(null);
-  const [rotated, setRotated] = useState(false);
+  /** 轮换后顺带重写 opencode.json；文件存在且能安全改写时默认勾选。 */
+  const canRewrite = opencode.status === "ready" && opencode.data.exists && opencode.data.unwritableReason === null;
+  const [alsoRewrite, setAlsoRewrite] = useState(true);
 
   const rotate = () => {
     setConfirming(false);
     setRotating(true);
     setMessage(null);
+    const rewrite = canRewrite && alsoRewrite;
     void patchConfig({ gateway: { relayToken: { rotate: true } } })
-      .then(() => {
-        setRotated(true);
-        setMessage({ tone: "success", text: "已轮换，新 token 立即生效" });
-        refresh?.();
+      .then(async () => {
+        if (!rewrite) {
+          setMessage({ tone: "success", text: "已轮换，新 token 立即生效" });
+          return;
+        }
+        const version = opencode.status === "ready" ? opencode.data.detectedVersion : null;
+        try {
+          await writeOpenCodeConfig(versionFromDetected(version));
+          setMessage({ tone: "success", text: "已轮换，并已把新 token 写入 opencode.json" });
+        } catch (err) {
+          setMessage({ tone: "error", text: `已轮换，但 opencode.json 写入失败：${errorMessage(err)?.text ?? ""}` });
+        }
       })
       .catch((err) => setMessage(errorMessage(err)))
-      .finally(() => setRotating(false));
+      .finally(() => {
+        setRotating(false);
+        refresh?.();
+      });
   };
+
+  /*
+   * 「opencode.json 仍是旧 token」由服务端判据驱动（`pointsToGateway` 比对当前 token），
+   * 不用组件内的「刚轮换过」标记：换页、刷新或在别处轮换之后提示依然在。
+   */
+  const stale = opencode.status === "ready" && opencode.data.exists && !opencode.data.pointsToGateway;
 
   return (
     <Panel title="连接">
@@ -105,7 +128,7 @@ function ConnectionPanel({
       </dl>
       <div className="mt-3 space-y-2" aria-live="polite">
         <FormStatus message={message} />
-        {rotated && <RewriteAfterRotate opencode={opencode} refresh={refresh} />}
+        {stale && <RewriteAfterRotate opencode={opencode} refresh={refresh} />}
       </div>
 
       <ConfirmDialog
@@ -117,13 +140,21 @@ function ConnectionPanel({
         onConfirm={rotate}
       >
         <p>服务端会生成新的 Relay Token 并立即生效，旧 token 随即失效。</p>
-        <p>正在使用旧 token 的客户端（包括现有的 opencode.json）会收到 401，需要重写配置。</p>
+        <p>正在使用旧 token 的客户端会收到 401，需要换成新 token。</p>
+        {canRewrite ? (
+          <label className="flex min-h-[44px] items-center gap-2 text-text">
+            <input type="checkbox" checked={alsoRewrite} onChange={(e) => setAlsoRewrite(e.target.checked)} />
+            同时把新 token 写入项目根 opencode.json
+          </label>
+        ) : (
+          <p>项目根 opencode.json 不存在或不能自动改写，轮换后请手动更新客户端配置。</p>
+        )}
       </ConfirmDialog>
     </Panel>
   );
 }
 
-/** 轮换成功后紧跟的重写提示；版本沿用检测值。 */
+/** opencode.json 未指向本网关（常见于轮换之后）时的重写提示；版本沿用检测值。 */
 function RewriteAfterRotate({
   opencode,
   refresh,
@@ -136,7 +167,7 @@ function RewriteAfterRotate({
   const exists = opencode.status === "ready" && opencode.data.exists;
   return (
     <div className="rounded-md border border-warn bg-surface-accent px-4 py-3" data-rewrite-prompt="">
-      <p>opencode.json 里还是旧 token，重写后 OpenCode 才能继续使用本网关。</p>
+      <p>opencode.json 没有指向本网关（多半还是旧 token），重写后 OpenCode 才能继续使用本网关。</p>
       <div className="mt-2 flex flex-wrap items-center gap-2">
         <SecondaryButton
           disabled={busy}
@@ -201,7 +232,7 @@ function OtherClientSnippet({ port }: { port: number }) {
               aria-label="片段格式"
               value={version}
               onChange={(e) => setVersion(e.target.value as OpenCodeVersion)}
-              className="min-h-[44px] rounded-sm border border-border-strong bg-bg px-3"
+              className={FIELD}
             >
               <option value="2">OpenCode 2.x</option>
               <option value="1">OpenCode 1.x</option>

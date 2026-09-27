@@ -2,10 +2,9 @@ import type { ReactNode } from "react";
 import { StatusIndicator } from "./StatusIndicator.tsx";
 
 /**
- * 面板 —— 层次靠「表面色调 + 1px 边框」，**不用 box-shadow**。因此边框必须
- * 真的可见：`border` 在 `surface` 上只有 1.077 对比度，所以卡片叠在面板上时
- * 一律用 `border-strong`（1.34）。禁用 shadow 后层次只剩色调与边框两个机制，
- * 其中边框在 surface 上不可见的话，就没有任何手段表达层次。
+ * 面板 —— 内容层的实色卡片，层次靠「表面色调 + 1px 边框」，不用阴影。
+ * 浅色下白卡落在灰蓝页面底上（1.16）已经分得开，边框用轻的 `border`；
+ * 深色下 surface 与 bg 只差 1.13，边框换 `border-strong` 才看得出轮廓。
  */
 export function Panel({
   title,
@@ -17,9 +16,9 @@ export function Panel({
   children: ReactNode;
 }) {
   return (
-    <section className="min-w-0 rounded-lg border border-border-strong bg-surface">
-      <header className="flex flex-wrap items-center justify-between gap-3 border-b border-border-strong px-4 py-3 sm:px-5">
-        <h2 className="text-heading-16 font-medium">{title}</h2>
+    <section className="min-w-0 rounded-lg border border-border bg-surface dark:border-border-strong">
+      <header className="flex flex-wrap items-center justify-between gap-3 border-b border-border px-4 py-3 sm:px-5 dark:border-border-strong">
+        <h2 className="text-heading-16 font-semibold tracking-tight">{title}</h2>
         {action}
       </header>
       <div className="px-4 py-4 sm:px-5">{children}</div>
@@ -30,9 +29,7 @@ export function Panel({
 /**
  * 指标卡。
  *
- * 大号数字用 `font-serif` —— 这是衬线**真能生效**的少数位置之一：
- * Instrument Serif 的 CJK 覆盖为零，所以标题归 Inter，衬线只留给
- * 拉丁数字、向导、空状态、wordmark。
+ * 大号数字用系统无衬线 semibold（macOS 上是 SF）：衬线数字与这套 Apple 风格的界面不搭。
  *
  * `tabular-nums` 让数字逐位可比（一个 3 位数变成 2 位时不会让整行跳动）。
  */
@@ -53,7 +50,7 @@ export function Metric({
     <div>
       <div className="text-label-14 text-text-muted">{label}</div>
       <div
-        className={`mt-1 font-serif text-display-30 ${valueClass}`}
+        className={`mt-1 text-display-30 font-semibold tracking-tight ${valueClass}`}
         style={{ fontVariantNumeric: "tabular-nums" }}
       >
         {value}
@@ -97,7 +94,7 @@ export function PrimaryButton({
       onClick={onClick}
       disabled={disabled}
       /* 触摸目标 ≥44px。 */
-      className="min-h-[44px] rounded-sm bg-accent-fill px-4 font-medium text-on-accent-fill transition-colors enabled:hover:bg-accent-fill-hover enabled:active:bg-accent-fill-hover disabled:cursor-not-allowed disabled:bg-border-strong disabled:text-text"
+      className="inline-flex min-h-[44px] items-center justify-center gap-2 rounded-sm bg-accent-fill px-4 font-medium text-on-accent-fill transition-colors enabled:hover:bg-accent-fill-hover enabled:active:bg-accent-fill-hover disabled:cursor-not-allowed disabled:bg-border-strong disabled:text-text"
     >
       {children}
     </button>
@@ -138,8 +135,9 @@ export function SecondaryButton({
       type={type}
       onClick={onClick}
       disabled={disabled}
-      className={`rounded-sm border transition-colors enabled:hover:bg-surface-hover enabled:active:bg-surface-active disabled:cursor-not-allowed disabled:border-border disabled:text-text-muted ${
-        compact ? "min-h-8 px-2.5" : "min-h-[44px] px-3"
+      /* macOS 推钮：实色底 + 细边框，悬停与按下只换底色。 */
+      className={`inline-flex items-center justify-center gap-1.5 border bg-surface transition-colors enabled:hover:bg-surface-hover enabled:active:bg-surface-active disabled:cursor-not-allowed disabled:border-border disabled:text-text-muted ${
+        compact ? "min-h-8 rounded-xs px-2.5" : "min-h-[44px] rounded-sm px-3.5"
       } ${danger ? "border-error text-error" : "border-border-strong"}`}
     >
       {children}

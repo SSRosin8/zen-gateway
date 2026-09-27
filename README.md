@@ -9,19 +9,17 @@ Chat Completions、Responses，以及 Anthropic Messages 请求，只放行配�
 
 ## 快速开始
 
-需要 Node.js 24 或更高版本。网关和管理后台是两个进程：
+需要 Node.js 24 或更高版本。一条命令启动网关与管理后台：
 
 ```bash
 npm install
-npm start         # 终端 1：构建并启动网关，端口用 npm run status 查看
-npm run dev       # 终端 2：Vite 管理后台，http://127.0.0.1:5173
-npm run open      # 可选：用浏览器打开 5173
+npm start         # 构建并启动；管理后台 http://127.0.0.1:5173
+npm run open      # 可选：用浏览器打开管理后台
 ```
 
-网关端口只提供 `/health`、`/v1/*`、无前缀协议别名和 `/api/*`，不提供页面
-（`GET /` 返回 404）。后台页面只在 `npm run dev` 运行时可用；`npm run open` 和
-`npm start -- --open` 只检查网关、不检查 Vite 是否在运行。完整说明见
-[`docs/usage.md`](docs/usage.md#安装和运行)。
+网关端口（默认 9876）只提供 `/health`、`/v1/*`、无前缀协议别名和 `/api/*`；管理后台
+在独立端口（默认 5173）上，由同一个进程伺服构建产物。设置访问口令后可从局域网访问后台。
+完整说明见 [`docs/usage.md`](docs/usage.md#安装和运行)。
 
 首次启动会创建 `data/config.json` 并生成 Relay Token。管理后台的 Worker 页可
 新增、编辑和删除 Worker；认证 Worker 填 Zen API key，匿名 Worker 不发送任何

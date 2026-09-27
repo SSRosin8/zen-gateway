@@ -159,14 +159,13 @@ function WorkerPanel({
   data,
   page,
   onPage,
-  refresh,
+  probe,
 }: {
   data: Overview;
   page: number;
   onPage: (page: number) => void;
-  refresh?: () => void;
+  probe: ProbeRun;
 }) {
-  const probe = useProbe(refresh);
   const { groups, sharedGroups, unknownWorkerIds, isolated } = data.isolation;
   const sharedIds = new Set(sharedGroups.flatMap((g) => g.workerIds));
   const targets = probeTargets(data.workers);
@@ -180,6 +179,7 @@ function WorkerPanel({
   return (
     <Panel
       title={`Worker（${data.workers.length}）`}
+      /* 标题数全部 Worker（表里每一行）；「就绪」指标只数候选池，两者差额在指标说明里写明。 */
       action={
         <span className="flex flex-wrap items-center gap-2">
           {probe.running && <SecondaryButton onClick={probe.stop}>停止</SecondaryButton>}
@@ -238,15 +238,21 @@ export function OverviewPage({
   data,
   page = 1,
   onPage = () => {},
-  refresh,
+  probe,
 }: {
   data: Overview;
   /** Worker 表页码，来自 URL。 */
   page?: number;
   onPage?: (page: number) => void;
-  /** 每探完一个出口刷新 overview，表里的 IP 随之更新。 */
-  refresh?: () => void;
+  /** 出口探测的状态归 App（离开本页不中断），见 `useProbe`。不传时本页自己持有（测试用）。 */
+  probe?: ProbeRun;
 }) {
+  const local = useProbe();
+  const run = probe ?? local;
+  const targets = probeTargets(data.workers);
+  // 一个出口可能被多个 Worker 共用；只要其中一个有 IP，这个出口就已探测过。
+  const probed = new Set(data.workers.filter((w) => w.inPool && w.egressIp !== null).map((w) => w.proxyId ?? DIRECT_EGRESS_ID));
+  const unprobed = targets.filter((t) => !probed.has(t)).length;
   const pool = poolHealth(data.pool);
 
   /*
@@ -266,10 +272,15 @@ export function OverviewPage({
     <div className="space-y-4">
       <Panel title="概览">
         <div className="grid grid-cols-2 gap-6 sm:grid-cols-4">
+          {/* 分母是候选池里的 Worker；停用或缺 key 的不在池里，另行写在说明里，免得同页出现两个总数。 */}
           <Metric
             label="就绪 Worker"
             value={`${data.pool.ready}/${data.pool.total}`}
-            hint={POOL_LABEL[pool]}
+            hint={
+              data.workers.length > data.pool.total
+                ? `${POOL_LABEL[pool]} · 另有 ${data.workers.length - data.pool.total} 个不在候选池`
+                : POOL_LABEL[pool]
+            }
             tone={pool === "healthy" ? "normal" : pool === "degraded" ? "warn" : "normal"}
           />
           <Metric
@@ -278,10 +289,12 @@ export function OverviewPage({
             hint={data.catalog.freeCount === null ? "目录未拉到" : "在架且免费"}
             tone={data.catalog.freeCount === null ? "error" : "normal"}
           />
+          {/* 与 Worker 同一口径：在用出口里已有回显 IP 的有几个；代理池总数在代理池页。 */}
           <Metric
-            label="出口"
-            value={`${data.proxies.withEgressIp}/${data.proxies.enabled}`}
-            hint="已实测公网 IP"
+            label="已探测出口"
+            value={`${targets.length - unprobed}/${targets.length}`}
+            hint={unprobed === 0 ? "在用出口都有回显 IP" : `${unprobed} 个在用出口未探测`}
+            tone={unprobed === 0 ? "normal" : "warn"}
           />
           <Metric
             label="运行时长"
@@ -307,7 +320,7 @@ export function OverviewPage({
         </div>
       </Panel>
 
-      <WorkerPanel data={data} page={page} onPage={onPage} {...(refresh !== undefined ? { refresh } : {})} />
+      <WorkerPanel data={data} page={page} onPage={onPage} probe={run} />
 
       <p className="flex flex-wrap items-center gap-x-4 gap-y-1 px-1 text-text-muted" data-gateway-summary="">
         <span>

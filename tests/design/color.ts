@@ -107,6 +107,8 @@ export function parseTokenBlock(rawCss: string, selector: string): TokenMap {
 
       const [, key, rawValue] = m as unknown as [string, string, string];
       const value = rawValue.trim();
+      // 透明度不是颜色：`--zg-*-alpha` 由 `parseAlphaBlock` 单独读出并参与合成色断言。
+      if (key.endsWith("-alpha")) continue;
       if (!/^#[0-9a-fA-F]{6}$/.test(value)) {
         throw new Error(
           `--zg-${key} 的值必须是 6 位字面量十六进制（收到 ${value.slice(0, 20)}）——` +
@@ -121,6 +123,37 @@ export function parseTokenBlock(rawCss: string, selector: string): TokenMap {
     }
   }
   return out;
+}
+
+/**
+ * 读出某个选择器下的 `--zg-*-alpha` 百分比（0–1）。只接受 `NN%`：其余写法同样报错，
+ * 否则一个写错的透明度会让合成色断言在默认值上通过。
+ */
+export function parseAlphaBlock(rawCss: string, selector: string): Record<string, number> {
+  const css = stripComments(rawCss);
+  const out: Record<string, number> = {};
+  for (const body of findBlocks(css, selector)) {
+    for (const line of body.split(";")) {
+      const m = /^--zg-([a-z0-9-]+-alpha)\s*:\s*(.+)$/.exec(line.trim());
+      if (!m) continue;
+      const pct = /^(\d{1,3})%$/.exec(m[2]!.trim());
+      if (!pct || Number(pct[1]) > 100) throw new Error(`--zg-${m[1]} 必须是 0–100%（收到 ${m[2]}）`);
+      if (m[1]! in out) throw new Error(`${selector} 中 --zg-${m[1]} 重复声明`);
+      out[m[1]!] = Number(pct[1]) / 100;
+    }
+  }
+  return out;
+}
+
+/** 把前景色按 alpha 叠在背景色上（sRGB 线性插值，与 `color-mix(in srgb, …)` 一致）。 */
+export function composite(fg: string, bg: string, alpha: number): string {
+  const rgb = (h: string) => {
+    const n = parseInt(h.slice(1), 16);
+    return [(n >> 16) & 255, (n >> 8) & 255, n & 255];
+  };
+  const f = rgb(fg);
+  const b = rgb(bg);
+  return `#${f.map((v, i) => Math.round(v * alpha + b[i]! * (1 - alpha)).toString(16).padStart(2, "0")).join("")}`;
 }
 
 /**

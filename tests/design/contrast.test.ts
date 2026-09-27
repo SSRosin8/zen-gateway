@@ -1,7 +1,9 @@
 import { describe, expect, it } from "vitest";
 import { readFileSync, readdirSync } from "node:fs";
 import {
+  composite,
   contrastRatio,
+  parseAlphaBlock,
   parseThemeMappings,
   parseTokenBlock,
   stripComments,
@@ -29,15 +31,26 @@ const FOREGROUNDS = ["text", "text-muted", "accent-fg", "success", "warn", "erro
  * `surface-hover` / `surface-active` 是按钮、筛选片、导航、表格行的悬停与按下底色 ——
  * 悬停时行内的全部文字都压在它上面，所以它们和静态表面一样参与笛卡尔积。
  */
-const SURFACES = ["bg", "surface", "surface-accent", "surface-hover", "surface-active"] as const;
+const SURFACES = [
+  "bg",
+  "backdrop-1",
+  "backdrop-2",
+  "surface",
+  "surface-accent",
+  "surface-hover",
+  "surface-active",
+] as const;
+
+/** 毛玻璃材质底色：不直接做表面，按透明度合成到背后之后才承载文字（见「毛玻璃」一节）。 */
+const GLASS = ["glass"] as const;
 
 /**
  * 结构性 token —— 不承载任意文本，不参与 ≥4.5:1 的笛卡尔积规则，
  * 但每一个都有下面单独的断言，不是「豁免」。
  */
-const STRUCTURAL = ["border", "border-strong", "accent-fill", "accent-fill-hover", "on-accent-fill"] as const;
+const STRUCTURAL = ["border", "border-strong", "accent-fill", "accent-fill-hover", "on-accent-fill", "scrim"] as const;
 
-const CLASSIFIED = [...FOREGROUNDS, ...SURFACES, ...STRUCTURAL] as const;
+const CLASSIFIED = [...FOREGROUNDS, ...SURFACES, ...GLASS, ...STRUCTURAL] as const;
 
 const THEMES: Array<[string, TokenMap]> = [
   ["light", LIGHT],
@@ -330,5 +343,100 @@ describe("禁用态仍然可读", () => {
 
     expect(scanned).toBe(files.length);
     expect(offenders, "这些文件又用了 disabled:opacity").toEqual([]);
+  });
+});
+
+/*
+ * 毛玻璃合成后的对比度。
+ *
+ * 玻璃不是一个固定颜色：屏幕上的底色 = glass 按透明度叠在它背后的像素上。最坏情况按用途选：
+ * - 侧栏（glass-alpha）是 sticky 的，背后只有固定的背景色场 → 用每个色标与 bg 合成。
+ * - 窄屏顶栏（glass-thick-alpha）下面会滚过任意内容 → 模糊只会把像素往周围平均，
+ *   所以最坏是某个最极端的颜色铺满：取全部前景色、accent-fill、border-strong 作背后像素。
+ * 悬停叠加用实色 surface-hover / surface-active，不参与合成。
+ */
+describe("毛玻璃合成后仍 ≥4.5:1", () => {
+  const ALPHAS: Array<[string, Record<string, number>, TokenMap]> = [
+    ["light", parseAlphaBlock(CSS, ":root"), LIGHT],
+    ["dark", parseAlphaBlock(CSS, '[data-theme="dark"]'), DARK],
+  ];
+
+  it.each(ALPHAS)("%s：两种材质与遮罩的透明度都已声明", (_name, alphas) => {
+    expect(Object.keys(alphas).sort()).toEqual(["glass-alpha", "glass-thick-alpha", "scrim-alpha"]);
+  });
+
+  for (const [theme, alphas, tokens] of ALPHAS) {
+    it(`${theme}：侧栏玻璃叠在背景色场上，全部前景 ≥4.5`, () => {
+      const behind = ["bg", "backdrop-1", "backdrop-2"].map((k) => tokens[k]!);
+      for (const b of behind) {
+        const glass = composite(tokens["glass"]!, b, alphas["glass-alpha"]!);
+        for (const fg of FOREGROUNDS) {
+          const ratio = contrastRatio(tokens[fg]!, glass);
+          expect(ratio, `${fg} on glass(${b}) = ${ratio.toFixed(2)}`).toBeGreaterThanOrEqual(4.5);
+        }
+      }
+    });
+
+    it(`${theme}：顶栏厚玻璃下滚过最极端的颜色，全部前景 ≥4.5`, () => {
+      const behind = [...FOREGROUNDS, "accent-fill", "border-strong", "bg", "surface"].map((k) => tokens[k]!);
+      for (const b of behind) {
+        const glass = composite(tokens["glass"]!, b, alphas["glass-thick-alpha"]!);
+        for (const fg of FOREGROUNDS) {
+          const ratio = contrastRatio(tokens[fg]!, glass);
+          expect(ratio, `${fg} on thick(${b}) = ${ratio.toFixed(2)}`).toBeGreaterThanOrEqual(4.5);
+        }
+      }
+    });
+  }
+
+  it("浅色厚玻璃降到 85% 就不及格 —— 记录不能再调低的理由", () => {
+    const worst = Math.min(
+      ...[...FOREGROUNDS, "accent-fill"].flatMap((b) =>
+        FOREGROUNDS.map((fg) => contrastRatio(LIGHT[fg]!, composite(LIGHT["glass"]!, LIGHT[b]!, 0.85))),
+      ),
+    );
+    expect(worst).toBeLessThan(4.5);
+  });
+});
+
+/*
+ * 玻璃与阴影只允许出现在导航层与浮层。扫源码，理由同「不用 opacity 表达禁用」：
+ * 这条断言守的是手法，一张半透明的数据卡片会让上面全部 token 断言失去意义。
+ */
+describe("玻璃与阴影的使用范围", () => {
+  const root = new URL("../../src/admin/", import.meta.url);
+  const walk = (dir: URL): string[] =>
+    readdirSync(dir, { withFileTypes: true }).flatMap((entry) => {
+      const child = new URL(`${entry.name}${entry.isDirectory() ? "/" : ""}`, dir);
+      if (entry.isDirectory()) return walk(child);
+      return entry.name.endsWith(".tsx") ? [child.pathname] : [];
+    });
+  const files = walk(root);
+  const rel = (abs: string) => abs.replace(/.*\/src\/admin\//, "");
+
+  const GLASS_ALLOWED = new Set(["components/Shell.tsx", "components/ConfirmDialog.tsx", "components/BulkImportDialog.tsx"]);
+
+  it("zg-glass / zg-scrim / backdrop-* 只在外壳与对话框里", () => {
+    expect(files.length).toBeGreaterThan(8);
+    const offenders = files
+      .filter((f) => /zg-glass|zg-scrim|backdrop-blur|backdrop-filter|backdrop:/.test(stripComments(readFileSync(f, "utf8"))))
+      .map(rel)
+      .filter((f) => !GLASS_ALLOWED.has(f));
+    expect(offenders).toEqual([]);
+  });
+
+  it("阴影只有 shadow-float 与 shadow-thumb；颜色类不带透明度后缀、不写字面色值", () => {
+    const bad: string[] = [];
+    for (const f of files) {
+      const code = stripComments(readFileSync(f, "utf8"));
+      // 只看类名位置（前面是空白、引号或反引号），不把注释外的普通单词当成类名。
+      for (const m of code.matchAll(/(?<=[\s"'`:])shadow(-[a-z0-9[\]/.#-]+)?(?=[\s"'`])/g)) {
+        if (m[1] !== "-float" && m[1] !== "-thumb") bad.push(`${rel(f)}: ${m[0]}`);
+      }
+      for (const m of code.matchAll(/\b(?:bg|text|border)-[a-z-]+\/\d+|\b(?:bg|text|border)-\[#/g)) {
+        bad.push(`${rel(f)}: ${m[0]}`);
+      }
+    }
+    expect(bad).toEqual([]);
   });
 });

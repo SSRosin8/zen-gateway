@@ -11,7 +11,7 @@ import { existsSync, openSync } from "node:fs";
 import { chmod, mkdir, open, readFile, rm, stat, writeFile } from "node:fs/promises";
 import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
-import { resolvePort } from "../src/store/port.ts";
+import { resolveAdminPort, resolvePort } from "../src/store/port.ts";
 import { DIR_MODE, FILE_MODE } from "../src/store/paths.ts";
 import { createInstance, dataDirOf, pidRunsScript } from "./lib/instance.mjs";
 
@@ -170,10 +170,23 @@ function openBrowser(url) {
 }
 
 /**
- * 管理后台 URL 指向 Vite dev server（固定 5173，`strictPort: true`）而不是网关端口：
- * 网关不伺服 `dist/admin`，`GET /` 是 404。若网关改为伺服静态产物，这里要跟着改。
+ * 管理后台 URL：网关进程在独立端口上伺服 `dist/admin`（`server/adminSite.ts`），
+ * 端口与服务端同一份解析（`resolveAdminPort`）。`ZG_ADMIN_PORT=0` 时没有后台页面。
  */
-const ADMIN_URL = "http://127.0.0.1:5173";
+let ADMIN_PORT;
+try {
+  ADMIN_PORT = resolveAdminPort();
+} catch (err) {
+  console.error(err instanceof Error ? err.message : String(err));
+  process.exit(1);
+}
+const ADMIN_URL = ADMIN_PORT === 0 ? null : `http://127.0.0.1:${ADMIN_PORT}`;
+
+/** 启动成功后的一行提示：网关地址 + 后台地址。 */
+function started(pid) {
+  console.log(`zen-gateway 已启动(pid ${pid}) → ${BASE}`);
+  if (ADMIN_URL !== null) console.log(`管理后台 → ${ADMIN_URL}`);
+}
 
 async function start() {
   await ensureDataDir();
@@ -189,7 +202,8 @@ async function start() {
 
     if (st.identity === "ours" && st.healthy) {
       console.log(`已在运行(pid ${st.state.pid}) → ${BASE}`);
-      if (WANT_OPEN) openBrowser(ADMIN_URL);
+      if (ADMIN_URL !== null) console.log(`管理后台 → ${ADMIN_URL}`);
+      if (WANT_OPEN && ADMIN_URL !== null) openBrowser(ADMIN_URL);
       return 0;
     }
 
@@ -249,8 +263,8 @@ async function start() {
     while (Date.now() < deadline) {
       const health = await probeHealth();
       if (health?.pid === child.pid) {
-        console.log(`zen-gateway 已启动(pid ${child.pid}) → ${BASE}`);
-        if (WANT_OPEN) openBrowser(ADMIN_URL);
+        started(child.pid);
+        if (WANT_OPEN && ADMIN_URL !== null) openBrowser(ADMIN_URL);
         return 0;
       }
       if (!pidAlive(child.pid)) {
@@ -357,6 +371,10 @@ async function open_() {
   const st = await inspect();
   if (!(st.identity === "ours" && st.healthy)) {
     console.error("服务未在运行,先 npm start。");
+    return 1;
+  }
+  if (ADMIN_URL === null) {
+    console.error("ZG_ADMIN_PORT=0,没有启动管理后台页面。");
     return 1;
   }
   return openBrowser(ADMIN_URL) ? 0 : 1;
