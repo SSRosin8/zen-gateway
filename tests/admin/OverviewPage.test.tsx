@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { render, screen } from "@testing-library/react";
+import { render, screen, within } from "@testing-library/react";
 import { OverviewPage, workerStatus } from "../../src/admin/pages/OverviewPage.tsx";
 import type { Overview, WorkerView } from "../../src/shared/contract.ts";
 import { fakeOverview } from "./App.test.tsx";
@@ -125,13 +125,11 @@ describe("出口隔离视图", () => {
     render(<OverviewPage data={data} />);
 
     expect(screen.getByText(/回显出口共用/)).toBeInTheDocument();
-    /*
-     * 共用回显出口必须说出是哪几个 Worker。
-     * 「w1、w2」在页面上出现两次(共用组的警示列表 + 全部分组列表),
-     * 所以用 getAllByText —— 至少一处即成立,而**两处都在**恰是设计意图:
-     * 警示区回答「出了什么问题」,分组列表回答「现在是什么状况」。
-     */
-    expect(screen.getAllByText(/w1、w2/).length).toBeGreaterThan(0);
+    // 共用标在对应 Worker 的行上：用户要知道是哪几个。
+    for (const id of ["w1", "w2"]) {
+      const row = screen.getByText(id).closest("tr")!;
+      expect(within(row).getByText("共用")).toBeInTheDocument();
+    }
   });
 
   it("未探测不显示为已隔离", () => {
@@ -159,12 +157,12 @@ describe("出口隔离视图", () => {
      *
      * 真正要钉的是:**隔离这一条**不报成功。
      */
-    const panel = screen.getAllByText(/1 个出口未探测/)[0]!.closest("section")!;
-    const tones = [...panel.querySelectorAll("[data-tone]")].map((el) =>
-      el.getAttribute("data-tone"),
-    );
-    expect(tones).toContain("warn");
-    expect(tones).not.toContain("success");
+    /*
+     * 隔离状态行现在与 Worker 表同在一个面板里，而表里的行可以正当地是 success，
+     * 所以只看那条状态指示本身。
+     */
+    const indicator = screen.getAllByText(/1 个出口未探测/)[0]!.closest("[data-tone]")!;
+    expect(indicator.getAttribute("data-tone")).toBe("warn");
   });
 
   it("回显出口独立时仍明确 Zen 实际出口未验证", () => {
@@ -270,7 +268,7 @@ describe("空状态与目录状态", () => {
 describe("无障碍与密度", () => {
   it("表格行高 36px，且与 tokens.css 的 --spacing-row 一致", () => {
     const { container } = render(<OverviewPage data={withWorkers([worker()])} />);
-    const row = container.querySelector("tr[data-worker]");
+    const row = container.querySelector("tr[data-row]");
     expect(row).not.toBeNull();
     expect(ROW_HEIGHT).toBe(36);
     expect((row as HTMLElement).style.height).toBe(`${ROW_HEIGHT}px`);

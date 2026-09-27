@@ -80,6 +80,8 @@ export type StatsSink = {
     usage: TokenUsage | null;
     /** 我们自己没解析完整（而不是上游没报）。见 `StatsStore.UsageRow`。 */
     dropped?: boolean;
+    /** 客户端会话摘要；带会话的用量每段会话只保留一条。见 `StatsStore.UsageRow`。 */
+    sessionHash?: string | null;
   }): void;
   /** 网关自己拒掉一次请求（从未到达上游）。 */
   recordRejection(row: {
@@ -327,6 +329,11 @@ async function handleRelay(
     headerValue: clientHeaders["x-opencode-session"],
   });
   const blobHashes = extractBlobHashes(parsed);
+  /*
+   * 用量按会话去重只认客户端的 `x-opencode-session` 头：Responses 面的 `previous_response_id`
+   * 每轮都变，用它会让同一段对话每轮都算新会话。
+   */
+  const usageSession = sessionHashFrom({ bodyKey: undefined, headerValue: clientHeaders["x-opencode-session"] });
 
   const plan = deps.scheduler.plan({ config, now: planNow, sessionHash, blobHashes });
   const targets: readonly AttemptTarget[] = plan.targets;
@@ -486,6 +493,7 @@ async function handleRelay(
               usage: totals,
               // 我们自己丢了（界定常量或上游断流）与「上游没报」分开记。
               dropped: usage.dropped(),
+              sessionHash: usageSession,
             });
           }
         },

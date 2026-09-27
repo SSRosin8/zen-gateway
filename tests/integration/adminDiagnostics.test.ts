@@ -155,6 +155,16 @@ describe("POST /api/diagnostics/deep 与批量探测互斥", () => {
     expect(ProbeReportSchema.parse(ok.body).results[0]).toMatchObject({ ok: true, egressIp: "203.0.113.9" });
   });
 
+  it("**批测进行中时 POST /api/probe 同样得 409** —— 单个出口探测也要切 selector", async () => {
+    const { app, batch, release } = setup();
+    expect(batch.start()).toBe(true);
+    const blocked = await post(app, "/api/probe", { proxyIds: ["__direct__"] });
+    expect(blocked.status).toBe(409);
+    release();
+    for (let i = 0; i < 100 && batch.snapshot().state !== "done"; i += 1) await new Promise((r) => setTimeout(r, 10));
+    expect((await post(app, "/api/probe", { proxyIds: ["__direct__"] })).status).toBe(200);
+  });
+
   it("深度诊断进行中时批测无法启动", async () => {
     const { app, batch, release } = setup();
     const deep = post(app, "/api/diagnostics/deep");

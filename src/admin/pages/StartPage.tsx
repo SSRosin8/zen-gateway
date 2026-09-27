@@ -1,6 +1,6 @@
 import { useState, type ReactNode } from "react";
 import type { OpenCodeView, Overview } from "../../shared/contract.ts";
-import { Mono, Panel, SecondaryButton, Strong } from "../components/Panel.tsx";
+import { Mono, SecondaryButton, Strong } from "../components/Panel.tsx";
 import { StatusIndicator } from "../components/StatusIndicator.tsx";
 import { ClashImportFlow } from "../components/ClashImportFlow.tsx";
 import { OpenCodeConfigCard } from "../components/OpenCodeConfigCard.tsx";
@@ -69,7 +69,8 @@ export function StartPage({
 
   return (
     <div className="space-y-4">
-      <Panel title="快速开始">
+      <header className="flex flex-wrap items-baseline gap-x-4 gap-y-1">
+        <h1 className="text-heading-20 font-medium">快速开始</h1>
         <StatusIndicator
           tone={progress.complete ? "success" : "neutral"}
           icon={progress.complete ? "✓" : "○"}
@@ -79,55 +80,52 @@ export function StartPage({
               : `已完成 ${progress.done}/${progress.total} 步`
           }
         />
-        <p className="mt-2 max-w-3xl text-text-muted">
-          每一步的状态来自网关的实时数据：在其他页面改好的设置，这里也会打勾。
-        </p>
-      </Panel>
+        <span className="text-text-muted">状态来自网关实时数据，在其他页面改好的设置这里也会打勾。</span>
+      </header>
 
-      <ol className="space-y-4">
+      <ol className="overflow-hidden rounded-lg border border-border-strong bg-surface">
         <Step n={1} id="catalog" done={steps.catalog} title="上游目录可达">
           {steps.catalog ? (
             <p className="text-text-muted">已拉到 {data.catalog.freeCount} 个免费模型。</p>
+          ) : data.catalog.freeCount === 0 ? (
+            <p className="text-text-muted">目录可达，但当前免费集为空；到模型页检查免费规则。</p>
           ) : (
             <>
-              <p className="max-w-3xl text-text-muted">
-                {data.catalog.freeCount === 0
-                  ? "目录可达，但当前免费集为空；到模型页检查免费规则。"
-                  : "还没拉到上游目录。最常见的成因是企业网络对 opencode.ai 做 TLS 中间人，而 Node 不读系统 CA 库，需要在启动网关时指定："}
-              </p>
-              {data.catalog.freeCount !== 0 && <Cmd text="NODE_EXTRA_CA_CERTS=/etc/ssl/certs/ca-certificates.crt npm start" />}
-              <p className="mt-2 text-text-muted">
-                <a href="#diagnostics" className="text-accent-fg underline">
-                  诊断页
-                </a>{" "}
+              <p className="text-text-muted">
+                还没拉到上游目录。最常见的成因是企业网络对 opencode.ai 做 TLS 中间人，而 Node 不读系统 CA
+                库，需要在启动网关时指定证书；
+                <a href="#diagnostics" className="text-accent-fg underline">诊断页</a>
                 会逐层检查服务进程的证书、出口与目录。
               </p>
+              <Cmd text="NODE_EXTRA_CA_CERTS=/etc/ssl/certs/ca-certificates.crt npm start" />
             </>
           )}
         </Step>
 
-        <Step n={2} id="clash" done={steps.clash} title="导入 Clash 出口（可选）">
-          <p className="mb-3 max-w-3xl text-text-muted">
+        <Step n={2} id="clash" done={steps.clash} title="导入 Clash 出口" optional>
+          <p className="mb-3 text-text-muted">
             {steps.clash
-              ? `已有 ${data.proxies.total} 个出口代理。可以再次探测导入，已导入的节点会更新而不是重复。`
-              : "不配代理时 Worker 走本机直连。要让不同 Worker 使用不同出口，从本机 Clash 导入节点："}
+              ? `已有 ${data.proxies.total} 个出口代理。再次导入会更新已有节点，不会重复。`
+              : "不配代理时 Worker 走本机直连。要让不同 Worker 使用不同出口，从本机 Clash 导入节点。"}
           </p>
           <ClashImportFlow onImported={refresh} />
         </Step>
 
         <Step n={3} id="workers" done={steps.workers} title="创建 Worker">
-          <p className="max-w-3xl text-text-muted">
-            {steps.workers
-              ? `${data.pool.total} 个 Worker 在候选池里，${data.pool.ready} 个就绪。`
-              : data.workers.length > 0
-                ? "已有 Worker 条目，但没有一个在候选池里：多半是被停用了，或认证 Worker 缺少 API key。"
-                : "匿名 Worker 不需要 key；认证 Worker 填你自己的 Zen API key。保存后立即生效。"}
-          </p>
-          <div className="mt-2 flex flex-wrap gap-2">
-            <SecondaryButton onClick={onCreateWorker}>新增 Worker</SecondaryButton>
-            {data.proxies.total > 0 && (
-              <SecondaryButton onClick={onBulkImport}>从 Clash 节点导入匿名 Worker</SecondaryButton>
-            )}
+          <div className="flex flex-wrap items-center gap-x-4 gap-y-2">
+            <p className="text-text-muted">
+              {steps.workers
+                ? `${data.pool.total} 个 Worker 在候选池里，${data.pool.ready} 个就绪。`
+                : data.workers.length > 0
+                  ? "已有 Worker 条目，但没有一个在候选池里：多半是被停用了，或认证 Worker 缺少 API key。"
+                  : "匿名 Worker 不需要 key；认证 Worker 填你自己的 Zen API key。保存后立即生效。"}
+            </p>
+            <span className="flex flex-wrap gap-2">
+              <SecondaryButton onClick={onCreateWorker}>新增 Worker</SecondaryButton>
+              {data.proxies.total > 0 && (
+                <SecondaryButton onClick={onBulkImport}>从 Clash 节点导入匿名 Worker</SecondaryButton>
+              )}
+            </span>
           </div>
         </Step>
 
@@ -140,43 +138,53 @@ export function StartPage({
           />
         </Step>
 
-        <li className="rounded-lg border border-border-strong bg-surface px-4 py-4 sm:px-5" data-step="verify">
-          <StatusIndicator tone="neutral" icon="5" label="用 OpenCode 验证" />
-          <div className="mt-2 pl-6">
-            <p className="max-w-3xl text-text-muted">
-              在<Strong>网关项目根目录</Strong>运行（<Mono>opencode.json</Mono> 在这里）。
-              只有真实客户端的请求能证明链路通，<Mono>curl</Mono> 的请求形态不同，不能替代：
-            </p>
-            <Cmd text={VERIFY_COMMAND} copyable />
-          </div>
-        </li>
+        <Step n={5} id="verify" done={null} title="用 OpenCode 验证">
+          <p className="text-text-muted">
+            在<Strong>网关项目根目录</Strong>运行（<Mono>opencode.json</Mono> 在这里）。只有真实客户端的请求能证明链路通，
+            <Mono>curl</Mono> 的请求形态不同，不能替代：
+          </p>
+          <Cmd text={VERIFY_COMMAND} copyable />
+        </Step>
       </ol>
     </div>
   );
 }
 
+/**
+ * 一步：宽屏左列是编号、标题与状态，右列是内容，同一页的所有步骤共用列宽，
+ * 标题与内容各自对齐；窄屏上下排。`done` 为 null 表示这一步没有网关可判定的状态。
+ */
 function Step({
   n,
   id,
   done,
   title,
+  optional = false,
   children,
 }: {
   n: number;
-  id: OnboardingStepId;
-  done: boolean;
+  id: OnboardingStepId | "verify";
+  done: boolean | null;
   title: string;
+  optional?: boolean;
   children: ReactNode;
 }) {
   return (
-    <li className="rounded-lg border border-border-strong bg-surface px-4 py-4 sm:px-5" data-step={id} data-done={done ? "" : undefined}>
-      <div className="flex flex-wrap items-center gap-3">
+    <li
+      className="grid gap-x-8 gap-y-3 border-b border-border-strong px-4 py-4 last:border-b-0 sm:px-5 lg:grid-cols-[15rem_minmax(0,1fr)]"
+      data-step={id}
+      data-done={done === true ? "" : undefined}
+    >
+      <div className="flex flex-wrap items-center gap-x-3 gap-y-1 lg:flex-col lg:items-start">
         <span className="text-heading-16 font-medium">
           {n}. {title}
+          {optional && <span className="ml-2 text-label-13 font-normal text-text-muted">可选</span>}
         </span>
-        <StatusIndicator tone={done ? "success" : "neutral"} icon={done ? "✓" : "○"} label={done ? "已完成" : "待完成"} />
+        {done !== null && (
+          <StatusIndicator tone={done ? "success" : "neutral"} icon={done ? "✓" : "○"} label={done ? "已完成" : "待完成"} />
+        )}
       </div>
-      <div className="mt-3">{children}</div>
+      <div className="min-w-0">{children}</div>
     </li>
   );
 }

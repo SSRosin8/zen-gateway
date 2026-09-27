@@ -18,7 +18,7 @@ zen-gateway 是本机单用户 HTTP 网关。请求经过 Relay Token 鉴权、�
 - core/proxy：dispatcher 池、Clash Controller、selector 锁、出口探测、订阅解析和导入；clash/setupImport.ts 是 Controller 发现与合并（setup 与管理面共用），clash/diagnose.ts 是 Clash 层诊断（doctor 与管理面共用）。
 - server：启动装配、Hono 路由、Relay/loopback 守卫、配置补丁（patch.ts 与 patchSections.ts）、管理投影、批量探测执行、进程内诊断和 opencode.json 读写；routes/admin/ 下按功能拆分 clash、diagnostics、opencode 等管理路由。
 - store：配置读写、端口解析、SQLite 迁移、统计和亲和持久化。
-- admin：React/Vite 管理后台，包括概览、网关、代理池、Worker、模型、用量和首启向导。
+- admin：React/Vite 管理后台，包括快速开始、概览、网关、代理池、Worker、模型、用量和诊断页。
 
 shared 不能导入 node:*，因为它会被浏览器构建。Node 专属能力只放在 server、store 和运行时 core 模块。
 
@@ -100,7 +100,7 @@ Clash 支持 manual 和 auto。转发路径由 pickBridge 按配置取内核、�
 
 补丁合并顺序为 gateway → routing → models → workers → clash → subscriptions → proxies：Worker 先改绑，之后再删除其原代理是合法的；删除内核或订阅连带删除其导入的代理，其中仍被引用的则整个请求失败。全部合并完成后再过一次全量 ConfigSchema。
 
-Clash 发现与导入和 setup 共用 setupImport.ts；导入经 applyConfig 热更新，合并基于发现完成后重读的配置。进程内诊断（server/admin/diagnostics.ts）与 doctor 共用 Worker 和 Clash 层实现，目录层走 /v1/models 同一条 ensureCatalog 路径并报告服务进程自身的 NODE_EXTRA_CA_CERTS；各层独立运行，不在首个失败处停止。深度诊断复用 /api/probe 的探测与写回，并通过 BatchProbeRunner.runExclusive 与批量探测共享同一把互斥锁，避免两者同时切换 selector。
+Clash 发现与导入和 setup 共用 setupImport.ts；导入经 applyConfig 热更新，合并基于发现完成后重读的配置。进程内诊断（server/admin/diagnostics.ts）与 doctor 共用 Worker 和 Clash 层实现，目录层走 /v1/models 同一条 ensureCatalog 路径并报告服务进程自身的 NODE_EXTRA_CA_CERTS；各层独立运行，不在首个失败处停止。深度诊断与 /api/probe 共用同一个探测与写回函数，都经 BatchProbeRunner.runExclusive 与批量探测共享同一把互斥锁，避免同时切换 selector；/api/probe 可用 proxyIds 只探指定出口，后台据此逐个探测以显示进度。
 
 批量探测由 reducer、SQLite 状态和 BatchProbeRunner 组成，状态为 idle、screening、running、paused、cancelling、done；两段进度分开显示，同一时刻只允许一批运行，进程重启会收尾遗留任务。前端轮询以服务端状态为准，并用 generation 防止旧响应覆盖取消后的状态；轮询失败时保留上次数据并提示可能过期。
 
@@ -110,7 +110,7 @@ Clash 发现与导入和 setup 共用 setupImport.ts；导入经 applyConfig 热
 
 config.json 保存网关、模型规则、Worker、代理、订阅和 Clash 配置。目录权限 0700，文件权限 0600；写入使用临时文件、fsync 和 rename。schema 使用严格对象并检查 Worker→proxy、proxy→bridge 等引用。
 
-runtime.db 使用 SQLite WAL，保存 worker_stats、model_usage、upstream_attempts、gateway_rejections、probe_results、session_affinity、blob_affinity 和 batch_probe_jobs。统计和诊断写入失败不阻断转发，但会计入健康信息。明细表启动时按保留期清理，并启用 secure delete。
+runtime.db 使用 SQLite WAL，保存 worker_stats、model_usage、session_usage、upstream_attempts、gateway_rejections、probe_results、session_affinity、blob_affinity 和 batch_probe_jobs。带 `x-opencode-session` 的请求 token 写 session_usage（按会话摘要与模型只留最大的一条），model_usage 只记它们的请求计数；聚合时两表合并。统计和诊断写入失败不阻断转发，但会计入健康信息。明细表启动时按保留期清理，并启用 secure delete。
 
 ## 安全与验证边界
 

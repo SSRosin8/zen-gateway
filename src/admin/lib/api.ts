@@ -11,6 +11,7 @@ import {
 } from "../../shared/contract.ts";
 import type { ConfigPatch } from "../../shared/contract.ts";
 import { pollIntervalMs } from "../../shared/batchProbe.ts";
+import { probeEgress } from "./consoleApi.ts";
 
 /**
  * 管理 API 的客户端。
@@ -198,44 +199,71 @@ export function useOverview(intervalMs = 3000): Polled<Overview> {
 export type { ProbeResult };
 
 /**
- * 触发一次出口探测。
+ * 出口探测：逐个出口发 `POST /api/probe {proxyIds:[id]}`，每个结果到达就显示，
+ * 用户能看到探到了第几个、哪个失败了。一次探全部要等最慢的节点，期间毫无反馈。
  *
- * **不是长任务**（那个状态机属于代理池页的批量探测）。但几秒的等待足够长到
- * 必须有「正在进行」的反馈 ——
- * 否则用户会以为按钮没反应而再点一次，而重复探测会互相切 selector。
- * 所以 `running` 期间按钮必须禁用。
+ * `running` 期间按钮必须禁用：重复探测会互相切 selector。`stop()` 在当前那个
+ * 出口探完后停下，已写回的结果保留。每探完一个调用 `onProgress`，让调用方刷新数据。
  */
-export function useProbe(): {
+export type ProbeRun = {
   running: boolean;
-  results: ProbeResult[] | null;
+  /** 本轮计划探测的出口数与已完成数；从未跑过为 null。 */
+  total: number | null;
+  done: number;
+  /** 按出口 id（直连为 `__direct__`）记本轮结果。 */
+  results: Readonly<Record<string, ProbeResult>>;
+  /** 正在探测的出口 id。 */
+  current: string | null;
   error: string | null;
-  run: () => Promise<void>;
-} {
-  const [running, setRunning] = useState(false);
-  const [results, setResults] = useState<ProbeResult[] | null>(null);
-  const [error, setError] = useState<string | null>(null);
+  run: (proxyIds: readonly string[]) => Promise<void>;
+  stop: () => void;
+};
 
-  const run = useCallback(async () => {
+export function useProbe(onProgress?: () => void): ProbeRun {
+  const [running, setRunning] = useState(false);
+  const [total, setTotal] = useState<number | null>(null);
+  const [done, setDone] = useState(0);
+  const [results, setResults] = useState<Record<string, ProbeResult>>({});
+  const [current, setCurrent] = useState<string | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const stopRef = useRef(false);
+  const progressRef = useRef(onProgress);
+  progressRef.current = onProgress;
+
+  const run = useCallback(async (proxyIds: readonly string[]) => {
+    stopRef.current = false;
     setRunning(true);
     setError(null);
+    setResults({});
+    setTotal(proxyIds.length);
+    setDone(0);
     try {
-      const res = await fetch("/api/probe", { method: "POST" });
-      const body = (await res.json()) as
-        | { ok: true; results: ProbeResult[] }
-        | { error: { message: string } };
-      if (!res.ok || "error" in body) {
-        setError("error" in body ? body.error.message : `HTTP ${res.status}`);
-        return;
+      for (const [i, id] of proxyIds.entries()) {
+        if (stopRef.current) break;
+        setCurrent(id);
+        // 抛错（批量探测占用、网关断开）是整体性的：后面的出口也会同样失败，停下报一次。
+        const body = await probeEgress([id]);
+        setResults((prev) => {
+          const next = { ...prev };
+          for (const r of body.results) next[r.proxyId] = r;
+          return next;
+        });
+        setDone(i + 1);
+        progressRef.current?.();
       }
-      setResults(body.results);
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
     } finally {
+      setCurrent(null);
       setRunning(false);
     }
   }, []);
 
-  return { running, results, error, run };
+  const stop = useCallback(() => {
+    stopRef.current = true;
+  }, []);
+
+  return { running, total, done, results, current, error, run, stop };
 }
 
 /**

@@ -1,25 +1,41 @@
 import type { Context } from "hono";
-import { ProbeReportSchema } from "../../../shared/contract.ts";
+import { ProbeReportSchema, ProbeRequestSchema } from "../../../shared/contract.ts";
+import { DIRECT_EGRESS_ID } from "../../../shared/schema.ts";
 import { applyProbeResults } from "../../../core/proxy/egress.ts";
 import { usedProxyIds } from "../../../core/routing/workerPool.ts";
 import { safeErrorMessage } from "../../../shared/redact.ts";
 import type { AdminDeps } from "../admin.ts";
-import { adminError } from "./common.ts";
+import { adminError, readJsonBody } from "./common.ts";
 
 /**
  * 探测在用的出口并把实测 IP 写回配置：隔离报告按 `config.proxies[].egressIp` 分组，
  * 只探测不写回则隔离永远无法成立。探测走服务自己的 `EgressService`（不变量 #7 的延伸）。
  * `POST /api/probe` 与深度诊断共用。
+ *
+ * 请求体可带 `proxyIds` 只探指定出口（前端逐个探测以显示进度，代理池单行探测）；
+ * 未知 id 整体 404，不探一半。省略时探全部在用出口。
  */
 export async function probeUsedEgress(c: Context, deps: AdminDeps): Promise<Response> {
+  const body = await readJsonBody(c, ProbeRequestSchema);
+  if (!body.ok) return body.response;
   if (deps.egress === undefined) {
     return adminError(c, "internal_error", "出口服务不可用");
   }
 
   const config = deps.configOf();
-  const proxyIds = usedProxyIds(config);
-  if (proxyIds.length === 0) {
-    return adminError(c, "invalid_config", "没有可用的 Worker,无从探测出口");
+  let proxyIds: Array<string | null>;
+  if (body.data.proxyIds !== undefined) {
+    const known = new Set(config.proxies.map((p) => p.id));
+    const unknown = body.data.proxyIds.filter((id) => id !== DIRECT_EGRESS_ID && !known.has(id));
+    if (unknown.length > 0) {
+      return adminError(c, "not_found", `没有这些代理:${unknown.slice(0, 5).join("、")}`);
+    }
+    proxyIds = [...new Set(body.data.proxyIds)].map((id) => (id === DIRECT_EGRESS_ID ? null : id));
+  } else {
+    proxyIds = usedProxyIds(config);
+    if (proxyIds.length === 0) {
+      return adminError(c, "invalid_config", "没有可用的 Worker,无从探测出口");
+    }
   }
 
   let results;
@@ -62,4 +78,17 @@ export async function probeUsedEgress(c: Context, deps: AdminDeps): Promise<Resp
       })),
     }),
   );
+}
+
+/**
+ * 与批量探测互斥地运行一次探测：两者都会切 Clash selector，交错时探到的 IP 不属于被测节点。
+ * `POST /api/probe` 与深度诊断共用。
+ */
+export async function probeExclusive(c: Context, deps: AdminDeps): Promise<Response> {
+  if (deps.batch === undefined) return await probeUsedEgress(c, deps);
+  const outcome = await deps.batch.runExclusive(() => probeUsedEgress(c, deps));
+  if (outcome === null) {
+    return adminError(c, "conflict", "批量探测或另一次出口探测正在进行,请等它结束后再试");
+  }
+  return outcome.value;
 }

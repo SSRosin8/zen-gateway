@@ -226,6 +226,26 @@ describe("重试链的统计语义", () => {
     expect(rows).toEqual([{ worker_id: "w2", input_tokens: 99 }]);
   });
 
+  it("同一个 x-opencode-session 的多轮用量只算一次；没有会话头的请求照常累加", async () => {
+    let prompt = 0;
+    up.handler = (_req, res) => {
+      prompt += 1000;
+      res.writeHead(200, { "content-type": "application/json" });
+      res.end(JSON.stringify({ id: "x", usage: { prompt_tokens: prompt, completion_tokens: 1 } }));
+    };
+    const app = await makeApp(config());
+    for (let i = 0; i < 3; i += 1) {
+      await (await app.request("/v1/chat/completions", relay(chatBody(), { "x-opencode-session": "ses-fake-1" }))).text();
+    }
+    // 会话里最后一轮报的 3000 就是整段对话的用量。
+    expect(store.stats.modelUsage()[0]).toMatchObject({ inputTokens: 3000, requestsWithUsage: 3 });
+
+    // 网关替缺头的请求合成的会话 id 每次不同，不能拿来去重；这两条应各自相加。
+    await (await app.request("/v1/chat/completions", relay(chatBody()))).text();
+    await (await app.request("/v1/chat/completions", relay(chatBody()))).text();
+    expect(store.stats.modelUsage()[0]).toMatchObject({ inputTokens: 3000 + 4000 + 5000, requestsWithUsage: 5 });
+  });
+
   it("网关在请求出去之前拒掉时,不写任何尝试", async () => {
     const app = await makeApp(config());
 

@@ -1,4 +1,4 @@
-import type { StatsView } from "../../shared/contract.ts";
+import { UNKNOWN_MODEL, type StatsView } from "../../shared/contract.ts";
 import { Metric, Mono, Panel, Strong } from "../components/Panel.tsx";
 import { FilterChip, SimpleTable, type Column } from "../components/DataTable.tsx";
 import { StatusIndicator } from "../components/StatusIndicator.tsx";
@@ -41,13 +41,27 @@ const REJECTION_LABEL: Record<string, string> = {
 };
 
 type ModelStat = StatsView["models"][number];
+type RejectedModel = StatsView["rejectedModels"][number];
+
+const REJECTION_COLUMNS: ReadonlyArray<Column<RejectedModel>> = [
+  {
+    key: "model",
+    header: "请求的模型",
+    render: (r) =>
+      r.model === UNKNOWN_MODEL ? <span className="text-text-muted">未提供或名称不合法</span> : <Mono>{r.model}</Mono>,
+  },
+  { key: "reason", header: "原因", render: (r) => REJECTION_LABEL[r.reason] ?? r.reason },
+  { key: "count", header: "次数", numeric: true, render: (r) => r.count },
+];
 type WorkerStat = StatsView["workers"][number];
 
 const MODEL_COLUMNS: ReadonlyArray<Column<ModelStat>> = [
   { key: "model", header: "模型", render: (m) => <Mono>{m.model}</Mono> },
+  // 与 OpenCode 一致：输入含缓存命中，「其中缓存」只是拆出来看，不另加进总数。
   { key: "in", header: "输入", numeric: true, render: (m) => compact(m.inputTokens) },
+  { key: "cache", header: "其中缓存读", numeric: true, render: (m) => compact(m.cacheReadTokens) },
   { key: "out", header: "输出", numeric: true, render: (m) => compact(m.outputTokens) },
-  { key: "cache", header: "命中读", numeric: true, render: (m) => compact(m.cacheReadTokens) },
+  { key: "total", header: "合计", numeric: true, render: (m) => compact(m.inputTokens + m.outputTokens) },
   { key: "with", header: "有用量", numeric: true, render: (m) => m.requestsWithUsage },
   // 「上游未报」与「未完整解析」分两列 —— 一个是上游的行为，一个是网关侧的限制。
   { key: "without", header: "未报", numeric: true, render: (m) => m.requestsWithoutUsage },
@@ -195,17 +209,15 @@ export function UsagePage({
           <>
             <p className="mb-3 text-text-muted">
               这些请求<Strong>从未到达上游</Strong> —— 网关在本机就拒了。它们不计入上游尝试。
+              「不是免费模型」多半是客户端选了付费模型，到模型页确认免费列表。
             </p>
-            <ul className="space-y-1">
-              {Object.entries(data.rejections)
-                .sort((a, b) => b[1] - a[1])
-                .map(([reason, count]) => (
-                  <li key={reason} className="flex justify-between" data-rejection={reason}>
-                    <span>{REJECTION_LABEL[reason] ?? reason}</span>
-                    <span style={{ fontVariantNumeric: "tabular-nums" }}>{count}</span>
-                  </li>
-                ))}
-            </ul>
+            <SimpleTable
+              label="网关拒绝明细"
+              rows={data.rejectedModels}
+              columns={REJECTION_COLUMNS}
+              rowKey={(r) => `${r.reason} ${r.model}`}
+              rowAttr="data-rejection"
+            />
             {data.rejections["not_free"] !== undefined && data.rejections["retired"] !== undefined && (
               <p className="mt-3 text-text-muted">
                 <Strong>「不是免费模型」与「已下架」的处置不同</Strong>：前者改客户端用的模型名，

@@ -118,6 +118,10 @@ export function makeApp(
       seen.push(d);
       return { not_free: 3 };
     },
+    rejectedModels: (d?: string) => {
+      seen.push(d);
+      return [{ reason: "not_free", model: "fake-paid-model", count: 3 }];
+    },
     requestCounts: (d?: string) => {
       seen.push(d);
       return { requests: 7, attempts: 9 };

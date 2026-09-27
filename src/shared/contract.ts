@@ -166,6 +166,9 @@ export const OverviewSchema = z.object({
 });
 export type Overview = z.infer<typeof OverviewSchema>;
 
+/** 被拒请求里的 `model` 不像模型 id 时进库用的占位符；服务端写入与前端显示共用。 */
+export const UNKNOWN_MODEL = "<other>";
+
 /** 统计视图，对应 `StatsStore` 的聚合。`requests` 与 `attempts` 分开：一条重试链是一个请求、多次尝试。 */
 export const StatsViewSchema = z.object({
   /** 起始日（UTC 日期键）；null = 全部历史。 */
@@ -203,6 +206,10 @@ export const StatsViewSchema = z.object({
   }),
   /** 网关自己拒掉的请求，按原因汇总。 */
   rejections: z.record(z.string(), z.number().int().nonnegative()),
+  /** 同一批拒绝按（原因, 模型名）展开；客户端给的名字不像模型 id 时记为 `<other>`。 */
+  rejectedModels: z.array(
+    z.object({ reason: z.string(), model: z.string(), count: z.number().int().nonnegative() }),
+  ),
 });
 export type StatsView = z.infer<typeof StatsViewSchema>;
 
@@ -646,6 +653,14 @@ export const OpenCodeViewSchema = z.object({
   unwritableReason: z.string().nullable(),
 });
 export type OpenCodeView = z.infer<typeof OpenCodeViewSchema>;
+
+/**
+ * `POST /api/probe` 的可选请求体。省略 `proxyIds` 时探测全部在用出口；给出时只探这些
+ * （`__direct__` 表示本机直连），供前端逐个探测显示进度与代理池的单行探测。
+ */
+export const ProbeRequestSchema = z.strictObject({
+  proxyIds: z.array(z.string().min(1).max(256)).min(1).max(MAX_WORKERS).optional(),
+});
 
 export const OpenCodeWriteRequestSchema = z.strictObject({
   version: z.enum(["1", "2"]).optional(),

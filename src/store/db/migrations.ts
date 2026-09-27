@@ -221,6 +221,31 @@ export const MIGRATIONS: Migration[] = [
         ADD COLUMN requests_dropped_usage INTEGER NOT NULL DEFAULT 0;
     `,
   },
+  {
+    version: 4,
+    name: "session-usage",
+    /*
+     * 带会话标识的请求，每次上报的是整段对话到此为止的用量（OpenCode 每轮都带完整上下文），
+     * 逐条相加会把同一段上下文算很多遍。所以这些请求的 token 按 (会话, 模型) 只保留最大的一条，
+     * `model_usage` 仍记请求计数，token 列只累加没有会话标识的请求。
+     * `session_hash` 与 `session_affinity` 同为 sha256 摘要，不存原始会话 id。
+     */
+    up: `
+      CREATE TABLE session_usage (
+        session_hash        TEXT NOT NULL,
+        model               TEXT NOT NULL,
+        worker_id           TEXT NOT NULL,
+        day                 TEXT NOT NULL,
+        input_tokens        INTEGER NOT NULL DEFAULT 0,
+        output_tokens       INTEGER NOT NULL DEFAULT 0,
+        cache_read_tokens   INTEGER NOT NULL DEFAULT 0,
+        cache_write_tokens  INTEGER NOT NULL DEFAULT 0,
+        PRIMARY KEY (session_hash, model)
+      ) STRICT;
+
+      CREATE INDEX idx_session_usage_day ON session_usage (day DESC);
+    `,
+  },
 ];
 
 /** 目标档位 = 最后一条迁移的版本。 */

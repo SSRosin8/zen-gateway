@@ -49,6 +49,7 @@ describe("迁移", () => {
         "session_affinity",
         "blob_affinity",
         "batch_probe_jobs",
+        "session_usage",
       ]) {
         expect(names).toContain(expected);
       }
@@ -323,6 +324,7 @@ describe("档位 2：摘要列的字节长度约束", () => {
        * 退回到一个真实的档位 1 状态。
        */
       db.exec("DROP TABLE IF EXISTS gateway_rejections");
+      db.exec("DROP TABLE IF EXISTS session_usage");
       db.exec(`CREATE TABLE model_usage_v1 AS
         SELECT model, worker_id, day, input_tokens, output_tokens,
                cache_read_tokens, cache_write_tokens,

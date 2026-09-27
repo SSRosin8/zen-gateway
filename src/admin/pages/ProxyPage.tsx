@@ -18,6 +18,7 @@ import { DataTable, TableFilters, type Column } from "../components/DataTable.ts
 import { ConfirmDialog } from "../components/ConfirmDialog.tsx";
 import { toHash, type ViewState } from "../lib/router.ts";
 import { patchConfig, useBatchProbe } from "../lib/api.ts";
+import { probeEgress } from "../lib/consoleApi.ts";
 import { humanMs } from "../lib/format.ts";
 import { SubscriptionTab } from "../components/SubscriptionTab.tsx";
 import { ClashSection } from "../components/ClashSection.tsx";
@@ -328,6 +329,25 @@ export function ProxyPage({
   const [rowMessage, setRowMessage] = useState<FormMessage>(null);
   const [busy, setBusy] = useState(false);
   const [pendingDelete, setPendingDelete] = useState<ProxyView | null>(null);
+  /** 正在单独探测的节点。一次只探一个：探测要切 selector，服务端也会拒绝并发。 */
+  const [probing, setProbing] = useState<string | null>(null);
+  const probeOne = (p: ProxyView) => {
+    setProbing(p.id);
+    setRowMessage(null);
+    const name = p.name || p.id;
+    void probeEgress([p.id])
+      .then((report) => {
+        const r = report.results[0];
+        setRowMessage(
+          r === undefined || r.ok
+            ? { tone: "success", text: `${name}：回显出口 ${r?.ok ? `${r.egressIp} · ${r.latencyMs}ms` : "已更新"}` }
+            : { tone: "error", text: `${name}：探测失败（${r.failureKind}）${r.reason}` },
+        );
+        refresh?.();
+      })
+      .catch((err) => setRowMessage(errorMessage(err)))
+      .finally(() => setProbing(null));
+  };
   const rowSave = (patch: Parameters<typeof patchConfig>[0], success: string) => {
     setBusy(true);
     setRowMessage(null);
@@ -423,6 +443,14 @@ export function ProxyPage({
         const blocked = deleteBlockedReason(p);
         return (
           <span className="flex gap-2">
+            <SecondaryButton
+              compact
+              /* 批量探测进行中也禁用：两者会互相切 selector，服务端同样会拒绝。 */
+              disabled={probing !== null || isActive(batch.progress)}
+              onClick={() => probeOne(p)}
+            >
+              {probing === p.id ? "探测中…" : "探测"}
+            </SecondaryButton>
             <SecondaryButton
               compact
               disabled={busy}
