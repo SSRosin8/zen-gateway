@@ -14,7 +14,7 @@ import { credentialFingerprint } from "../proxy/credentialFingerprint.ts";
  * 反向不成立：`/zen/v1/models` 不给价格，新的无后缀免费模型只能人工补进 `extraFreeIds`。
  *
  * 只认 `/zen/v1/models`，不回落 models.dev 或 OpenCode 本地缓存（第三方聚合与在架目录
- * 差异很大）。
+ * 差异很大）。模型页的协议面声明另取自 models.dev（`protocols.ts`），只作展示，不进判定。
  *
  * 缓存只分带 key／免 key 两个槽位：账号间整份目录确有差异，但差异全在付费模型上，
  * 免费子集一致，而网关只放行免费模型。这是上游性质，本地测试守不住，复核方法见
@@ -100,8 +100,9 @@ const MAX_CATALOG_BYTES = 8 * 1024 * 1024;
 /**
  * 边读边计数地把响应读成文本（`content-length` 可撒谎，chunked 也不给）。
  * 与 `subscription/fetch.ts` 同法但不共用：这里是 undici Response，那里是 WHATWG。
+ * `protocols.ts` 拉 models.dev 也用它。
  */
-async function readBoundedText(response: UndiciResponse, limit: number): Promise<string> {
+export async function readBoundedText(response: UndiciResponse, limit: number): Promise<string> {
   // 无体状态（204/205/304）返回空串，调用点会因 JSON 解析失败而保留旧缓存。
   if (response.body === null) return "";
 
@@ -116,7 +117,7 @@ async function readBoundedText(response: UndiciResponse, limit: number): Promise
       size += value.byteLength;
       if (size > limit) {
         await reader.cancel().catch(() => {});
-        throw new Error(`目录响应超过 ${limit} 字节`);
+        throw new Error(`响应超过 ${limit} 字节`);
       }
       chunks.push(Buffer.from(value));
     }

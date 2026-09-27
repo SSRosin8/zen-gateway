@@ -40,7 +40,7 @@ export function createLanRoutes(deps: AdminDeps & { lan: LanAccess }): Hono {
     const outcome = lan.login(body.data.password);
     switch (outcome.kind) {
       case "disabled":
-        return adminError(c, "invalid_config", "局域网访问未开启,请在本机后台的网关页设置访问口令");
+        return adminError(c, "invalid_config", "局域网访问未开启,请在本机后台的客户端接入页设置访问口令");
       case "bad_password":
         return adminError(c, "auth_required", "访问口令不对");
       case "locked":

@@ -1,11 +1,12 @@
 import { describe, expect, it, vi, afterEach } from "vitest";
-import { render, screen } from "@testing-library/react";
+import { render, screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { ProxyPage, subscriptionStatus } from "../../src/admin/pages/ProxyPage.tsx";
 import { OverviewPage } from "../../src/admin/pages/OverviewPage.tsx";
 import { ModelsPage } from "../../src/admin/pages/ModelsPage.tsx";
 import { UsagePage } from "../../src/admin/pages/UsagePage.tsx";
 import { GatewayPage } from "../../src/admin/pages/GatewayPage.tsx";
+import { ClientPage } from "../../src/admin/pages/ClientPage.tsx";
 import { WorkersPage } from "../../src/admin/pages/WorkersPage.tsx";
 import { PAGE_SIZE } from "../../src/admin/components/DataTable.tsx";
 import type {
@@ -123,55 +124,15 @@ describe("代理池页", () => {
     expect(container.textContent).toContain("7897");
   });
 
-  it("回显出口标签**不分页** —— 一眼看全是它的全部意义", () => {
+  it("空代理池给出下一步,而不只是说「空」", async () => {
     stubIdleBatch();
-    const groups = Array.from({ length: 20 }, (_, i) => ({
-      egressIp: `198.51.100.${i + 1}`,
-      workerIds: [`w${i}`],
-      proxyIds: [`p${i}`],
-    }));
-    const { container } = render(
-      <ProxyPage
-        data={proxyList([], { isolation: { groups, unknownWorkerIds: [], sharedGroups: [], isolated: true } })}
-        view={parseHash("#proxy?tab=isolation")}
-        navigate={noop}
-      />,
-    );
-    // 20 组全部渲染 —— 分页会破坏「找出共用出口的节点」这个任务。
-    expect(container.querySelectorAll("li").length).toBeGreaterThanOrEqual(20);
-    expect(screen.queryByText(/上一页/)).not.toBeInTheDocument();
-    expect(screen.getByText("回显出口独立 · 20 个出口")).toBeInTheDocument();
-    expect(screen.getByText(/仅反映 IP 回显目标的出口/)).toBeInTheDocument();
-    expect(container.textContent).toContain("Zen 实际出口需核对发往 opencode.ai 的连接");
-    expect(screen.queryByText(/已隔离/)).not.toBeInTheDocument();
-  });
-
-  it("共用出口的那一组用 error 边框标出来", () => {
-    stubIdleBatch();
-    const shared = { egressIp: "198.51.100.1", workerIds: ["w1", "w2"], proxyIds: ["p1", "p2"] };
-    const { container } = render(
-      <ProxyPage
-        data={proxyList([], {
-          isolation: { groups: [shared], unknownWorkerIds: [], sharedGroups: [shared], isolated: false },
-        })}
-        view={parseHash("#proxy?tab=isolation")}
-        navigate={noop}
-      />,
-    );
-    /*
-     * 「共用出口」出现两次:状态行的「回显出口共用 · 1 组共用出口」与那一组自己的
-     * 「⚠ 共用出口」标记。两处都要 —— 前者回答「有没有问题」,后者指出「是哪一组」。
-     */
-    expect(screen.getAllByText(/共用出口/).length).toBeGreaterThanOrEqual(2);
-    expect(container.querySelector(".border-error")).not.toBeNull();
-  });
-
-  it("空代理池给出下一步,而不只是说「空」", () => {
-    stubIdleBatch();
-    render(<ProxyPage data={proxyList([])} view={view} navigate={noop} />);
+    const user = userEvent.setup();
+    const navigate = vi.fn();
+    render(<ProxyPage data={proxyList([])} view={view} navigate={navigate} />);
     expect(screen.getByText(/还没有代理/)).toBeInTheDocument();
     // 下一步在界面里完成，不再指向命令行。
-    expect(screen.getByRole("link", { name: "Clash 标签" })).toHaveAttribute("href", "#proxy?tab=clash");
+    await user.click(screen.getByRole("button", { name: "导入 Clash 节点" }));
+    expect(navigate).toHaveBeenCalledWith({ tab: "clash" });
   });
 
   it("搜索无结果时的措辞与「没有代理」不同", () => {
@@ -230,16 +191,17 @@ describe("代理池页", () => {
 function modelList(overrides: Partial<ModelList> = {}): ModelList {
   return {
     models: [
-      { id: "a-free", free: true, reason: "suffix", surfaces: ["chat"], listed: true },
-      { id: "big-pickle", free: true, reason: "extra", surfaces: ["chat"], listed: true },
-      { id: "paid-model", free: false, reason: "not_free", surfaces: ["chat"], listed: true },
-      { id: "gone-free", free: false, reason: "retired", surfaces: ["chat"], listed: false },
+      { id: "a-free", free: true, reason: "suffix", protocol: { declared: "chat", measured: [] }, listed: true },
+      { id: "big-pickle", free: true, reason: "extra", protocol: { declared: "chat", measured: [] }, listed: true },
+      { id: "paid-model", free: false, reason: "not_free", protocol: { declared: "chat", measured: [] }, listed: true },
+      { id: "gone-free", free: false, reason: "retired", protocol: { declared: "chat", measured: [] }, listed: false },
     ],
     catalogAvailable: true,
+    protocolSource: { available: true, fetchedAt: "2026-01-01T00:00:00.000Z" },
+    measuredSinceDay: "2026-01-01",
     rules: {
       freeSuffix: "-free",
       extraFreeIds: ["big-pickle"],
-      defaultSurfaces: ["chat", "responses"],
       catalogTtlMs: 1_800_000,
       enforceCatalog: true,
     },
@@ -284,10 +246,9 @@ describe("模型页", () => {
     expect(screen.getByText(/不是/)).toBeInTheDocument();
   });
 
-  it("显示协议面（`surfacesFor` 的第一个生产调用点，只作展示）", () => {
+  it("协议列显示声明（人话标签），不再对所有模型显示同一套默认值", () => {
     render(<ModelsPage data={modelList()} view={parseHash("#models")} navigate={noop} />);
-    // 只作展示:它不能接成放行闸门(默认值会让 /v1/messages 全被拒)。
-    expect(screen.getAllByText("chat").length).toBeGreaterThan(0);
+    expect(screen.getAllByText("Chat").length).toBe(4);
   });
 
   it("在架数量只统计 listed 条目，不把配置中的下架项算进去", () => {
@@ -298,9 +259,13 @@ describe("模型页", () => {
     expect(listedLabel.parentElement?.textContent).toContain("3");
   });
 
-  it("说明那条不对称（下架能自动剔除，新免费模型不能自动发现）", () => {
+  it("说明那条不对称（下架能自动剔除，新免费模型不能自动发现），收在免费判定的 ⓘ 里", async () => {
+    const user = userEvent.setup();
     render(<ModelsPage data={modelList()} view={parseHash("#models")} navigate={noop} />);
-    expect(screen.getByText(/无法自动发现/)).toBeInTheDocument();
+    expect(screen.queryByText(/无法自动发现/)).not.toBeInTheDocument();
+    await user.hover(screen.getByRole("button", { name: "免费判定说明" }));
+    expect(screen.getByRole("tooltip")).toHaveTextContent("无法自动发现");
+    expect(screen.getByRole("tooltip")).toHaveTextContent("唯一");
   });
 });
 
@@ -330,6 +295,7 @@ function stats(overrides: Partial<StatsView> = {}): StatsView {
     ],
     rates: { cacheHitRate: 0.3, usageCoverage: 0.833, droppedUsageCount: 0 },
     rejections: { not_free: 3, retired: 1 },
+    daily: { byModel: [], byWorker: [] },
     rejectedModels: [
       { reason: "not_free", model: "fake-paid-model", count: 3 },
       { reason: "retired", model: "fake-retired-model", count: 1 },
@@ -356,6 +322,33 @@ describe("用量页", () => {
     // 且两张卡的说明各自点出区别。
     expect(requests?.textContent).toContain("一条重试链算一个");
     expect(attempts?.textContent).toContain("每次换 Worker 算一次");
+  });
+
+  it("重置统计：先确认，取消不发请求；确认后发 { confirm: true } 并刷新", async () => {
+    const user = userEvent.setup();
+    const calls: Array<{ url: string; body: unknown }> = [];
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (url: string, init?: RequestInit) => {
+        calls.push({ url, body: init?.body === undefined ? undefined : JSON.parse(String(init.body)) });
+        return new Response(JSON.stringify({ ok: true, removed: 5 }), { status: 200, headers: { "content-type": "application/json" } });
+      }),
+    );
+    const onReset = vi.fn();
+    render(<UsagePage data={stats()} days="30" onDays={noop} onReset={onReset} />);
+
+    await user.click(screen.getByRole("button", { name: "重置统计" }));
+    const dialog = screen.getByRole("dialog", { name: "重置用量统计" });
+    // 说清范围：清的是全部，不只是当前时间窗。
+    expect(dialog.textContent).toContain("不只是当前时间范围");
+    await user.click(within(dialog).getByRole("button", { name: "取消" }));
+    expect(calls).toEqual([]);
+
+    await user.click(screen.getByRole("button", { name: "重置统计" }));
+    await user.click(within(screen.getByRole("dialog")).getByRole("button", { name: "确认重置" }));
+    expect(await screen.findByText("已清空全部用量统计")).toBeInTheDocument();
+    expect(calls).toEqual([{ url: "/api/stats/reset", body: { confirm: true } }]);
+    expect(onReset).toHaveBeenCalledTimes(1);
   });
 
   it("比值为 null 时显示「—」而不是 0%", () => {
@@ -385,7 +378,8 @@ describe("用量页", () => {
     expect(text).not.toContain("我们");
   });
 
-  it("dropped 非 0 时单独告警并说明它不是上游的问题", () => {
+  it("dropped 非 0 时单独告警；ⓘ 里说明它不是上游的问题", async () => {
+    const user = userEvent.setup();
     render(
       <UsagePage
         data={stats({ rates: { cacheHitRate: 0.1, usageCoverage: 0.5, droppedUsageCount: 4 } })}
@@ -394,33 +388,28 @@ describe("用量页", () => {
       />,
     );
     expect(screen.getByText(/4 次响应网关未完整解析/)).toBeInTheDocument();
+    await user.hover(screen.getByRole("button", { name: "未完整解析说明" }));
     /*
-     * 用**整段的 textContent** 匹配,而不是 `getByText(/不是.*上游没报/)`。
-     *
-     * 那句话里「不是」被 `<Strong>` 包着（强调它),于是文本被切成多个节点,
-     * 而 Testing Library 的默认匹配是逐节点的 —— 跨节点的正则匹配不到。
-     * 用户看到的字一个没变,变的只是 DOM 结构。
-     *
-     * 这也是页面渲染出字面 `**` 时,关键词断言全都不报警的
-     * 原因:它们用的正则（`/不要写/`、`/GLOBAL/`）恰好落在星号之间,
-     * 于是对「有没有星号」完全不敏感。
+     * 用整段 textContent 匹配：「不是」被 `<Strong>` 包着，文本被切成多个节点，
+     * Testing Library 的默认匹配是逐节点的，跨节点的正则匹配不到。
      */
-    const banner = screen.getByText(/4 次响应网关未完整解析/).closest("section");
-    expect(banner?.textContent).toMatch(/不是[\s\S]*上游没报/);
-    // 同时钉住「不渲染字面 markdown」—— 那是这次真正要防的回归。
-    expect(banner?.textContent).not.toContain("**");
+    const tip = screen.getByRole("tooltip");
+    expect(tip.textContent).toMatch(/不是[\s\S]*上游没报/);
+    // 同时钉住「不渲染字面 markdown」。
+    expect(tip.textContent).not.toContain("**");
+    // 强调用 <strong>，font-medium 而不是默认粗体（14px 正文下粗体会造成视觉断层）。
+    expect(tip.querySelector("strong")?.className).toContain("font-medium");
   });
 
-  it("网关拒绝分原因列出,并说明 not_free 与 retired 处置不同", () => {
+  it("网关拒绝分原因列出；ⓘ 说明请求从未到达上游，以及 not_free 与 retired 处置不同", async () => {
+    const user = userEvent.setup();
     render(<UsagePage data={stats()} days="30" onDays={noop} />);
     expect(screen.getByText("不是免费模型")).toBeInTheDocument();
     expect(screen.getByText("已下架")).toBeInTheDocument();
-    expect(screen.getByText(/无后缀免费名单/)).toBeInTheDocument();
-  });
-
-  it("这些请求从未到达上游 —— 要说清楚", () => {
-    render(<UsagePage data={stats()} days="30" onDays={noop} />);
-    expect(screen.getByText(/从未到达上游/)).toBeInTheDocument();
+    await user.hover(screen.getByRole("button", { name: /^网关拒绝.*说明$/ }));
+    const tip = screen.getByRole("tooltip");
+    expect(tip).toHaveTextContent("从未到达上游");
+    expect(tip).toHaveTextContent("无后缀免费名单");
   });
 });
 
@@ -460,7 +449,7 @@ describe("网关页", () => {
         bodyTimeoutMs: 300_000,
       },
     });
-    const { container } = render(<GatewayPage data={data} />);
+    const { container } = render(<ClientPage data={data} />);
     await user.click(screen.getByRole("button", { name: "复制" }));
     const copied = await navigator.clipboard.readText();
     expectLocalOpenCodeProvider(copied, 9877);
@@ -471,7 +460,7 @@ describe("网关页", () => {
   });
 
   it("提醒保留 OpenCode 自己的模型目录并说明模型可用性边界", () => {
-    render(<GatewayPage data={fakeOverview()} />);
+    render(<ClientPage data={fakeOverview()} />);
     expect(screen.getByText(/片段格式/)).toBeInTheDocument();
     expect(screen.getByText(/模型和 SDK 由 OpenCode 自己管理/)).toBeInTheDocument();
     expect(screen.getByText(/模型仍受上游权限与免费规则约束/)).toBeInTheDocument();
@@ -479,7 +468,7 @@ describe("网关页", () => {
 
   it("切换 OpenCode 1.x 后复制单数 provider 配置", async () => {
     const user = userEvent.setup();
-    render(<GatewayPage data={fakeOverview({ gateway: { port: 9877, baseUrl: "https://example.invalid/zen/v1", relayToken: { present: true, fingerprint: "abcd1234" }, maxAttempts: 3, headersTimeoutMs: 60_000, bodyTimeoutMs: 300_000 } })} />);
+    render(<ClientPage data={fakeOverview({ gateway: { port: 9877, baseUrl: "https://example.invalid/zen/v1", relayToken: { present: true, fingerprint: "abcd1234" }, maxAttempts: 3, headersTimeoutMs: 60_000, bodyTimeoutMs: 300_000 } })} />);
     await user.selectOptions(screen.getByRole("combobox", { name: "片段格式" }), "1");
     await user.click(screen.getByRole("button", { name: "复制" }));
     const copied = await navigator.clipboard.readText();
@@ -488,7 +477,7 @@ describe("网关页", () => {
     expect(copied).not.toContain('"npm"');
   });
 
-  it("代理池 Clash 标签提醒两条实测出来的坑", () => {
+  it("代理池 Clash 标签提醒两条实测出来的坑", async () => {
     const data = fakeOverview({
       clash: {
         enabled: true,
@@ -510,10 +499,13 @@ describe("网关页", () => {
       },
     });
     stubIdleBatch();
+    const user = userEvent.setup();
     render(<ProxyPage data={proxyList([], { clash: data.clash })} view={parseHash("#proxy?tab=clash")} navigate={noop} />);
-    // 混合端口不一致 → 桥接静默失败；GLOBAL 在 rule 模式下切了不生效。
-    expect(screen.getByText(/mixed-port/)).toBeInTheDocument();
-    expect(screen.getByText(/GLOBAL/)).toBeInTheDocument();
+    // 混合端口不一致 → 桥接静默失败；GLOBAL 在 rule 模式下切了不生效。收在内核面板标题旁的 ⓘ 里。
+    await user.hover(screen.getByRole("button", { name: /^Clash 内核.*说明$/ }));
+    const tip = screen.getByRole("tooltip");
+    expect(tip).toHaveTextContent("mixed-port");
+    expect(tip).toHaveTextContent("GLOBAL");
   });
 });
 
@@ -536,12 +528,24 @@ function worker(overrides: Partial<WorkerView> = {}): WorkerView {
 }
 
 describe("Worker 页", () => {
+  it("状态与冷却规则收进标题旁的 ⓘ，悬停才显示，不占正文", async () => {
+    const user = userEvent.setup();
+    render(<WorkersPage data={fakeOverview()} view={parseHash("#workers")} navigate={noop} />);
+    expect(screen.queryByText(/不等于/)).not.toBeInTheDocument();
+    expect(screen.queryByRole("tab", { name: "按出口" })).not.toBeInTheDocument();
+    await user.hover(screen.getByRole("button", { name: /说明$/ }));
+    expect(screen.getByRole("tooltip")).toHaveTextContent("「已启用」不等于「在候选池里」");
+    // 回显目标的出口不等于 Zen 的出口（纪律 6），这句仍然要在。
+    expect(screen.getByRole("tooltip")).toHaveTextContent("Zen 实际出口需核对发往 opencode.ai 的连接");
+  });
+
   it("切换为匿名后隐藏并清空未提交的认证 key", async () => {
     const user = userEvent.setup();
     const patch = vi.spyOn(adminApi, "patchConfig").mockResolvedValue(undefined);
     render(<WorkersPage data={fakeOverview()} view={parseHash("#workers")} navigate={noop} />);
 
-    await user.click(screen.getByRole("button", { name: "新增 Worker" }));
+    // 空列表里也有一个「新增 Worker」；用页头那个。
+    await user.click(screen.getAllByRole("button", { name: "新增 Worker" })[0]!);
     await user.selectOptions(screen.getByLabelText("类型"), "authenticated");
     await user.type(screen.getByLabelText("API key（认证必填）"), "fake-stale-key-not-real");
     await user.selectOptions(screen.getByLabelText("类型"), "anonymous");
@@ -597,16 +601,10 @@ describe("Worker 页", () => {
     });
     render(<WorkersPage data={data} view={parseHash("#workers")} navigate={noop} />);
     // 「没绑代理」与「绑了但没探过」是两件事。
-    expect(screen.getByText("本机直连")).toBeInTheDocument();
+    expect(screen.getByText("本机直连 · 未探测")).toBeInTheDocument();
     expect(screen.getByText("未探测")).toBeInTheDocument();
   });
 
-  it("说明「已启用」不等于「在候选池里」", () => {
-    render(
-      <WorkersPage data={fakeOverview({ workers: [worker()] })} view={parseHash("#workers")} navigate={noop} />,
-    );
-    expect(screen.getByText(/不等于/)).toBeInTheDocument();
-  });
 });
 
 /* ================================================================== *
@@ -634,16 +632,6 @@ describe("文案不渲染字面 markdown", () => {
     ["概览", () => <OverviewPage data={fakeOverview()} />],
     ["网关", () => <GatewayPage data={fakeOverview()} />],
     ["代理池", () => <ProxyPage data={proxyList([proxy()])} view={view} navigate={noop} />],
-    [
-      "代理池·隔离",
-      () => (
-        <ProxyPage
-          data={proxyList([proxy()])}
-          view={parseHash("#proxy?tab=isolation")}
-          navigate={noop}
-        />
-      ),
-    ],
     ["Worker", () => <WorkersPage data={fakeOverview()} view={parseHash("#workers")} navigate={noop} />],
     ["模型", () => <ModelsPage data={modelList()} view={parseHash("#models")} navigate={noop} />],
     ["用量", () => <UsagePage data={stats()} days="30" onDays={noop} />],
@@ -659,19 +647,6 @@ describe("文案不渲染字面 markdown", () => {
     });
   }
 
-  it("强调改用 <strong> —— 语义留着，样式不用粗体", () => {
-    /*
-     * 修法不是「把星号删掉」(那会丢掉强调),而是换成一个组件。
-     * 这条钉住它真的产出了 `<strong>`:否则下一个人会以为直接删星号就行。
-     */
-    const { container } = render(
-      <ProxyPage data={proxyList([proxy()])} view={view} navigate={noop} />,
-    );
-    const strongs = container.querySelectorAll("strong");
-    expect(strongs.length).toBeGreaterThan(0);
-    // 用 font-medium 而不是默认的 font-bold —— 14px 正文下粗体会造成视觉断层。
-    expect(strongs[0]!.className).toContain("font-medium");
-  });
 });
 
 /* ================================================================== *

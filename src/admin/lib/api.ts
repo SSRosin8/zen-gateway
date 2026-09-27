@@ -114,7 +114,7 @@ const contractMessage = (issue: string | undefined) =>
  *
  * 后台标签页里刷新一个没人看的页面只是浪费。
  */
-function usePolledEndpoint<T>(path: string, schema: SafeParser<T>, intervalMs: number): Polled<T> {
+function usePolledEndpoint<T>(path: string | null, schema: SafeParser<T>, intervalMs: number): Polled<T> {
   const [state, setState] = useState<FetchState<T>>({ status: "loading" });
   const [stale, setStale] = useState<StaleInfo | null>(null);
   const [tick, setTick] = useState(0);
@@ -141,6 +141,9 @@ function usePolledEndpoint<T>(path: string, schema: SafeParser<T>, intervalMs: n
       }
       setState(failure.kind === "offline" ? { status: "offline" } : { status: "error", message: failure.message });
     };
+
+    // path 为 null：调用方此刻不需要这份数据（例如详情侧栏没打开），不发请求。
+    if (path === null) return () => {};
 
     const load = async () => {
       try {
@@ -272,7 +275,7 @@ export function useProbe(onProgress?: () => void): ProbeRun {
  * 与 `useOverview` 共用同一个实现，所以「契约不匹配与网关没在跑分开报」
  * 「已有数据时失败不清空」两条规则在每个端点上都成立。
  */
-export function useEndpoint<T>(path: string, schema: SafeParser<T>, intervalMs = 5000): Polled<T> {
+export function useEndpoint<T>(path: string | null, schema: SafeParser<T>, intervalMs = 5000): Polled<T> {
   return usePolledEndpoint(path, schema, intervalMs);
 }
 
@@ -304,14 +307,14 @@ export function useEndpoint<T>(path: string, schema: SafeParser<T>, intervalMs =
  * 关键在于 `safeParse` **每次都返回新对象**,所以即使进度没有任何变化,
  * `setProgress` 也拿到一个新身份,`[progress]` 也就次次都变。
  * 后果是 200ms 内上万个请求，`document.hidden` 那条降频同样失效；单线程的
- * 本机网关每个请求都要跑一次 `batch.snapshot()`，打开代理池页就等于给自己压测。
+ * 本机网关每个请求都要跑一次 `batch.snapshot()`，打开出口页就等于给自己压测。
  *
  * 所以 effect **只挂一次**，间隔从 ref 里读最新值。
  */
 export function useBatchProbe(): {
   progress: BatchProgressView;
   error: string | null;
-  send: (action: "start" | "pause" | "resume" | "cancel") => Promise<void>;
+  send: (action: "start" | "pause" | "resume" | "cancel", opts?: { createWorkers?: boolean }) => Promise<void>;
 } {
   const [progress, setProgress] = useState<BatchProgressView>(INITIAL_BATCH_VIEW);
   const [error, setError] = useState<string | null>(null);
@@ -368,7 +371,7 @@ export function useBatchProbe(): {
     };
   }, []);
 
-  const send = useCallback(async (action: "start" | "pause" | "resume" | "cancel") => {
+  const send = useCallback(async (action: "start" | "pause" | "resume" | "cancel", opts: { createWorkers?: boolean } = {}) => {
     // 动作发出即作废所有在途轮询 —— 见文档。
     generation.current += 1;
     setError(null);
@@ -376,7 +379,7 @@ export function useBatchProbe(): {
       const res = await fetch("/api/batch-probe", {
         method: "POST",
         headers: { "content-type": "application/json" },
-        body: JSON.stringify({ action }),
+        body: JSON.stringify(action === "start" && opts.createWorkers === true ? { action, createWorkers: true } : { action }),
       });
       const body: unknown = await res.json();
       if (!res.ok) {

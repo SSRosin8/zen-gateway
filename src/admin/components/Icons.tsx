@@ -59,6 +59,11 @@ export const PAGE_ICON: Record<PageId, ReactNode> = {
       <path d="M16 5.2a3.5 3.5 0 010 6.6M18 14.8c1.9.7 3.2 2.5 3.5 5.2" />
     </Svg>
   ),
+  client: (
+    <Svg>
+      <path d="M8 7l-5 5 5 5M16 7l5 5-5 5M13.5 4.5l-3 15" />
+    </Svg>
+  ),
   models: (
     <Svg>
       <path d="M12 3l8 4.5v9L12 21l-8-4.5v-9z" />
@@ -103,6 +108,18 @@ export function SidebarIcon({ collapsed }: { collapsed: boolean }) {
       <rect x="3" y="4" width="18" height="16" rx="2" />
       <path d="M9 4v16" />
       <path d={collapsed ? "M13 10l2 2-2 2" : "M16 10l-2 2 2 2"} />
+    </Svg>
+  );
+}
+
+/** 皮肤（调色盘）。 */
+export function SkinIcon() {
+  return (
+    <Svg>
+      <path d="M12 3.5a8.5 8.5 0 100 17c1.2 0 1.7-.8 1.7-1.6 0-.5-.2-.9-.5-1.2-.3-.3-.5-.7-.5-1.2 0-.9.8-1.6 1.7-1.6h2A4.6 4.6 0 0020.5 10C20.5 6.4 16.7 3.5 12 3.5z" />
+      <circle cx="7.5" cy="11" r="1" />
+      <circle cx="10.5" cy="7.5" r="1" />
+      <circle cx="15" cy="7.5" r="1" />
     </Svg>
   );
 }

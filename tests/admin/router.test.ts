@@ -30,15 +30,19 @@ describe("hash 解析与序列化", () => {
   });
 
   it("解析全部视图状态", () => {
-    const view = parseHash("#proxy?tab=isolation&q=hk&status=ready&sort=latency&page=2");
+    const view = parseHash("#workers?tab=list&q=hk&status=ready&sort=latency&page=2&detail=anon-3&view=egress");
     expect(view).toEqual({
-      page: "proxy",
-      tab: "isolation",
+      page: "workers",
+      tab: "list",
       q: "hk",
+      detail: "anon-3",
+      view: "egress",
       status: "ready",
       sort: "latency",
       page_: 2,
     });
+    // 往返：序列化后再解析得到同一个视图。
+    expect(parseHash(toHash(view))).toEqual(view);
   });
 
   it("非法页码回落到 1（URL 是用户可编辑的）", () => {

@@ -87,3 +87,44 @@ export function useTheme(): {
 
   return { preference, setPreference };
 }
+
+/**
+ * 皮肤：同一套组件与毛玻璃，两套色板。`cool` 是默认的冷灰蓝，`warm` 是改版前的暖米白。
+ * 与配色（浅/深）正交，生效在 `<html data-skin>`；`index.html` 首屏脚本同样先读它。
+ */
+export const SKIN_KEY = "zg-skin";
+
+export type Skin = "cool" | "warm";
+
+export const SKIN_OPTIONS: ReadonlyArray<{ value: Skin; label: string }> = [
+  { value: "cool", label: "冷灰蓝" },
+  { value: "warm", label: "暖米白" },
+];
+
+export function readSkin(): Skin {
+  try {
+    return window.localStorage.getItem(SKIN_KEY) === "warm" ? "warm" : "cool";
+  } catch {
+    return "cool";
+  }
+}
+
+export function applySkin(skin: Skin): void {
+  if (skin === "warm") document.documentElement.dataset.skin = "warm";
+  else delete document.documentElement.dataset.skin;
+}
+
+export function useSkin(): { skin: Skin; setSkin: (skin: Skin) => void } {
+  const [skin, setState] = useState<Skin>(readSkin);
+  useEffect(() => applySkin(skin), [skin]);
+  const setSkin = useCallback((next: Skin) => {
+    try {
+      if (next === "cool") window.localStorage.removeItem(SKIN_KEY);
+      else window.localStorage.setItem(SKIN_KEY, next);
+    } catch {
+      // 写不进去时本次会话仍然生效。
+    }
+    setState(next);
+  }, []);
+  return { skin, setSkin };
+}

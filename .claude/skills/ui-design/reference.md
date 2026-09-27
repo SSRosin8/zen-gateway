@@ -31,7 +31,7 @@ SKILL.md 只放规则；这里记录数字从哪来，改 token 或密度前先�
 
 ## 浏览器实测（Chrome 154 headless，CDP，连接本机网关实时数据）
 
-- 1280 与 390 宽，浅色与深色，6 个页面加代理池的另外 2 个标签，共 8 个视图：页面没有横向溢出；表格行高都是 36px；代理与模型页每页 16 行；每个视图主按钮 ≤1 个；控制台没有错误。
+- 1280 与 390 宽，浅色与深色，6 个页面加代理池的另外 2 个标签，共 8 个视图（改版前的页面结构；现在的页面与标签见 `router.ts` 的 `NAV_GROUPS`）：页面没有横向溢出；表格行高都是 36px；代理与模型页每页 16 行；每个视图主按钮 ≤1 个；控制台没有错误。
 - 吸顶表头：视口高 500 时，代理与模型表格容器滚动约 239px，表头相对容器仍在 0px，elementFromPoint 命中表头，背景实色，下边框 1px，box-shadow 为 none。
 - 悬停与按下：用 CDP Input.dispatchMouseEvent 驱动真实指针，表格行、筛选片、标签、导航、主按钮、行内按钮、危险按钮的计算背景色在 hover 和 active 时都变了（浅色 `rgb(233,230,220)` → `rgb(228,224,212)`）。headless Chrome 默认不匹配 `(hover: hover)`，需要加 `--blink-settings=primaryHoverType=2,availableHoverTypes=2`，否则 Tailwind 4 的 `hover:` 不生效。
 - 宽度（旧）：顶栏布局下 `max-w-5xl` 与 `max-w-6xl` 的表格横向溢出都是 0px。改为侧栏外壳后内容区流式铺满，长段落改在面板内限行长；新的实测见下节。

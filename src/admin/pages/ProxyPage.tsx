@@ -1,39 +1,27 @@
 import type { BatchProgressView, ProxyList, ProxyView } from "../../shared/contract.ts";
-import { isActive, percentages } from "../../shared/batchProbe.ts";
-import { useState } from "react";
+import { isActive } from "../../shared/batchProbe.ts";
+import { useEffect, useState } from "react";
 import { StatusIndicator, type StatusTone } from "../components/StatusIndicator.tsx";
-import {
-  FormStatus,
-  Metric,
-  Mono,
-  Panel,
-  PrimaryButton,
-  SecondaryButton,
-  Strong,
-  Truncate,
-  errorMessage,
-  type FormMessage,
-} from "../components/Panel.tsx";
-import { DataTable, SEGMENTED_TRACK, TableFilters, segmentClass, type Column } from "../components/DataTable.tsx";
+import { Mono, PageHeader, Panel, PrimaryButton, SecondaryButton, Truncate } from "../components/Panel.tsx";
+import { BulkBar, DataTable, RowNoteView, SEGMENTED_TRACK, TableFilters, segmentClass, type Column } from "../components/DataTable.tsx";
+import { RowMenu } from "../components/RowMenu.tsx";
+import { BatchProbeBar } from "../components/BatchProbeBar.tsx";
+import { useRowNotes } from "../lib/rowNotes.ts";
+import { FIELD } from "../lib/styles.ts";
 import { ConfirmDialog } from "../components/ConfirmDialog.tsx";
-import { toHash, type ViewState } from "../lib/router.ts";
-import { patchConfig, useBatchProbe } from "../lib/api.ts";
+import { parseHash, toHash, type ViewState } from "../lib/router.ts";
+import { useBatchProbe } from "../lib/api.ts";
 import { probeEgress } from "../lib/consoleApi.ts";
-import { humanMs } from "../lib/format.ts";
 import { SubscriptionTab } from "../components/SubscriptionTab.tsx";
 import { ClashSection } from "../components/ClashSection.tsx";
 
 export { subscriptionStatus } from "../components/SubscriptionTab.tsx";
 
 /**
- * 代理池页。
+ * 出口页（原代理池）。
  *
- * 标签：**列表**（分页，可启停与删除节点）、**回显出口**（不分页）、**订阅**、
- * **Clash**（内核管理与探测导入）。
- *
- * 隔离视图刻意不分页：那个任务本身就是「一眼看全、找出共用出口的节点」，
- * 分页会破坏它的意义。数量大时靠浏览器原生滚动，而不是切成 6 页
- * 让用户在页间比对 IP。
+ * 标签：**节点**（分页、多选批量、行内探测与撤销、批量探测逐行显示状态）、**订阅**、**Clash**。
+ * 回显 IP 并入节点的状态列；找共用出口用 Worker 页的「共用出口」筛选（共用是 Worker 的问题）。
  */
 
 function proxyTone(p: ProxyView): "success" | "warn" | "error" | "neutral" {
@@ -79,235 +67,6 @@ function proxyStatus(p: ProxyView): { tone: StatusTone; icon: string; label: str
   return { tone: "success", icon: "✓", label: "可用" };
 }
 
-/**
- * 批量探测的长任务 UI。
- *
- * ## 两段进度分开显示，不合成一个百分比
- *
- * 合成要给两段定权重，而那个权重是编的：筛选（纯本地判断）比主探测
- * （真发网络请求 + 切 selector）快得多，于是进度条会先飞到 40% 再慢慢爬，
- * 用户会以为卡住了。两个数字各自诚实。
- *
- * ## 按钮组随状态变化，且 `cancelling` 是独立态
- *
- * 取消是「请求已发出、等服务端确认」，不是立刻回 idle —— 那时后台那一批
- * 还在跑（它们要切 selector），放开「开始」按钮会让用户启动第二批。
- */
-function BatchPanel({ progress, control }: { progress: BatchProgressView; control: ReturnType<typeof useBatchProbe> }) {
-  const pct = percentages(progress);
-  const running = isActive(progress);
-  const [confirming, setConfirming] = useState(false);
-
-  const stateLabel: Record<BatchProgressView["state"], string> = {
-    idle: "未开始",
-    screening: "筛选中",
-    running: "探测中",
-    paused: "已暂停",
-    cancelling: "正在取消…",
-    done: progress.failureKind === null ? "已完成" : `已结束（${progress.failureKind}）`,
-  };
-
-  const tone: StatusTone =
-    progress.state === "done"
-      ? progress.failureKind === null
-        ? "success"
-        : "warn"
-      : running
-        ? "info"
-        : "neutral";
-
-  return (
-    <Panel
-      title="批量探测"
-      action={
-        <div className="flex gap-2">
-          {progress.state === "running" && (
-            <SecondaryButton onClick={() => void control.send("pause")}>暂停</SecondaryButton>
-          )}
-          {progress.state === "paused" && (
-            <SecondaryButton onClick={() => void control.send("resume")}>继续</SecondaryButton>
-          )}
-          {running && (
-            <SecondaryButton
-              onClick={() => void control.send("cancel")}
-              /* 已在取消中就禁用 —— 重复点不该产生第二次请求。 */
-              disabled={progress.state === "cancelling"}
-            >
-              取消
-            </SecondaryButton>
-          )}
-          <PrimaryButton onClick={() => setConfirming(true)} disabled={running}>
-            {running ? "进行中…" : "开始批量探测"}
-          </PrimaryButton>
-        </div>
-      }
-    >
-      <StatusIndicator
-        tone={tone}
-        icon={progress.state === "done" && progress.failureKind === null ? "✓" : running ? "◴" : "○"}
-        /*
-         * 带上耗时 —— 一个几十秒的任务不报「已跑多久」时，用户无法区分
-         * 「还在跑」与「卡住了」。`elapsedMs` 为 null 表示从未跑过。
-         */
-        label={
-          progress.elapsedMs === null
-            ? stateLabel[progress.state]
-            : `${stateLabel[progress.state]} · ${humanMs(progress.elapsedMs)}`
-        }
-      />
-
-      {(progress.screenTotal > 0 || progress.mainTotal > 0) && (
-        <div className="mt-4 grid gap-4 sm:grid-cols-2">
-          {/* 两段各自一个进度 —— 不合成总百分比，见本组件的说明。 */}
-          <ProgressBar
-            label="第 1 段 · 筛选"
-            done={progress.screenDone}
-            total={progress.screenTotal}
-            percent={pct.screen}
-          />
-          <ProgressBar
-            label="第 2 段 · 实测回显出口"
-            done={progress.mainDone}
-            total={progress.mainTotal}
-            percent={pct.main}
-          />
-        </div>
-      )}
-
-      {progress.addedWorkerIds.length > 0 && (
-        <p className="mt-3 text-text-muted">
-          本批新建 Worker：{progress.addedWorkerIds.join("、")}
-        </p>
-      )}
-
-      <div aria-live="polite">
-        {control.error !== null && (
-          <p role="alert" className="mt-3">
-            <StatusIndicator tone="error" icon="✕" label={control.error} />
-          </p>
-        )}
-      </div>
-
-      <p className="mt-3 text-text-muted">
-        进度由服务端持有 —— 刷新页面或关掉再开都能接着看。桥接探测会切换
-        Clash selector（那是进程外的全局状态），所以<Strong>同一时刻只允许一批</Strong>。
-      </p>
-
-      <ConfirmDialog
-        open={confirming}
-        title="开始批量探测"
-        confirmLabel="开始探测"
-        onCancel={() => setConfirming(false)}
-        onConfirm={() => {
-          setConfirming(false);
-          void control.send("start");
-        }}
-      >
-        <p>
-          经 Clash 桥接的节点会逐个<Strong>切换 Clash 分组的选中节点</Strong>。那是 Clash
-          的全局状态：探测期间本机其他走这个分组的流量也会跟着换出口，结束后不会自动切回。
-        </p>
-        <p>探测成功的出口可能会自动新建对应的 Worker，结果写回配置。</p>
-        <p>探测期间可以暂停或取消。</p>
-      </ConfirmDialog>
-    </Panel>
-  );
-}
-
-function ProgressBar({
-  label,
-  done,
-  total,
-  percent,
-}: {
-  label: string;
-  done: number;
-  total: number;
-  percent: number | null;
-}) {
-  return (
-    <div>
-      <div className="flex items-baseline justify-between">
-        <span className="text-text-muted">{label}</span>
-        <span style={{ fontVariantNumeric: "tabular-nums" }}>
-          {/* 分母为 0 显示「—」而不是 0%：「还没开始」与「0% 完成」是两件事。 */}
-          {percent === null ? "—" : `${done}/${total}`}
-        </span>
-      </div>
-      <div
-        className="mt-1 h-2 overflow-hidden rounded-xs bg-bg"
-        role="progressbar"
-        aria-valuenow={percent ?? 0}
-        aria-valuemin={0}
-        aria-valuemax={100}
-        aria-label={label}
-      >
-        {/* accent-fill 只做填充 —— 它上面不压任何文字，所以这个用法合格。 */}
-        <div className="h-full bg-accent-fill" style={{ width: `${percent ?? 0}%` }} />
-      </div>
-    </div>
-  );
-}
-
-/** 回显出口视图 —— **不分页**（见文件头）。 */
-function IsolationTab({ data }: { data: ProxyList }) {
-  const { groups, sharedGroups, unknownWorkerIds, isolated } = data.isolation;
-
-  return (
-    <Panel title="回显出口">
-      <StatusIndicator
-        tone={isolated ? "success" : sharedGroups.length > 0 ? "error" : "warn"}
-        icon={isolated ? "✓" : sharedGroups.length > 0 ? "✕" : "!"}
-        label={
-          isolated
-            ? `回显出口独立 · ${groups.length} 个出口`
-            : sharedGroups.length > 0
-              ? `回显出口共用 · ${sharedGroups.length} 组共用出口`
-              : `${unknownWorkerIds.length} 个出口未探测`
-        }
-      />
-
-      <p className="mt-3 text-text-muted">
-        <Strong>按回显目标的实测公网 IP 分组</Strong>。两个不同代理可能共用公网 IP；
-        未探测的出口单独列出。已保存的 IP 是最后一次成功探测结果，不代表当前仍然可用。
-      </p>
-      <p className="mt-2 text-text-muted">
-        仅反映 IP 回显目标的出口；Zen 实际出口需核对发往 opencode.ai 的连接。
-      </p>
-
-      {groups.length > 0 && (
-        /* 一眼看全是这个视图的全部意义,所以不分页 —— 数量大时靠原生滚动。 */
-        <ul className="mt-4 space-y-2">
-          {groups.map((g) => {
-            const shared = g.workerIds.length > 1;
-            return (
-              <li
-                key={g.egressIp}
-                className={`relative rounded-md border py-2 pl-4 pr-3 ${
-                  shared ? "border-error" : "border-border-strong"
-                }`}
-              >
-                <Mono>{g.egressIp}</Mono>
-                {shared && <span className="ml-2 text-error">⚠ 共用出口</span>}
-                <div className="text-text-muted">
-                  Worker：{g.workerIds.join("、")}
-                  {g.proxyIds.length > 0 && <> · 代理：{g.proxyIds.join("、")}</>}
-                </div>
-              </li>
-            );
-          })}
-        </ul>
-      )}
-
-      {unknownWorkerIds.length > 0 && (
-        <p className="mt-4 text-text-muted">
-          未探测：{unknownWorkerIds.join("、")} —— 跑一次批量探测即可实测。
-        </p>
-      )}
-    </Panel>
-  );
-}
-
 /** 被 Worker 引用的节点不能删：Worker 会静默退回直连，破坏出口隔离。 */
 export function deleteBlockedReason(p: ProxyView): string | null {
   return p.usedBy.length === 0 ? null : `被 ${p.usedBy.join("、")} 引用，先改绑这些 Worker`;
@@ -326,47 +85,73 @@ export function ProxyPage({
 }) {
   const batch = useBatchProbe();
   const tab = view.tab ?? "list";
-  const [rowMessage, setRowMessage] = useState<FormMessage>(null);
-  const [busy, setBusy] = useState(false);
-  const [pendingDelete, setPendingDelete] = useState<ProxyView | null>(null);
+  const rows = useRowNotes(refresh);
+  const [selected, setSelected] = useState<ReadonlySet<string>>(new Set());
+  const [pendingDelete, setPendingDelete] = useState<readonly ProxyView[]>([]);
+  const [renaming, setRenaming] = useState<string | null>(null);
   /** 正在单独探测的节点。一次只探一个：探测要切 selector，服务端也会拒绝并发。 */
-  const [probing, setProbing] = useState<string | null>(null);
-  const probeOne = (p: ProxyView) => {
-    setProbing(p.id);
-    setRowMessage(null);
-    const name = p.name || p.id;
-    void probeEgress([p.id])
-      .then((report) => {
-        const r = report.results[0];
-        setRowMessage(
-          r === undefined || r.ok
-            ? { tone: "success", text: `${name}：回显出口 ${r?.ok ? `${r.egressIp} · ${r.latencyMs}ms` : "已更新"}` }
-            : { tone: "error", text: `${name}：探测失败（${r.failureKind}）${r.reason}` },
-        );
-        refresh?.();
-      })
-      .catch((err) => setRowMessage(errorMessage(err)))
-      .finally(() => setProbing(null));
+  const [probing, setProbing] = useState<readonly string[]>([]);
+  /** 上一批结束后又单独探测过的节点：它们的结果比那一批新，不再显示批测状态。 */
+  const [probedSinceBatch, setProbedSinceBatch] = useState<ReadonlySet<string>>(new Set());
+  const batchActive = isActive(batch.progress);
+  // 新一批开始后，它的结果又比单独探测新了。
+  useEffect(() => {
+    if (batchActive) setProbedSinceBatch(new Set());
+  }, [batchActive]);
+  const batchNode = new Map(batch.progress.nodes.map((n) => [n.proxyId, n] as const));
+  /*
+   * 批测进行中显示每个节点的进度；结束后只留失败与跳过的原因（常规状态里看不到），
+   * 且结束后单独探测过的节点以新结果为准。开始新一批时重新计。
+   */
+  const batchNodeFor = (id: string) => {
+    const state = batch.progress.state;
+    if (state === "idle") return undefined;
+    const node = batchNode.get(id);
+    if (state !== "done") return node;
+    if (probedSinceBatch.has(id)) return undefined;
+    return node?.state === "failed" || node?.state === "skipped" ? node : undefined;
   };
-  const rowSave = (patch: Parameters<typeof patchConfig>[0], success: string) => {
-    setBusy(true);
-    setRowMessage(null);
-    void patchConfig(patch)
-      .then(() => {
-        setRowMessage({ tone: "success", text: success });
-        refresh?.();
-      })
-      .catch((err) => setRowMessage(errorMessage(err)))
-      .finally(() => setBusy(false));
+  const nameOf = (id: string) => {
+    const p = data.proxies.find((x) => x.id === id);
+    return p === undefined ? id : p.name || p.id;
   };
 
-  /*
-   * 过滤与排序在前端做。
-   *
-   * 数据量是几十行，一次过滤是微秒级 —— 让服务端做会
-   * 把每次输入一个字符变成一次 HTTP 请求。而搜索词本身在 URL 里，
-   * 所以刷新仍然还原同一视图。
-   */
+  const probeMany = async (ids: readonly string[]) => {
+    setProbing(ids);
+    setProbedSinceBatch((prev) => new Set([...prev, ...ids]));
+    for (const id of ids) rows.clear(id);
+    let index = 0;
+    try {
+      // 逐个发：每个节点的结果到一个显示一个，与概览的逐个探测同一手法。
+      for (; index < ids.length; index++) {
+        const id = ids[index]!;
+        const r = (await probeEgress([id])).results[0];
+        rows.set(
+          [id],
+          r === undefined || r.ok
+            ? { tone: "success", text: r?.ok ? `回显 ${r.egressIp} · ${r.latencyMs}ms` : "已更新" }
+            : { tone: "error", text: `${r.failureKind}：${r.reason}` },
+        );
+        refresh?.();
+      }
+    } catch (err) {
+      // 只标出错的那一个；前面已探到的结果保留，后面的没探。
+      rows.set([ids[index]!], { tone: "error", text: err instanceof Error ? err.message : String(err) });
+      const rest = ids.slice(index + 1);
+      if (rest.length > 0) rows.set(rest, { tone: "error", text: "未探测：前一个节点探测出错后停止" });
+    } finally {
+      setProbing([]);
+    }
+  };
+
+  const setEnabled = (list: readonly ProxyView[], enabled: boolean) => {
+    const ids = list.map((p) => p.id);
+    const patch = (on: boolean) => ({ proxies: { update: Object.fromEntries(list.map((p) => [p.id, { enabled: on }])) } });
+    // 撤销恢复每个节点原来的状态，而不是统一取反。
+    const undo = { proxies: { update: Object.fromEntries(list.map((p) => [p.id, { enabled: p.enabled }])) } };
+    void rows.apply(ids, patch(enabled), enabled ? "已启用" : "已停用", undo);
+  };
+
   const q = view.q.trim().toLowerCase();
   const filtered = data.proxies.filter((p) => {
     if (q !== "") {
@@ -381,6 +166,7 @@ export function ProxyPage({
     if (view.status === "broken" && !isBroken(p)) return false;
     return true;
   });
+  const chosen = data.proxies.filter((p) => selected.has(p.id));
 
   const columns: ReadonlyArray<Column<ProxyView>> = [
     {
@@ -391,7 +177,6 @@ export function ProxyPage({
     {
       key: "kind",
       header: "类型",
-      // 独立一列而不是节点名下的第二行：行高 36px 只容得下单行。
       render: (p) => (
         <span className="text-text-muted">
           {p.direct ? "直连" : "桥接"} · {p.type}
@@ -401,198 +186,240 @@ export function ProxyPage({
     {
       key: "status",
       header: "状态",
+      /*
+       * 一列回答「这个节点现在怎样」：行内反馈 > 本批探测进度 > 常规状态。
+       * 回显 IP 并进这一列（可用时显示 IP），不再单独占一列。
+       */
       render: (p) => {
+        const note = rows.noteOf(p.id);
+        if (note !== undefined) return <RowNoteView note={note} busy={rows.busy} onUndo={() => void rows.runUndo(p.id)} />;
+        if (probing.includes(p.id)) return <StatusIndicator tone="info" icon="◴" label="探测中…" />;
+        const b = batchNodeFor(p.id);
+        if (b !== undefined && b.state !== "ok") return <BatchNodeCell node={b} />;
         const s = proxyStatus(p);
-        return <StatusIndicator tone={s.tone} icon={s.icon} label={s.label} />;
+        return (
+          <span className="inline-flex items-baseline gap-2">
+            <StatusIndicator tone={s.tone} icon={s.icon} label={s.label} />
+            {p.egressIp !== null && p.enabled && p.resolvable && <Mono>{p.egressIp}</Mono>}
+            {b?.state === "ok" && <span className="text-label-13 text-text-muted">{b.latencyMs}ms</span>}
+          </span>
+        );
       },
-    },
-    {
-      key: "egress",
-      header: "出口 IP",
-      render: (p) =>
-        p.egressIp === null ? (
-          <span className="text-text-muted">未探测</span>
-        ) : (
-          <Mono>{p.egressIp}</Mono>
-        ),
     },
     {
       key: "port",
       header: "本地端口",
       numeric: true,
-      /*
-       * 这一列必须显示 —— 高风险字段：桥接时它是本机 Clash 的混合端口，与内核实际 `mixed-port` 不一致会让所有桥接代理静默失败
-       * （而控制面是通的）。
-       */
+      // 高风险字段：桥接时是 Clash 的混合端口，与内核实际 `mixed-port` 不一致会让桥接静默失败。
       render: (p) => <Mono>{p.port}</Mono>,
     },
     {
       key: "usedBy",
       header: "被引用",
       render: (p) =>
-        p.usedBy.length === 0 ? (
-          <span className="text-text-muted">未引用</span>
-        ) : (
-          <Truncate text={p.usedBy.join("、")} maxWidth="14rem" />
-        ),
+        p.usedBy.length === 0 ? <span className="text-text-muted">未引用</span> : <Truncate text={p.usedBy.join("、")} maxWidth="14rem" />,
     },
     {
       key: "actions",
       header: "操作",
-      render: (p) => {
-        const blocked = deleteBlockedReason(p);
-        return (
-          <span className="flex gap-2">
-            <SecondaryButton
-              compact
-              /* 批量探测进行中也禁用：两者会互相切 selector，服务端同样会拒绝。 */
-              disabled={probing !== null || isActive(batch.progress)}
-              onClick={() => probeOne(p)}
-            >
-              {probing === p.id ? "探测中…" : "探测"}
-            </SecondaryButton>
-            <SecondaryButton
-              compact
-              disabled={busy}
-              onClick={() =>
-                rowSave({ proxies: { update: { [p.id]: { enabled: !p.enabled } } } }, p.enabled ? `已停用 ${p.name || p.id}` : `已启用 ${p.name || p.id}`)
-              }
-            >
-              {p.enabled ? "停用" : "启用"}
-            </SecondaryButton>
-            {/* 禁用时原因放 title 与读屏描述：行高 36px 放不下第二行文字。 */}
-            <span title={blocked ?? undefined}>
-              <SecondaryButton compact danger disabled={busy || blocked !== null} onClick={() => setPendingDelete(p)}>
-                删除
-              </SecondaryButton>
-            </span>
-          </span>
-        );
-      },
+      render: (p) => (
+        <span className="flex gap-2">
+          <SecondaryButton
+            compact
+            /* 批量探测进行中也禁用：两者会互相切 selector，服务端同样会拒绝。 */
+            disabled={probing.length > 0 || batchActive}
+            onClick={() => void probeMany([p.id])}
+          >
+            探测
+          </SecondaryButton>
+          <SecondaryButton compact disabled={rows.busy} onClick={() => setEnabled([p], !p.enabled)}>
+            {p.enabled ? "停用" : "启用"}
+          </SecondaryButton>
+          <RowMenu
+            label={`${p.name || p.id} 的更多操作`}
+            items={[
+              { label: "改名", onSelect: () => setRenaming(p.id) },
+              {
+                label: "删除",
+                danger: true,
+                disabledReason: deleteBlockedReason(p),
+                onSelect: () => setPendingDelete([p]),
+              },
+            ]}
+          />
+        </span>
+      ),
     },
   ];
 
+  const blockedDelete = chosen.filter((p) => deleteBlockedReason(p) !== null);
+
   return (
     <div className="space-y-4">
-      <Panel title="代理池">
-        <div className="grid grid-cols-2 gap-6 sm:grid-cols-4">
-          <Metric label="代理" value={String(data.proxies.length)} hint="配置里的总数" />
-          <Metric
-            label="启用"
-            value={String(data.proxies.filter((p) => p.enabled).length)}
-            hint="参与调度"
-          />
-          <Metric
-            label="已实测回显出口"
-            value={String(data.proxies.filter((p) => p.egressIp !== null).length)}
-            hint="有公网 IP"
-          />
-          <Metric
-            label="配置有问题"
-            value={String(data.proxies.filter(isBroken).length)}
-            hint="启用了但解析不出出口"
-            tone={data.proxies.some(isBroken) ? "error" : "normal"}
-          />
-        </div>
-      </Panel>
+      <PageHeader
+        title="出口"
+        status={`${data.proxies.length} 个节点 · ${data.proxies.filter((p) => p.enabled).length} 个启用 · ${data.proxies.filter((p) => p.egressIp !== null).length} 个已实测${
+          data.proxies.some(isBroken) ? ` · ${data.proxies.filter(isBroken).length} 个配置有问题` : ""
+        }`}
+      />
 
-      <BatchPanel progress={batch.progress} control={batch} />
-
-      <div className={SEGMENTED_TRACK} role="tablist" aria-label="代理池视图">
+      <div className={SEGMENTED_TRACK} role="tablist" aria-label="出口视图">
         {TABS.map((t) => (
           <TabLink
             key={t.id}
             id={t.id}
             active={tab === t.id}
             onSelect={() => navigate({ tab: t.id })}
-            label={
-              t.id === "subscriptions" && data.subscriptions.length > 0
-                ? `${t.label}（${data.subscriptions.length}）`
-                : t.label
-            }
+            label={t.id === "subscriptions" && data.subscriptions.length > 0 ? `${t.label}（${data.subscriptions.length}）` : t.label}
           />
         ))}
       </div>
 
       <div role="tabpanel" id={`proxy-panel-${tab}`} aria-labelledby={`proxy-tab-${tab}`}>
-      {tab === "isolation" ? (
-        <IsolationTab data={data} />
-      ) : tab === "subscriptions" ? (
-        <SubscriptionTab data={data} refresh={refresh} />
-      ) : tab === "clash" ? (
-        <ClashSection clash={data.clash} refresh={() => refresh?.()} />
-      ) : (
-        <Panel title={`节点（${filtered.length}/${data.proxies.length}）`}>
-          <div className="mb-3">
-            <FormStatus message={rowMessage} />
-          </div>
-          <TableFilters
-            q={view.q}
-            onQ={(next) => navigate({ q: next, page_: 1 })}
-            status={view.status}
-            onStatus={(next) => navigate({ status: next, page_: 1 })}
-            statuses={[
-              { value: "enabled", label: "已启用" },
-              { value: "disabled", label: "已停用" },
-              { value: "probed", label: "已实测" },
-              { value: "unprobed", label: "未探测" },
-              { value: "broken", label: "配置有问题" },
-            ]}
-            placeholder="搜索节点名 / id / 出口 IP…"
-          />
-          <DataTable
-            label="代理节点"
-            rows={filtered}
-            columns={columns}
-            rowKey={(p) => p.id}
-            rowTone={proxyTone}
-            page={view.page_}
-            onPageChange={(next) => navigate({ page_: next })}
-            empty={
-              data.proxies.length === 0 ? (
-                <>
-                  <p className="text-heading-16 font-medium">还没有代理</p>
-                  <p className="mt-1 text-text-muted">
-                    到{" "}
-                    <a href="#proxy?tab=clash" className="text-accent-fg underline">
-                      Clash 标签
-                    </a>{" "}
-                    探测本机 Clash 并导入节点，或添加订阅。
-                  </p>
-                </>
-              ) : (
-                <p className="text-text-muted">没有匹配的节点 —— 换个搜索词或清掉筛选。</p>
-              )
-            }
-          />
-        </Panel>
-      )}
+        {tab === "subscriptions" ? (
+          <SubscriptionTab data={data} refresh={refresh} />
+        ) : tab === "clash" ? (
+          <ClashSection clash={data.clash} refresh={() => refresh?.()} />
+        ) : (
+          <Panel title={`节点（${filtered.length}/${data.proxies.length}）`} action={<BatchProbeBar control={batch} />}>
+            <BulkBar count={chosen.length} onClear={() => setSelected(new Set())}>
+              <SecondaryButton compact disabled={probing.length > 0 || batchActive} onClick={() => void probeMany(chosen.map((p) => p.id))}>
+                探测
+              </SecondaryButton>
+              <SecondaryButton compact disabled={rows.busy} onClick={() => setEnabled(chosen, true)}>
+                启用
+              </SecondaryButton>
+              <SecondaryButton compact disabled={rows.busy} onClick={() => setEnabled(chosen, false)}>
+                停用
+              </SecondaryButton>
+              <span title={blockedDelete.length > 0 ? `${blockedDelete.length} 个被 Worker 引用，不能删` : undefined}>
+                <SecondaryButton compact danger disabled={rows.busy || blockedDelete.length > 0} onClick={() => setPendingDelete(chosen)}>
+                  删除
+                </SecondaryButton>
+              </span>
+            </BulkBar>
+            <TableFilters
+              q={view.q}
+              onQ={(next) => navigate({ q: next, page_: 1 })}
+              status={view.status}
+              onStatus={(next) => navigate({ status: next, page_: 1 })}
+              statuses={[
+                { value: "enabled", label: "已启用" },
+                { value: "disabled", label: "已停用" },
+                { value: "probed", label: "已实测" },
+                { value: "unprobed", label: "未探测" },
+                { value: "broken", label: "配置有问题" },
+              ]}
+              placeholder="搜索节点名 / id / 出口 IP…"
+            />
+            <DataTable
+              label="代理节点"
+              rows={filtered}
+              total={data.proxies.length}
+              columns={columns}
+              rowKey={(p) => p.id}
+              rowTone={(p) => (rows.noteOf(p.id)?.tone === "error" ? "error" : proxyTone(p))}
+              selection={{ selected, onChange: setSelected, rowLabel: nameOf }}
+              page={view.page_}
+              onPageChange={(next) => navigate({ page_: next })}
+              expandedRowKey={renaming}
+              renderExpanded={(p) => (
+                <RenameForm
+                  initial={p.name}
+                  onCancel={() => setRenaming(null)}
+                  onSave={async (name) => {
+                    const ok = await rows.apply([p.id], { proxies: { update: { [p.id]: { name } } } }, "已改名", {
+                      proxies: { update: { [p.id]: { name: p.name || p.id } } },
+                    });
+                    if (ok) setRenaming(null);
+                  }}
+                />
+              )}
+              empty={
+                data.proxies.length === 0 ? (
+                  <>
+                    <p className="text-heading-16 font-medium">还没有代理</p>
+                    <p className="mt-1 text-text-muted">从本机 Clash 导入节点，或添加订阅。</p>
+                    <div className="mt-3 flex justify-center gap-2">
+                      <SecondaryButton onClick={() => navigate({ tab: "clash" })}>导入 Clash 节点</SecondaryButton>
+                      <SecondaryButton onClick={() => navigate({ tab: "subscriptions" })}>添加订阅</SecondaryButton>
+                    </div>
+                  </>
+                ) : (
+                  <p className="text-text-muted">没有匹配的节点 —— 换个搜索词或清掉筛选。</p>
+                )
+              }
+            />
+          </Panel>
+        )}
       </div>
 
       <ConfirmDialog
-        open={pendingDelete !== null}
+        open={pendingDelete.length > 0}
         title="删除代理节点"
         confirmLabel="确认删除"
         destructive
-        onCancel={() => setPendingDelete(null)}
+        onCancel={() => setPendingDelete([])}
         onConfirm={() => {
-          const p = pendingDelete;
-          setPendingDelete(null);
-          if (p !== null) rowSave({ proxies: { delete: [p.id] } }, `已删除 ${p.name || p.id}`);
+          const list = pendingDelete;
+          setPendingDelete([]);
+          setSelected(new Set());
+          void rows.apply(list.map((p) => p.id), { proxies: { delete: list.map((p) => p.id) } }, "已删除");
         }}
       >
         <p>
-          将删除节点 <Mono>{pendingDelete?.name || pendingDelete?.id || ""}</Mono>。
+          将删除 {pendingDelete.length === 1 ? <Mono>{pendingDelete[0]!.name || pendingDelete[0]!.id}</Mono> : `${pendingDelete.length} 个节点`}。
         </p>
-        <p>来自订阅或 Clash 的节点在下次刷新、导入时可能会重新出现；只想暂时不用时选「停用」。</p>
+        <p>删除会丢掉节点的连接信息，无法在后台撤销；来自订阅或 Clash 的节点在下次刷新、导入时会重新出现。只想暂时不用时选「停用」。</p>
       </ConfirmDialog>
     </div>
   );
 }
 
+/** 批测中一个节点的行内状态（成功的那一行照常显示 IP，见状态列）。 */
+function BatchNodeCell({ node }: { node: BatchProgressView["nodes"][number] }) {
+  switch (node.state) {
+    case "queued":
+      return <StatusIndicator tone="neutral" icon="○" label="排队中" />;
+    case "probing":
+      return <StatusIndicator tone="info" icon="◴" label="探测中…" />;
+    case "failed":
+    case "skipped":
+      return (
+        <span className="inline-flex items-baseline gap-2">
+          <StatusIndicator tone={node.state === "failed" ? "error" : "warn"} icon={node.state === "failed" ? "✕" : "!"} label={node.state === "failed" ? "探测失败" : "已跳过"} />
+          <Truncate text={node.reason} maxWidth="16rem" className="text-label-13 text-text-muted" />
+        </span>
+      );
+    case "ok":
+      return <StatusIndicator tone="success" icon="✓" label="可用" />;
+  }
+}
+
+function RenameForm({ initial, onSave, onCancel }: { initial: string; onSave: (name: string) => Promise<void>; onCancel: () => void }) {
+  const [name, setName] = useState(initial);
+  const [saving, setSaving] = useState(false);
+  return (
+    <form
+      aria-label="改名"
+      className="flex flex-wrap items-center gap-2"
+      onSubmit={(e) => {
+        e.preventDefault();
+        setSaving(true);
+        void onSave(name.trim()).finally(() => setSaving(false));
+      }}
+    >
+      <input aria-label="节点名称" autoFocus value={name} maxLength={200} onChange={(e) => setName(e.target.value)} className={`${FIELD} w-80 max-w-full`} />
+      <PrimaryButton type="submit" disabled={saving || name.trim() === ""}>
+        保存
+      </PrimaryButton>
+      <SecondaryButton onClick={onCancel}>取消</SecondaryButton>
+    </form>
+  );
+}
+
 const TABS = [
-  { id: "list", label: "列表" },
-  { id: "isolation", label: "回显出口" },
+  { id: "list", label: "节点" },
   { id: "subscriptions", label: "订阅" },
   { id: "clash", label: "Clash" },
 ] as const;
@@ -619,7 +446,7 @@ function TabLink({
     <a
       role="tab"
       id={`proxy-tab-${id}`}
-      href={toHash({ page: "proxy", tab: id, q: "", status: null, sort: null, page_: 1 })}
+      href={toHash({ ...parseHash(""), page: "proxy", tab: id })}
       aria-selected={active}
       aria-controls={`proxy-panel-${id}`}
       onClick={(event) => {

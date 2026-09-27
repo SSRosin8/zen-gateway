@@ -51,7 +51,9 @@ export type BatchEvent =
   /** 筛选完成，进入主探测段（`mainTotal` 是通过筛选的数量）。 */
   | { type: "screenDone"; mainTotal: number }
   /** 主探测推进一个。 */
-  | { type: "probed"; addedWorkerId?: string }
+  | { type: "probed" }
+  /** 批测结束前为可用节点新建了一个 Worker（`createWorkers` 选项）。 */
+  | { type: "workerAdded"; workerId: string }
   | { type: "pause" }
   | { type: "resume" }
   /** 用户请求取消 —— 进 `cancelling`，等服务端确认。 */
@@ -81,23 +83,19 @@ export function reduce(current: BatchProgress, event: BatchEvent): BatchProgress
       return {
         ...current,
         state: "running",
-          screenDone: current.screenTotal,
+        screenDone: current.screenTotal,
         mainTotal: Math.max(0, event.mainTotal),
       };
 
-    case "probed": {
+    case "probed":
       // `paused` 时不推进：在途的探测结果仍会回来，照收会让暂停期间进度继续涨。
       if (current.state !== "running") return current;
-      const added =
-        event.addedWorkerId === undefined
-          ? current.addedWorkerIds
-          : [...current.addedWorkerIds, event.addedWorkerId];
-      return {
-        ...current,
-        mainDone: Math.min(current.mainDone + 1, current.mainTotal),
-        addedWorkerIds: added,
-      };
-    }
+      return { ...current, mainDone: Math.min(current.mainDone + 1, current.mainTotal) };
+
+    case "workerAdded":
+      // Worker 已经写进配置，是既成事实：暂停或取消中到达也要记下，否则界面不告诉用户新建了什么。
+      if (current.state === "idle" || current.state === "done") return current;
+      return { ...current, addedWorkerIds: [...current.addedWorkerIds, event.workerId] };
 
     case "pause":
       // 只有主探测段能暂停：筛选很快，暂停它没有意义。

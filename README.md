@@ -40,7 +40,7 @@ npm run doctor
 
 先运行 `npm run status` 查看网关实际端口，再按
 [`docs/usage.md`](docs/usage.md#客户端接入) 的 OpenCode 1.x/2.x 示例替换端口和
-Relay Token；后台网关页也能生成对应片段。两种格式都只覆盖 Base URL 和 API Key，
+Relay Token；后台客户端接入页也能生成对应片段。两种格式都只覆盖 Base URL 和 API Key，
 模型与 SDK 继续由 OpenCode 自己管理。
 
 ```bash
@@ -60,7 +60,7 @@ opencode run --model opencode/big-pickle "Reply with exactly: OK"
   成功响应的 `response.id` 都参与绑定。
 - 每个 Worker 绑定一个直连代理、Clash 桥接代理或本机直连出口；批量探测按 IP
   回显目标的实测公网 IP 分组（[测量范围](docs/usage.md#回显-ip-的测量范围)）。
-- 管理后台提供快速开始、概览、网关、代理池、Worker、模型、用量和诊断页，
+- 管理后台提供快速开始、概览、Worker、出口、客户端接入、网关、模型、用量和诊断页，
   覆盖 CLI 的配置、探测（逐个或批量）、订阅刷新与诊断。
 
 管理 API 只接受本机回环请求，并要求回环 Host；浏览器 Origin 也必须来自回环

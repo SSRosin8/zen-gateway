@@ -1,6 +1,8 @@
 import { Hono } from "hono";
 import type { Config } from "../../shared/schema.ts";
 import {
+  BatchProbeRequestSchema,
+  StatsResetRequestSchema,
   BatchProgressSchema,
   ConfigPatchSchema,
   ModelListSchema,
@@ -16,12 +18,13 @@ import { buildIsolationReport } from "../../core/proxy/probe.ts";
 import type { EgressService } from "../../core/proxy/egress.ts";
 import { judgeFree } from "../../core/models/free.ts";
 import { catalogIdentityOf, slotOf, type CatalogSnapshot, type ModelCatalog } from "../../core/models/catalog.ts";
+import type { ProtocolDeclarations } from "../../core/models/protocols.ts";
 import type { VersionProbe } from "../admin/opencode.ts";
 import { createClashRoutes } from "./admin/clash.ts";
 import { createDiagnosticsRoutes } from "./admin/diagnostics.ts";
 import { createOpenCodeRoutes } from "./admin/opencode.ts";
 import { probeExclusive } from "./admin/probe.ts";
-import { adminError, issuesText, MAX_ADMIN_BODY_BYTES } from "./admin/common.ts";
+import { adminError, issuesText, MAX_ADMIN_BODY_BYTES, readJsonBody } from "./admin/common.ts";
 import { safeErrorMessage } from "../../shared/redact.ts";
 import { dayKey } from "../../store/db/stats.ts";
 import { applyConfigPatch } from "../admin/patch.ts";
@@ -59,7 +62,10 @@ export type AdminStatsSource = {
   rates(sinceDay?: string): StatsView["rates"];
   rejectionsByReason(sinceDay?: string): Record<string, number>;
   rejectedModels(sinceDay?: string): Array<{ reason: string; model: string; count: number }>;
+  daily(sinceDay?: string): StatsView["daily"];
+  reset(): number;
   requestCounts(sinceDay?: string): { requests: number; attempts: number };
+  modelProtocols(sinceDay?: string): ReadonlyMap<string, readonly string[]>;
 };
 
 export type AdminDeps = {
@@ -74,6 +80,8 @@ export type AdminDeps = {
   /** 调度器的运行期状态。只要这一小片 —— 见 `RuntimeWorkerState`。 */
   readonly runtimeWorkers: () => readonly RuntimeWorkerState[];
   readonly catalog: ModelCatalog;
+  /** models.dev 协议声明缓存，只供模型页展示；不传则所有模型显示「未声明」。 */
+  readonly protocols?: ProtocolDeclarations;
   /**
    * 出口服务，必须与转发面共用同一个（见 `EgressService.upstreamDeps`），
    * 否则探测量到的出口与转发实际用的不一致。不传则 `/probe` 不可用。
@@ -97,6 +105,20 @@ export type AdminDeps = {
 };
 
 export function createAdminRoutes(deps: AdminDeps): Hono {
+  /*
+   * 实测协议来自 `upstream_attempts` 明细的 DISTINCT 扫描（同步、无覆盖索引），而模型页每 30 秒轮询一次。
+   * 这个集合只在出现新的 2xx 模型 × 协议组合时才变，缓存一分钟足够新，也把扫描频率降到轮询的一半以下。
+   */
+  let protocolCache: { since: string; at: number; value: ReadonlyMap<string, readonly string[]> } | null = null;
+  const measuredProtocols = (since: string): ReadonlyMap<string, readonly string[]> => {
+    const now = Date.now();
+    if (protocolCache !== null && protocolCache.since === since && now - protocolCache.at < 60_000 && now >= protocolCache.at) {
+      return protocolCache.value;
+    }
+    const value = deps.stats!.modelProtocols(since);
+    protocolCache = { since, at: now, value };
+    return value;
+  };
   const app = new Hono();
 
   /** 正在刷新的订阅 id，按 id 进程内互斥：不同订阅并发刷新是安全的。 */
@@ -188,8 +210,26 @@ export function createAdminRoutes(deps: AdminDeps): Hono {
       rates: deps.stats.rates(since),
       rejections: deps.stats.rejectionsByReason(since),
       rejectedModels: deps.stats.rejectedModels(since),
+      daily: deps.stats.daily(since),
     };
     return c.json(StatsViewSchema.parse(body));
+  });
+
+  /**
+   * 清空用量统计（`StatsStore.reset`）。不可撤销，前端先确认。不影响转发、探测历史与会话亲和。
+   * 请求体必须是 `{ "confirm": true }`：一个没带体的误触 POST 不该清库。
+   */
+  app.post("/stats/reset", async (c) => {
+    const body = await readJsonBody(c, StatsResetRequestSchema);
+    if (!body.ok) return body.response;
+    if (deps.stats === undefined) return adminError(c, "internal_error", "统计库不可用");
+    try {
+      const removed = deps.stats.reset();
+      deps.log?.(`用量统计已重置(删除 ${removed} 行)`);
+      return c.json({ ok: true, removed });
+    } catch (err) {
+      return adminError(c, "write_failed", `重置失败:${safeErrorMessage(err)}`);
+    }
   });
 
   /**
@@ -377,15 +417,35 @@ export function createAdminRoutes(deps: AdminDeps): Hono {
   app.get("/models", (c) => {
     const config = deps.configOf();
     const snapshot = deps.catalog.cached(slotOf(catalogIdentityOf(config)));
+    // 协议声明只读缓存；过期就后台刷新，本次响应不等它（第三方慢不能拖住模型页）。
+    void deps.protocols?.refreshIfStale();
+    const declared = deps.protocols?.cached() ?? null;
+    // 实测窗口与统计页默认范围一致，且带 sinceDay，免得全表扫阻塞事件循环。
+    let measuredSinceDay: string | null = null;
+    let measured: ReadonlyMap<string, readonly string[]> = new Map();
+    if (deps.stats !== undefined) {
+      const since = dayKey(Date.now() - (DEFAULT_STATS_DAYS - 1) * 86_400_000);
+      try {
+        measured = measuredProtocols(since);
+        measuredSinceDay = since;
+      } catch (err) {
+        // 统计库坏了不该让模型页整页失败；窗口报 null（与库不可用同一种界面），原因进日志。
+        deps.log?.(`模型页实测协议查询失败: ${safeErrorMessage(err)}`);
+      }
+    }
 
     return c.json(
       ModelListSchema.parse({
-        models: modelViews(config, snapshot),
+        models: modelViews(config, snapshot, { declared, measured }),
         catalogAvailable: snapshot !== null,
+        protocolSource: {
+          available: declared !== null,
+          fetchedAt: declared === null ? null : new Date(declared.fetchedAt).toISOString(),
+        },
+        measuredSinceDay,
         rules: {
           freeSuffix: config.models.freeSuffix,
           extraFreeIds: config.models.extraFreeIds,
-          defaultSurfaces: config.models.defaultSurfaces,
           catalogTtlMs: config.models.catalogTtlMs,
           enforceCatalog: config.models.enforceCatalog,
         },
@@ -412,17 +472,9 @@ export function createAdminRoutes(deps: AdminDeps): Hono {
    */
   app.post("/batch-probe", async (c) => {
     // 体积闸门排在可用性检查之前：是否读入大 body 不该取决于 runner 状态。
-    let action: string;
-    try {
-      const raw = await readBoundedBody(c.req.raw, MAX_ADMIN_BODY_BYTES);
-      const body = JSON.parse(new TextDecoder().decode(raw)) as { action?: unknown };
-      action = String(body.action ?? "");
-    } catch (err) {
-      if (err instanceof BodyTooLargeError) {
-        return adminError(c, "invalid_request", "请求体超过上限(1 MiB)");
-      }
-      return adminError(c, "invalid_request", "请求体不是合法 JSON");
-    }
+    const body = await readJsonBody(c, BatchProbeRequestSchema);
+    if (!body.ok) return body.response;
+    const { action } = body.data;
 
     if (deps.batch === undefined) {
       return adminError(c, "internal_error", "批量探测不可用(统计库未就绪)");
@@ -430,14 +482,14 @@ export function createAdminRoutes(deps: AdminDeps): Hono {
 
     switch (action) {
       case "start": {
-        const started = deps.batch.start();
+        const started = deps.batch.start({ createWorkers: body.data.createWorkers === true });
         if (!started) {
-          // 409 不排队：两批并发会互相切 selector；也可能是没有可用 Worker。
+          // 409 不排队：两批并发会互相切 selector；也可能是没有可探的出口（`batchTargets` 为空）。
           return c.json(
             {
               error: {
                 type: "invalid_config",
-                message: "已有一批探测在进行中，或没有可用的 Worker",
+                message: "已有一批探测或出口探测在进行中，或没有可探的出口（没有已启用的节点，也没有在用的本机直连）",
               },
             },
             409,
@@ -454,8 +506,6 @@ export function createAdminRoutes(deps: AdminDeps): Hono {
       case "cancel":
         deps.batch.cancel();
         break;
-      default:
-        return adminError(c, "invalid_request", "action 必须是 start / pause / resume / cancel");
     }
 
     return c.json(batchProgressView(deps.batch));
@@ -468,6 +518,7 @@ function batchProgressView(batch: BatchProbeRunner) {
   const startedAt = batch.startedAt();
   return BatchProgressSchema.parse({
     ...batch.snapshot(),
+    nodes: batch.nodes(),
     // 从未跑过 → null，而不是 0：「没开始」与「刚开始」是两件事。
     elapsedMs: startedAt === null ? null : Math.max(0, Date.now() - startedAt),
   });

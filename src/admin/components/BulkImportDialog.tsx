@@ -3,7 +3,7 @@ import type { ProxyList, ProxyView, WorkerCreate } from "../../shared/contract.t
 import { FormStatus, Mono, PrimaryButton, SecondaryButton, Truncate, errorMessage, type FormMessage } from "./Panel.tsx";
 import { StatusIndicator } from "./StatusIndicator.tsx";
 import { patchConfig, type FetchState } from "../lib/api.ts";
-import { WORKER_CREATE_MAX, bulkAnonymousWorkers } from "../lib/workerIds.ts";
+import { WORKER_CREATE_MAX, bulkAnonymousWorkers, duplicateEgressIds } from "../../shared/workerIds.ts";
 import { FIELD } from "../lib/styles.ts";
 
 /**
@@ -23,14 +23,10 @@ export function bulkCandidates(proxies: readonly ProxyView[]): ProxyView[] {
  * 未探测（`egressIp` 为 null）的不算重复：还不知道。
  */
 export function duplicateEgress(proxies: readonly ProxyView[], candidates: readonly ProxyView[]): ReadonlySet<string> {
-  const taken = new Set(proxies.filter((p) => p.usedBy.length > 0 && p.egressIp !== null).map((p) => p.egressIp!));
-  const out = new Set<string>();
-  for (const p of candidates) {
-    if (p.egressIp === null) continue;
-    if (taken.has(p.egressIp)) out.add(p.id);
-    else taken.add(p.egressIp);
-  }
-  return out;
+  return duplicateEgressIds(
+    proxies.filter((p) => p.usedBy.length > 0 && p.egressIp !== null).map((p) => p.egressIp!),
+    candidates,
+  );
 }
 
 export function BulkImportDialog({
@@ -158,7 +154,7 @@ function BulkBody({
     return (
       <div className="mt-3 space-y-3">
         <p className="text-text-muted">
-          没有可导入的节点：Clash 节点都已被 Worker 引用、被停用，或还没有导入。先在快速开始或代理池页导入 Clash 出口。
+          没有可导入的节点：Clash 节点都已被 Worker 引用、被停用，或还没有导入。先在快速开始或出口页导入 Clash 出口。
         </p>
         <div className="flex justify-end">
           <SecondaryButton onClick={onClose}>关闭</SecondaryButton>

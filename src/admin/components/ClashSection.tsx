@@ -3,14 +3,14 @@ import type { ConfigPatch, ProxyList } from "../../shared/contract.ts";
 import { FormStatus, Mono, Panel, SecondaryButton, errorMessage, type FormMessage } from "./Panel.tsx";
 import { StatusIndicator } from "./StatusIndicator.tsx";
 import { ConfirmDialog } from "./ConfirmDialog.tsx";
-import { SimpleTable, type Column } from "./DataTable.tsx";
+import { DataTable, type Column } from "./DataTable.tsx";
 import { SecretField, useSecretField } from "./SecretField.tsx";
 import { ClashImportFlow } from "./ClashImportFlow.tsx";
 import { patchConfig } from "../lib/api.ts";
 import { FIELD } from "../lib/styles.ts";
 
 /**
- * 代理池页的 Clash 内核管理：总开关、选择模式、内核增删改，以及探测导入。
+ * 出口页的 Clash 内核管理：总开关、选择模式、内核增删改，以及探测导入。
  *
  * 内核 id 创建后不能改（代理的 `bridgeId` 按 id 引用）；secret 走三态。
  * 删除内核会连带删除它导入的代理，被 Worker 引用时服务端整体拒绝并说明原因。
@@ -25,6 +25,8 @@ export function ClashSection({ clash, refresh }: { clash: Clash; refresh: () => 
   const [pendingDelete, setPendingDelete] = useState<Bridge | null>(null);
   const [message, setMessage] = useState<FormMessage>(null);
   const [busy, setBusy] = useState(false);
+  // 内核最多 32 个，超过一页（16）要能翻页；页码不进 URL，这是出口页里的一个子表。
+  const [page, setPage] = useState(1);
 
   const save = async (patch: ConfigPatch, success: string): Promise<boolean> => {
     setBusy(true);
@@ -89,8 +91,19 @@ export function ClashSection({ clash, refresh }: { clash: Clash; refresh: () => 
 
   return (
     <div className="space-y-4">
+      {/* 首次使用最该做的事是探测导入，放在第一块。 */}
+      <Panel title="Clash 探测与导入">
+        <ClashImportFlow onImported={refresh} />
+      </Panel>
+
       <Panel
         title={`Clash 内核（${clash.bridges.length}）`}
+        hint={
+          <>
+            代理端口必须与内核实际的 <Mono>mixed-port</Mono> 一致，否则桥接代理全部传输失败而控制面仍是通的。分组不要用{" "}
+            <Mono>GLOBAL</Mono>：rule 模式下它不参与选路，切它不改变出口。
+          </>
+        }
         action={
           <SecondaryButton onClick={() => setEditing(editing === "new" ? null : "new")}>
             {editing === "new" ? "收起" : "添加内核"}
@@ -155,35 +168,35 @@ export function ClashSection({ clash, refresh }: { clash: Clash; refresh: () => 
 
         <div className="mt-4">
           {clash.bridges.length === 0 ? (
-            <p className="text-text-muted">还没有 Clash 内核。用下面的探测导入，或手动添加。</p>
+            <p className="text-text-muted">还没有 Clash 内核。用上面的探测导入，或手动添加。</p>
           ) : (
-            <SimpleTable label="Clash 内核" rows={clash.bridges} columns={columns} rowKey={(b) => b.id} rowAttr="data-bridge" />
+            /* 编辑表单展开在被编辑那一行下方，与 Worker、订阅一致。 */
+            <DataTable
+              label="Clash 内核"
+              rows={clash.bridges}
+              columns={columns}
+              rowKey={(b) => b.id}
+              total={clash.bridges.length}
+              page={page}
+              onPageChange={setPage}
+              empty={null}
+              expandedRowKey={editingBridge?.id ?? null}
+              renderExpanded={(b) => (
+                <BridgeEditor
+                  key={b.id}
+                  bridge={b}
+                  existingIds={[]}
+                  busy={busy}
+                  onCancel={() => setEditing(null)}
+                  onSave={async (patch) => {
+                    if (await save(patch, "已保存")) setEditing(null);
+                  }}
+                />
+              )}
+            />
           )}
         </div>
 
-        {editingBridge !== null && (
-          <div className="mt-4 border-t border-border-strong pt-4">
-            <BridgeEditor
-              key={editingBridge.id}
-              bridge={editingBridge}
-              existingIds={[]}
-              busy={busy}
-              onCancel={() => setEditing(null)}
-              onSave={async (patch) => {
-                if (await save(patch, "已保存")) setEditing(null);
-              }}
-            />
-          </div>
-        )}
-
-        <p className="mt-3 max-w-3xl text-text-muted">
-          代理端口必须与内核实际的 <Mono>mixed-port</Mono> 一致，否则桥接代理全部传输失败而控制面仍是通的。
-          分组不要用 <Mono>GLOBAL</Mono>：rule 模式下它不参与选路，切它不改变出口。
-        </p>
-      </Panel>
-
-      <Panel title="Clash 探测与导入">
-        <ClashImportFlow onImported={refresh} />
       </Panel>
 
       <ConfirmDialog

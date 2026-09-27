@@ -730,3 +730,65 @@ describe("recordProbe", () => {
     ).toThrow(/CHECK/);
   });
 });
+
+describe("daily：按天的 token 序列（用量图表）", () => {
+  it("按天 × 模型分组；会话只算保留的那条，请求数逐条累计", () => {
+    const nextDay = T0 + 24 * 3_600_000;
+    stats.recordUsage({ model: "a", workerId: "w1", at: T0, usage: usage({ promptTokens: 100 }) });
+    stats.recordUsage({ model: "a", workerId: "w2", at: T0, usage: usage({ promptTokens: 1_000 }), sessionHash: "s1" });
+    stats.recordUsage({ model: "a", workerId: "w2", at: T0 + 1, usage: usage({ promptTokens: 3_000 }), sessionHash: "s1" });
+    stats.recordUsage({ model: "b", workerId: "w1", at: nextDay, usage: usage({ promptTokens: 7 }) });
+
+    expect(stats.daily().byModel).toEqual([
+      { day: dayKey(T0), key: "a", inputTokens: 3_100, outputTokens: 40, cacheReadTokens: 0, requests: 3 },
+      { day: dayKey(nextDay), key: "b", inputTokens: 7, outputTokens: 20, cacheReadTokens: 0, requests: 1 },
+    ]);
+    // 与 modelUsage 同一口径 —— 图表和表格的合计必须一致。
+    const sum = stats.daily().byModel.reduce((n, r) => n + r.inputTokens, 0);
+    expect(sum).toBe(stats.modelUsage().reduce((n, r) => n + r.inputTokens, 0));
+  });
+
+  it("按 Worker 分组，sinceDay 两个子查询都生效", () => {
+    const nextDay = T0 + 24 * 3_600_000;
+    stats.recordUsage({ model: "a", workerId: "w1", at: T0, usage: usage() });
+    stats.recordUsage({ model: "a", workerId: "w1", at: T0, usage: usage(), sessionHash: "s-old" });
+    stats.recordUsage({ model: "a", workerId: "w2", at: nextDay, usage: usage(), sessionHash: "s-new" });
+    expect(stats.daily().byWorker.map((r) => [r.day, r.key])).toEqual([
+      [dayKey(T0), "w1"],
+      [dayKey(nextDay), "w2"],
+    ]);
+    expect(stats.daily(dayKey(nextDay)).byWorker.map((r) => r.key)).toEqual(["w2"]);
+  });
+});
+
+describe("reset：清空用量，保留调度状态", () => {
+  it("清空五张用量表并返回行数；探测历史与会话亲和不动", () => {
+    stats.recordAttempt({ requestId: "r", attemptIndex: 0, workerId: "w1", protocol: "chat", model: "m", status: 200, failureKind: null, latencyMs: 1, at: T0 });
+    stats.recordUsage({ model: "m", workerId: "w1", at: T0, usage: usage() });
+    stats.recordUsage({ model: "m", workerId: "w1", at: T0, usage: usage(), sessionHash: "s1" });
+    stats.recordRejection({ reason: "not_free", protocol: "chat", model: "x", at: T0 });
+    stats.recordProbe({ proxyId: "p", at: T0, ok: true, egressIp: "203.0.113.7", latencyMs: 1, failureKind: null });
+    db.prepare("INSERT INTO session_affinity (session_hash, worker_id, bound_at, expires_at) VALUES (?, ?, ?, ?)").run("a".repeat(64), "w1", T0, T0 + 1);
+
+    const count = (t: string) => (db.prepare(`SELECT COUNT(*) AS n FROM ${t}`).get() as { n: number }).n;
+    const usageTables = ["upstream_attempts", "model_usage", "session_usage", "worker_stats", "gateway_rejections"];
+    const before = usageTables.reduce((n, t) => n + count(t), 0);
+    expect(usageTables.every((t) => count(t) > 0)).toBe(true);
+
+    expect(stats.reset()).toBe(before);
+    expect(usageTables.map(count)).toEqual([0, 0, 0, 0, 0]);
+    expect(stats.modelUsage()).toEqual([]);
+    expect(stats.requestCounts()).toEqual({ requests: 0, attempts: 0 });
+    expect(count("probe_results")).toBe(1);
+    expect(count("session_affinity")).toBe(1);
+  });
+
+  it("失败时回滚：要么全清，要么都不动", () => {
+    stats.recordUsage({ model: "m", workerId: "w1", at: T0, usage: usage() });
+    // 让最后一张表的 DELETE 失败，前面已删的表必须被回滚。
+    db.exec("CREATE TRIGGER block_reset BEFORE DELETE ON gateway_rejections BEGIN SELECT RAISE(ABORT, 'blocked'); END");
+    stats.recordRejection({ reason: "not_free", protocol: "chat", model: "x", at: T0 });
+    expect(() => stats.reset()).toThrow(/blocked/);
+    expect(stats.modelUsage()).toHaveLength(1);
+  });
+});

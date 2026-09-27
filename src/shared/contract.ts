@@ -7,6 +7,7 @@ import {
   GatewaySchema,
   IdSchema,
   ModelRulesSchema,
+  ProtocolIdSchema,
   ProxySourceSchema,
   RoutingConfigSchema,
   RoutingStrategySchema,
@@ -169,6 +170,16 @@ export type Overview = z.infer<typeof OverviewSchema>;
 /** 被拒请求里的 `model` 不像模型 id 时进库用的占位符；服务端写入与前端显示共用。 */
 export const UNKNOWN_MODEL = "<other>";
 
+const DailyPointSchema = z.object({
+  day: z.string(),
+  key: z.string(),
+  inputTokens: z.number().int().nonnegative(),
+  outputTokens: z.number().int().nonnegative(),
+  cacheReadTokens: z.number().int().nonnegative(),
+  requests: z.number().int().nonnegative(),
+});
+export type DailyPoint = z.infer<typeof DailyPointSchema>;
+
 /** 统计视图，对应 `StatsStore` 的聚合。`requests` 与 `attempts` 分开：一条重试链是一个请求、多次尝试。 */
 export const StatsViewSchema = z.object({
   /** 起始日（UTC 日期键）；null = 全部历史。 */
@@ -206,6 +217,11 @@ export const StatsViewSchema = z.object({
   }),
   /** 网关自己拒掉的请求，按原因汇总。 */
   rejections: z.record(z.string(), z.number().int().nonnegative()),
+  /** 按天的 token 序列，按模型与按 Worker 各一份（图表用，只含有数据的天）。 */
+  daily: z.object({
+    byModel: z.array(DailyPointSchema),
+    byWorker: z.array(DailyPointSchema),
+  }),
   /** 同一批拒绝按（原因, 模型名）展开；客户端给的名字不像模型 id 时记为 `<other>`。 */
   rejectedModels: z.array(
     z.object({ reason: z.string(), model: z.string(), count: z.number().int().nonnegative() }),
@@ -438,8 +454,16 @@ export const ModelViewSchema = z.object({
    * `*_unverified`（依据成立但目录拿不到，没做交集）。
    */
   reason: z.string(),
-  /** 该模型在本网关上声明支持的协议面（来自 `surfacesFor`）。 */
-  surfaces: z.array(z.string()),
+  /**
+   * 协议面，只作展示、不是放行闸门。`declared` 来自 models.dev 的 opencode provider
+   * （`other` = 网关没有对应的面，null = 未声明或拿不到声明）；`measured` 是本网关近期
+   * 实际得到过 2xx 的面（统计库不可用时为空）。两者都不证明 Zen 当前接受哪个面。
+   */
+  protocol: z.object({
+    // 网关支持的协议面之外，models.dev 声明的其余 SDK 统一记 `other`。
+    declared: z.enum([...ProtocolIdSchema.options, "other"]).nullable(),
+    measured: z.array(ProtocolIdSchema),
+  }),
   /** 在上游在架目录里。 */
   listed: z.boolean(),
 });
@@ -523,7 +547,7 @@ export const ProxyListSchema = z.object({
   clash: OverviewSchema.shape.clash,
   /** 回显出口报告，与 Overview 同一份逻辑；不证明 Zen 实际出口隔离。 */
   isolation: IsolationViewSchema,
-  /** 订阅列表，供代理池页显示节点来源。 */
+  /** 订阅列表，供出口页显示节点来源。 */
   subscriptions: z.array(SubscriptionViewSchema),
 });
 export type ProxyList = z.infer<typeof ProxyListSchema>;
@@ -535,10 +559,19 @@ export const ModelListSchema = z.object({
    */
   models: z.array(ModelViewSchema),
   catalogAvailable: z.boolean(),
+  /**
+   * 协议声明（models.dev）的状态。`available: false` 时所有 `declared` 为 null，
+   * 页面要说「拿不到声明」而不是「这些模型都没声明」。
+   */
+  protocolSource: z.object({
+    available: z.boolean(),
+    fetchedAt: z.string().nullable(),
+  }),
+  /** 实测协议面的统计窗口（UTC 日期键，含当天）；统计库不可用时为 null。 */
+  measuredSinceDay: z.string().nullable(),
   rules: z.object({
     freeSuffix: z.string(),
     extraFreeIds: z.array(z.string()),
-    defaultSurfaces: z.array(z.string()),
     catalogTtlMs: z.number().int(),
     enforceCatalog: z.boolean(),
   }),
@@ -557,6 +590,22 @@ export const BatchProgressSchema = z.object({
   failureKind: z.string().nullable(),
   /** 本批已跑多久（毫秒），未开始过为 null。服务端从 `batch_probe_jobs.started_at` 计算。 */
   elapsedMs: z.number().int().nonnegative().nullable(),
+  /** 本批逐个节点的状态（进程内），供代理池表格按行显示；网关重启后为空。 */
+  nodes: z.array(
+    z.discriminatedUnion("state", [
+      z.object({ proxyId: z.string(), state: z.literal("queued") }),
+      z.object({ proxyId: z.string(), state: z.literal("probing") }),
+      z.object({ proxyId: z.string(), state: z.literal("ok"), egressIp: z.string(), latencyMs: z.number().int().nonnegative() }),
+      z.object({ proxyId: z.string(), state: z.literal("failed"), reason: z.string() }),
+      z.object({ proxyId: z.string(), state: z.literal("skipped"), reason: z.string() }),
+    ]),
+  ),
+});
+
+/** `POST /api/batch-probe` 的请求体。`createWorkers` 只对 `start` 有意义，默认不建。 */
+export const BatchProbeRequestSchema = z.strictObject({
+  action: z.enum(["start", "pause", "resume", "cancel"]),
+  createWorkers: z.boolean().optional(),
 });
 
 /** 批测进度的线上形态，前端使用。reducer 是无时钟纯函数，耗时由服务端在读时计算。 */
@@ -573,6 +622,7 @@ export const INITIAL_BATCH_VIEW: BatchProgressView = {
   addedWorkerIds: [],
   failureKind: null,
   elapsedMs: null,
+  nodes: [],
 };
 
 /* ---------------- Clash 发现与导入 ---------------- */
@@ -663,6 +713,10 @@ export type OpenCodeView = z.infer<typeof OpenCodeViewSchema>;
 export const ProbeRequestSchema = z.strictObject({
   proxyIds: z.array(z.string().min(1).max(256)).min(1).max(MAX_WORKERS).optional(),
 });
+
+/** `POST /api/stats/reset` 的请求体：必须显式确认。 */
+export const StatsResetRequestSchema = z.strictObject({ confirm: z.literal(true) });
+export const StatsResetResponseSchema = z.object({ ok: z.literal(true), removed: z.number().int().nonnegative() });
 
 /** 局域网访问状态。`local` = 本机浏览器；`addresses` 只返回给本机。 */
 export const LanStatusSchema = z.object({

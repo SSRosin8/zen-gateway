@@ -1,10 +1,10 @@
-import { PAGES, PAGE_LABEL, toHash, parseHash, type PageId } from "../lib/router.ts";
+import { NAV_GROUPS, PAGE_LABEL, toHash, parseHash, type PageId } from "../lib/router.ts";
 import { PAGE_ICON } from "./Icons.tsx";
 
 /**
  * 侧栏导航。
  *
- * 条目从 `PAGES` 推导 —— 那份清单是路由分派的同一个真相。手写一份会分叉
+ * 条目从 `NAV_GROUPS` 推导 —— 那份清单是路由分派的同一个真相。手写一份会分叉
  * （纪律 #4），而分叉方向是「导航上有的页面路由不认识」或反之。
  *
  * 条目是真实的 `<a href="#page">`：中键、新标签页打开、复制链接都能用。
@@ -35,50 +35,63 @@ export function Nav({
 }) {
   return (
     <nav aria-label="主导航">
-      <ul className="flex flex-col gap-0.5 px-2">
-        {PAGES.map((page) => {
-          const active = page === current;
-          const showBadge = page === "start" && badge !== undefined && badge !== null;
-          return (
-            <li key={page}>
-              <a
-                href={toHash({ ...parseHash(""), page })}
-                onClick={onNavigate}
-                /* 触摸目标 ≥44px。 */
-                className={`group relative flex min-h-[44px] items-center gap-3 rounded-md no-underline transition-colors ${
-                  collapsed ? "justify-center px-0" : "px-3"
-                } ${
-                  active
-                    ? "bg-surface font-medium text-text dark:bg-surface-active"
-                    : "text-text-muted hover:bg-surface-hover hover:text-text active:bg-surface-active"
-                }`}
-                /* 屏幕阅读器要知道哪个是当前页 —— 颜色与边框它读不到。 */
-                aria-current={active ? "page" : undefined}
-                {...(collapsed ? { "aria-label": PAGE_LABEL[page], title: PAGE_LABEL[page] } : {})}
-              >
-                <span className={active ? "text-accent-fg" : ""}>{PAGE_ICON[page]}</span>
-                {!collapsed && <span className="flex-1">{PAGE_LABEL[page]}</span>}
-                {showBadge &&
-                  (collapsed ? (
-                    <span
-                      className="absolute right-3 top-2.5 h-2 w-2 rounded-full bg-accent-fg"
-                      aria-label={`首启进度 ${badge}`}
-                      data-onboarding-badge=""
-                    />
-                  ) : (
-                    <span
-                      className="rounded-full bg-surface-active px-2 text-label-12 text-text"
-                      aria-label={`首启进度 ${badge}`}
-                      data-onboarding-badge=""
-                    >
-                      {badge}
-                    </span>
-                  ))}
-              </a>
-            </li>
-          );
-        })}
-      </ul>
+      {NAV_GROUPS.map((group, gi) => (
+        /* 分组小标题只在展开时显示；收起时用一条细线分隔，读屏仍听到分组名。 */
+        <div key={gi} role="group" aria-label={group.label ?? "常用"} className={gi > 0 ? "mt-3" : ""}>
+          {group.label !== null &&
+            (collapsed ? (
+              <div className="mx-4 mb-2 border-t border-border-strong" aria-hidden="true" />
+            ) : (
+              <p className="mb-1 px-5 text-label-12 font-medium text-text-muted" aria-hidden="true">
+                {group.label}
+              </p>
+            ))}
+          <ul className="flex flex-col gap-0.5 px-2">
+          {group.pages.map((page: PageId) => {
+            const active = page === current;
+            const showBadge = page === "start" && badge !== undefined && badge !== null;
+            return (
+              <li key={page}>
+                <a
+                  href={toHash({ ...parseHash(""), page })}
+                  onClick={onNavigate}
+                  /* 触摸目标 ≥44px。 */
+                  className={`group relative flex min-h-[44px] items-center gap-3 rounded-md no-underline transition-colors ${
+                    collapsed ? "justify-center px-0" : "px-3"
+                  } ${
+                    active
+                      ? "bg-surface font-medium text-text dark:bg-surface-active"
+                      : "text-text-muted hover:bg-surface-hover hover:text-text active:bg-surface-active"
+                  }`}
+                  /* 屏幕阅读器要知道哪个是当前页 —— 颜色与边框它读不到。 */
+                  aria-current={active ? "page" : undefined}
+                  {...(collapsed ? { "aria-label": PAGE_LABEL[page], title: PAGE_LABEL[page] } : {})}
+                >
+                  <span className={active ? "text-accent-fg" : ""}>{PAGE_ICON[page]}</span>
+                  {!collapsed && <span className="flex-1">{PAGE_LABEL[page]}</span>}
+                  {showBadge &&
+                    (collapsed ? (
+                      <span
+                        className="absolute right-3 top-2.5 h-2 w-2 rounded-full bg-accent-fg"
+                        aria-label={`首启进度 ${badge}`}
+                        data-onboarding-badge=""
+                      />
+                    ) : (
+                      <span
+                        className="rounded-full bg-surface-active px-2 text-label-12 text-text"
+                        aria-label={`首启进度 ${badge}`}
+                        data-onboarding-badge=""
+                      >
+                        {badge}
+                      </span>
+                    ))}
+                </a>
+              </li>
+            );
+          })}
+          </ul>
+        </div>
+      ))}
     </nav>
   );
 }

@@ -8,6 +8,7 @@ import { StatusIndicator } from "../components/StatusIndicator.tsx";
 import { ClashImportFlow } from "../components/ClashImportFlow.tsx";
 import { OpenCodeConfigCard } from "../components/OpenCodeConfigCard.tsx";
 import type { FetchState } from "../lib/api.ts";
+import { CopyButton } from "../components/CopyButton.tsx";
 
 /**
  * 快速开始 —— 首启引导，一页走完从零到第一次成功生成。
@@ -59,13 +60,17 @@ export function StartPage({
   opencode,
   refresh,
   proxies,
+  seenRequests = null,
 }: {
   data: Overview;
   opencode: FetchState<OpenCodeView>;
   refresh: () => void;
   /** 出口下拉与批量导入的数据源；新增 Worker 就在本页完成，不跳走。 */
   proxies?: FetchState<ProxyList>;
+  /** 近 30 天是否有客户端请求到达过网关；未知时为 null。 */
+  seenRequests?: boolean | null;
 }) {
+  const verified = seenRequests === true ? true : null;
   const progress = onboardingProgress(data, opencode);
   const { steps } = progress;
   const [creating, setCreating] = useState(false);
@@ -192,7 +197,8 @@ export function StartPage({
           />
         </Step>
 
-        <Step n={5} id="verify" done={null} title="用 OpenCode 验证">
+        {/* 有客户端请求到达过网关，说明链路至少通到了这里；它不证明模型可用，所以只作提示。 */}
+        <Step n={5} id="verify" done={verified} title="用 OpenCode 验证">
           <p className="text-text-muted">
             在<Strong>网关项目根目录</Strong>运行（<Mono>opencode.json</Mono> 在这里）。只有真实客户端的请求能证明链路通，
             <Mono>curl</Mono> 的请求形态不同，不能替代：
@@ -245,22 +251,10 @@ function Step({
 
 /** 可直接跑的命令。等宽 + 独立一行；`copyable` 时带复制按钮。 */
 export function Cmd({ text, copyable = false }: { text: string; copyable?: boolean }) {
-  const [copied, setCopied] = useState(false);
   return (
     <div className="mt-2 flex flex-wrap items-start gap-2">
       <pre className="min-w-0 flex-1 overflow-x-auto rounded-md border border-border-strong bg-bg p-3 font-mono">{text}</pre>
-      {copyable && (
-        <SecondaryButton
-          onClick={() => {
-            void navigator.clipboard?.writeText(text).then(() => {
-              setCopied(true);
-              window.setTimeout(() => setCopied(false), 1500);
-            });
-          }}
-        >
-          {copied ? "已复制" : "复制命令"}
-        </SecondaryButton>
-      )}
+      {copyable && <CopyButton text={text} label="复制命令" />}
     </div>
   );
 }

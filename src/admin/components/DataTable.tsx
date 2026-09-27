@@ -1,5 +1,5 @@
 import { Fragment, type ReactNode } from "react";
-import { Mono, RowMark, SecondaryButton, Skeleton } from "./Panel.tsx";
+import { Mono, RowMark, SecondaryButton, Skeleton, Truncate } from "./Panel.tsx";
 import { FIELD } from "../lib/styles.ts";
 
 /**
@@ -15,8 +15,8 @@ import { FIELD } from "../lib/styles.ts";
  * 这里需要的是「过滤 + 排序 + 切片」三个数组操作，每张表 4-7 列、几十行。
  * 引入一个表格库会让一个 30 行的需求变成一套列定义概念。
  *
- * **出口隔离视图不分页**：那个任务本身就是「一眼看全、找出共用出口的节点」，
- * 分页会破坏它的意义。
+ * 列表表（Worker、出口节点、订阅、Clash 内核、模型）都分页；`SimpleTable` 只给行数天然很少的
+ * 聚合小表（用量按模型 / Worker、网关拒绝）。
  *
  * ## 窄屏横向滚动
  *
@@ -65,15 +65,26 @@ function numericAttr(numeric: boolean | undefined) {
  * `expandedRowKey` / `renderExpanded` 在指定行正下方插入一行跨全部列的内容
  * （例如行内编辑表单），让编辑区紧贴被编辑的那一行。
  */
+/**
+ * 多选：表头一个「全选本页」、每行一个复选框。选中集合归调用方（跨页保留），
+ * 名称取 `rowLabel`，让读屏听到「选择 anon-3」而不是一串「复选框」。
+ */
+export type Selection = {
+  readonly selected: ReadonlySet<string>;
+  readonly onChange: (next: ReadonlySet<string>) => void;
+  readonly rowLabel: (key: string) => string;
+};
+
 function TableBody<T>({
   label,
   rows,
-  columns,
+  columns: rawColumns,
   rowKey,
   rowTone,
   rowAttr,
   expandedRowKey,
   renderExpanded,
+  selection,
 }: {
   label: string;
   rows: readonly T[];
@@ -83,7 +94,50 @@ function TableBody<T>({
   rowAttr: string;
   expandedRowKey?: string | null | undefined;
   renderExpanded?: ((row: T) => ReactNode) | undefined;
+  selection?: Selection | undefined;
 }) {
+  const keys = rows.map(rowKey);
+  const allOnPage = selection !== undefined && keys.length > 0 && keys.every((k) => selection.selected.has(k));
+  const toggle = (ks: readonly string[], on: boolean) => {
+    if (selection === undefined) return;
+    const next = new Set(selection.selected);
+    for (const k of ks) {
+      if (on) next.add(k);
+      else next.delete(k);
+    }
+    selection.onChange(next);
+  };
+  const columns: ReadonlyArray<Column<T> & { headerNode?: ReactNode }> =
+    selection === undefined
+      ? rawColumns
+      : [
+          {
+            key: "__select",
+            header: "选择",
+            headerNode: (
+              <input
+                type="checkbox"
+                aria-label="全选本页"
+                checked={allOnPage}
+                onChange={(e) => toggle(keys, e.target.checked)}
+                className="h-4 w-4 align-middle"
+              />
+            ),
+            render: (row: T) => {
+              const k = rowKey(row);
+              return (
+                <input
+                  type="checkbox"
+                  aria-label={`选择 ${selection.rowLabel(k)}`}
+                  checked={selection.selected.has(k)}
+                  onChange={(e) => toggle([k], e.target.checked)}
+                  className="h-4 w-4 align-middle"
+                />
+              );
+            },
+          },
+          ...rawColumns,
+        ];
   return (
     <TableScroll label={label}>
       {/* border-separate + 单元格边框：border-collapse 下 sticky 表头的边框会留在原地
@@ -91,15 +145,16 @@ function TableBody<T>({
       <table className="w-full min-w-max border-separate border-spacing-0 text-left">
         {/* 表头吸顶：实色底 + 下边框，不用阴影。 */}
         <thead>
-          <tr className="text-label-12 text-text-muted">
+          {/* 表头与数据行同高：`DataTable` 的整页固定高度按「表头 + PAGE_SIZE 行」算。 */}
+          <tr className="text-label-12 text-text-muted" style={{ height: `${ROW_HEIGHT}px` }}>
             {columns.map((col, i) => (
               <th
                 key={col.key}
                 scope="col"
-                className={`sticky top-0 z-10 border-b border-border-strong bg-surface py-2 pr-4 font-medium last:pr-3 ${i === 0 ? "pl-3" : ""}`}
+                className={`sticky top-0 z-10 border-b border-border-strong bg-surface pr-4 font-medium last:pr-3 ${i === 0 ? "pl-3" : ""}`}
                 {...numericAttr(col.numeric)}
               >
-                {col.header}
+                {"headerNode" in col && col.headerNode !== undefined ? col.headerNode : col.header}
               </th>
             ))}
           </tr>
@@ -145,7 +200,7 @@ function TableBody<T>({
   );
 }
 
-/** 不分页的小表（Clash 内核、用量聚合、概览 Worker）。 */
+/** 不分页的小表（用量聚合、网关拒绝明细）。 */
 export function SimpleTable<T>({
   label,
   rows,
@@ -186,13 +241,23 @@ export function DataTable<T>({
   empty,
   expandedRowKey,
   renderExpanded,
+  selection,
+  total,
 }: {
   label: string;
   rows: readonly T[];
   columns: ReadonlyArray<Column<T>>;
   rowKey: (row: T) => string;
+  /**
+   * 筛选前的总行数。传入后，只要总数多于一页，表格区就固定为一整页的高度、分页栏常在：
+   * 在「全部 / 可用 / 已拒绝」之间切换时行数变了，页面高度不跟着跳，筛选控件不被挤走。
+   * 总数本来就不满一页时按实际行数显示，不留大块空白。
+   */
+  total?: number;
   /** 行状态 —— 用 3px 左边框实色表达，不用背景色块（见 `RowMark`）。 */
   rowTone?: (row: T) => Tone | null;
+  /** 传入即启用多选列。 */
+  selection?: Selection;
   page: number;
   onPageChange: (page: number) => void;
   empty: ReactNode;
@@ -211,24 +276,35 @@ export function DataTable<T>({
   const current = Math.min(Math.max(1, page), totalPages);
   const slice = rows.slice((current - 1) * PAGE_SIZE, current * PAGE_SIZE);
 
+  const fixed = total !== undefined && total > PAGE_SIZE;
+  // 表头与每行同高（ROW_HEIGHT），一页固定为「表头 + PAGE_SIZE 行」。
+  const pageHeight = fixed ? { minHeight: `${(PAGE_SIZE + 1) * ROW_HEIGHT}px` } : undefined;
+
   if (rows.length === 0) {
-    return <div className="rounded-md bg-surface-accent px-4 py-6 text-center">{empty}</div>;
+    return (
+      <div style={pageHeight} className="flex flex-col justify-center rounded-md bg-surface-accent px-4 py-6 text-center">
+        {empty}
+      </div>
+    );
   }
 
   return (
     <div>
-      <TableBody
-        label={label}
-        rows={slice}
-        columns={columns}
-        rowKey={rowKey}
-        rowTone={rowTone}
-        rowAttr="data-row"
-        expandedRowKey={expandedRowKey}
-        renderExpanded={renderExpanded}
-      />
+      <div style={pageHeight}>
+        <TableBody
+          label={label}
+          rows={slice}
+          columns={columns}
+          rowKey={rowKey}
+          rowTone={rowTone}
+          rowAttr="data-row"
+          expandedRowKey={expandedRowKey}
+          renderExpanded={renderExpanded}
+          selection={selection}
+        />
+      </div>
 
-      {totalPages > 1 && (
+      {(totalPages > 1 || fixed) && (
         <div className="mt-3 flex flex-wrap items-center justify-between gap-2 text-text-muted">
           <span>
             第 {(current - 1) * PAGE_SIZE + 1}–{Math.min(current * PAGE_SIZE, rows.length)} 条，
@@ -362,5 +438,56 @@ export function TableSkeleton({ columns, rows = 6 }: { columns: readonly string[
         </div>
       ))}
     </div>
+  );
+}
+
+/**
+ * 选中若干行后出现在表格上方的批量操作条。「已选 N」+ 操作 + 取消选择；
+ * 没有选中时不渲染，工具栏回到筛选。
+ */
+export function BulkBar({ count, onClear, children }: { count: number; onClear: () => void; children: ReactNode }) {
+  if (count === 0) return null;
+  return (
+    <div
+      role="toolbar"
+      aria-label="批量操作"
+      className="mb-3 flex flex-wrap items-center gap-2 rounded-md border border-border-strong bg-surface-hover px-3 py-2"
+    >
+      <span className="font-medium">已选 {count} 项</span>
+      <span className="flex flex-wrap gap-2">{children}</span>
+      <span className="ml-auto">
+        <SecondaryButton compact onClick={onClear}>
+          取消选择
+        </SecondaryButton>
+      </span>
+    </div>
+  );
+}
+
+/**
+ * 行内反馈（见 `lib/rowNotes.ts`）：图标 + 文字，可撤销时带「撤销」。放在行的状态列里，
+ * 替代那一行的常规状态显示；失败的原因太长时截断，全文在 title。
+ */
+export function RowNoteView({
+  note,
+  onUndo,
+  busy,
+}: {
+  note: { tone: "success" | "error"; text: string; undo?: unknown };
+  onUndo: () => void;
+  busy: boolean;
+}) {
+  return (
+    <span className="inline-flex items-center gap-2" data-row-note={note.tone}>
+      <span className={`inline-flex items-center gap-1.5 ${note.tone === "error" ? "text-error" : "text-success"}`}>
+        <span aria-hidden="true">{note.tone === "error" ? "✕" : "✓"}</span>
+        <Truncate text={note.text} maxWidth="16rem" />
+      </span>
+      {note.undo !== undefined && (
+        <SecondaryButton compact disabled={busy} onClick={onUndo}>
+          撤销
+        </SecondaryButton>
+      )}
+    </span>
   );
 }

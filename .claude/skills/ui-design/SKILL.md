@@ -11,7 +11,7 @@ paths:
 
 ## 硬规则（测试强制，改前先跑 `tests/design/contrast.test.ts`）
 
-- 每个前景 token × 每个表面 token ≥ 4.5:1，浅色深色都算；表面含 `surface-hover` / `surface-active`。新 token 必须归类进测试。
+- 每个前景 token × 每个表面 token ≥ 4.5:1，两套皮肤 × 浅色深色都算；表面含 `surface-hover` / `surface-active`。新 token 必须归类进测试。
 - 内容层（卡片、表格、表单、对话框正文）实色，层次只靠表面色调 + 1px 边框；阴影只有 `shadow-float`（对话框）与 `shadow-thumb`（分段滑块），源码扫描会拦其他阴影、`/NN` 透明色与字面色值。
 - 毛玻璃只在导航层：侧栏 `zg-glass`、窄屏顶栏 `zg-glass-thick`、对话框遮罩 `zg-scrim`（只允许 Shell 与两个对话框使用）。透明度写在 `--zg-*-alpha`，测试按最坏背景算合成对比度；减少透明度 / 提高对比度时退回实色。
 - 禁用态换实色（`disabled:bg-border-strong` 等），不用 `disabled:opacity-*`（源码扫描会拦）。
@@ -30,7 +30,7 @@ paths:
 ## 颜色与主题
 
 - 所有颜色来自 `tokens.css` 的 `--zg-*` 字面量十六进制；`@theme` 只用 `var(--zg-*)`。
-- 深色主题由 `<html data-theme>` 控制；`index.html` 首屏脚本与 `theme.ts` 的 `resolveTheme` 必须同步（`theme.test.tsx` 比对）。
+- 深色由 `<html data-theme>`、暖米白皮肤由 `data-skin="warm"` 控制（皮肤只换色板）；`index.html` 首屏脚本与 `theme.ts` 必须同步（`theme.test.tsx` 比对）。
 - 悬停 `surface-hover`，按下 `surface-active`，主按钮悬停 `accent-fill-hover`；过渡只动颜色，时长走 `--default-transition-duration`（120ms），减弱动效时全局归零。
 
 ## 密度与布局
@@ -47,29 +47,29 @@ paths:
 
 - `Panel`：页面内的一块内容，标题 + 可选操作；`Metric`：面板顶部 2–4 个关键数字。
 - `StaleBanner` / `FallbackView`（`StatusViews.tsx`）：断连横幅与首次加载三态。
-- `ClashImportFlow`（快速开始与代理池共用）、`OpenCodeConfigCard`（快速开始与网关页共用）：同一流程只有一个组件。
+- `ClashImportFlow`（快速开始与出口页共用）、`OpenCodeConfigCard`（快速开始与客户端接入页共用）：同一流程只有一个组件。
 - `SecretField`：已保存凭证的三态编辑（留空不改 / 设置新值 / 清空），必填凭证 `allowClear={false}`。
 - `WorkerEditor`、`BulkImportDialog`：Worker 新增编辑与从 Clash 节点批量导入（一次 `workers.create`）。
 - `PrimaryButton` / `SecondaryButton`（`danger`、`compact`）：唯一主操作 / 其余操作。
 - `FilterChip` / `segmentClass` + `SEGMENTED_TRACK`：分段控件，筛选与时间范围用 `aria-pressed`，页内标签用 tablist；选中段是实色滑块 + 加粗。
 - `FIELD` / `TEXTAREA`（`lib/styles.ts`）：输入框、下拉框、文本域的唯一类名。
-- `DataTable`：分页 + 行内展开；`SimpleTable`：不分页小表；`TableFilters`：搜索 + 状态筛选。
-- `TableSkeleton` / `Skeleton`：首次加载占位。
-- `Truncate`：任何需要截断的文字（自动带 `title`）。
+- `DataTable`：分页 + 行内展开，带筛选的表传 `total`（总数多于一页时固定一整页高度，切筛选不跳）；`SimpleTable`：不分页小表；`TableFilters`：搜索 + 状态筛选。
+- `TableSkeleton` / `Skeleton`：首次加载占位；`Truncate`：任何需要截断的文字（自动带 `title`）。
 - `Mono`：id、IP、端口、指纹、模型名；`Strong`：句内强调。状态与反馈组件见下文。
 
 ## 表格规则
 
 - 全部包在 `TableScroll` 里：横向在内部滚，纵向限高，表头 `sticky top-0` 实色底 + 下边框。
 - 表格用 `border-separate` + 单元格边框（collapse 下吸顶表头的边框不跟着走）。
-- 数字列 `numeric`（右对齐、等宽数字）；行悬停变 `surface-hover`，行不是点击目标；页码夹回范围；出口隔离视图不分页。
+- 数字列 `numeric`（右对齐、等宽数字）；行悬停变 `surface-hover`，行不是点击目标；页码夹回范围；列表表（含 Clash 内核表）都用 `DataTable` 分页。
 - 空单元格写词（「未引用」「无响应」「本机直连」「未探测」）；「—」只用于指标或比值「还没有数据」。
 
 ## 反馈选用
 
-- 不用 toast。表单结果用 `FormStatus`，紧贴触发它的按钮；行内编辑的失败留在编辑器里。
+- 不用 toast。表单结果用 `FormStatus`，紧贴触发它的按钮；行操作结果与撤销用 `useRowNotes` + `RowNoteView` 留在那一行；次要行操作进 `RowMenu`（原生 popover）。
+- 规则类说明放 `Panel` / `PageHeader` 的 `hint`（`HintTip`：悬停、聚焦、点击都能打开），不占正文；操作前必须看到的（错误、空状态下一步、确认后果、安全警告）仍写在页面上。
 - 页面级（与网关断连）用 `StaleBanner`；对话框内的错误留在对话框。
-- 自明的状态变化（切标签、展开、筛选）不提示成功；复制等无可见结果的操作才短暂改按钮文字。
+- 自明的状态变化（切标签、展开、筛选）不提示成功；复制等无可见结果的操作才短暂改按钮文字；复制一律走 `lib/clipboard.ts`（局域网 http 非安全上下文退回 `execCommand`）。
 - 破坏性或改全局状态的操作先 `ConfirmDialog`，焦点落在「取消」。
 
 ## 状态分开报

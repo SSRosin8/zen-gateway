@@ -18,7 +18,7 @@
 
 @custom-variant dark (&:where([data-theme="dark"], [data-theme="dark"] *));
 
-/* ---- 浅色（默认） ---------------------------------------------------- */
+/* ---- 默认皮肤「冷灰蓝」· 浅色 --------------------------------------------- */
 :root {
   /* 页面底色与背景色场（body 上的三层径向渐变，毛玻璃后面看得到的就是它们）。 */
   --zg-bg: #eceef3;
@@ -57,9 +57,18 @@
   --zg-glass-alpha: 72%;
   --zg-glass-thick-alpha: 92%;
   --zg-scrim-alpha: 30%;
+  /* 图表系列色：固定顺序，只做标记（线、柱、图例色块），不做文字。已用 dataviz 校验脚本验过 CVD 与区分度。 */
+  --zg-series-1: #2a78d6;
+  --zg-series-2: #eb6834;
+  --zg-series-3: #1baf7a;
+  --zg-series-4: #eda100;
+  --zg-series-5: #e87ba4;
+  --zg-series-6: #008300;
+  --zg-series-7: #4a3aa7;
+  --zg-series-8: #e34948;
 }
 
-/* ---- 深色 ------------------------------------------------------------- */
+/* ---- 默认皮肤 · 深色 ------------------------------------------------------ */
 [data-theme="dark"] {
   --zg-bg: #0f1013;
   --zg-backdrop-1: #141925;
@@ -90,6 +99,103 @@
   --zg-glass-alpha: 72%;
   --zg-glass-thick-alpha: 90%;
   --zg-scrim-alpha: 50%;
+  /* 图表系列色（深色）：同一组色相按深色表面重新取步。 */
+  --zg-series-1: #3987e5;
+  --zg-series-2: #d95926;
+  --zg-series-3: #199e70;
+  --zg-series-4: #c98500;
+  --zg-series-5: #d55181;
+  --zg-series-6: #008300;
+  --zg-series-7: #9085e9;
+  --zg-series-8: #e66767;
+}
+
+/* ---- 皮肤「暖米白」（改版前的 Anthropic 风配色） ------------------------
+ * 与默认皮肤同一套 token 名、同一套组件与毛玻璃，只换色值。`<html data-skin="warm">`
+ * 生效，与 data-theme 组合出四套；对比度测试对每一套都跑全部断言。
+ * 属性选择器叠在 :root 上，特异性高于默认块，声明顺序无关。
+ */
+:root[data-skin="warm"] {
+  --zg-bg: #faf9f5;
+  --zg-backdrop-1: #f3efe4;
+  --zg-backdrop-2: #f7ebe0;
+  --zg-surface: #f0eee6;
+  --zg-surface-accent: #f5e3c7;
+  --zg-surface-hover: #e9e6dc;
+  --zg-surface-active: #e4e0d4;
+  --zg-glass: #f5f3ec;
+
+  --zg-border: #e8e6dc;
+  --zg-border-strong: #d2cfc2;
+
+  --zg-text: #141413;
+  --zg-text-muted: #5c5a51;
+
+  --zg-accent-fill: #d97757;
+  --zg-accent-fill-hover: #cc6c4c;
+  --zg-on-accent-fill: #141413;
+  --zg-accent-fg: #ad3f14;
+
+  --zg-success: #3f6b30;
+  --zg-warn: #75580d;
+  --zg-error: #b3261e;
+  --zg-info: #2d5f9a;
+  --zg-scrim: #141413;
+
+  --zg-glass-alpha: 72%;
+  --zg-glass-thick-alpha: 92%;
+  --zg-scrim-alpha: 30%;
+  /* 图表系列色：固定顺序，只做标记（线、柱、图例色块），不做文字。已用 dataviz 校验脚本验过 CVD 与区分度。 */
+  --zg-series-1: #2a78d6;
+  --zg-series-2: #eb6834;
+  --zg-series-3: #1baf7a;
+  --zg-series-4: #eda100;
+  --zg-series-5: #e87ba4;
+  --zg-series-6: #008300;
+  --zg-series-7: #4a3aa7;
+  --zg-series-8: #e34948;
+}
+
+:root[data-skin="warm"][data-theme="dark"] {
+  --zg-bg: #141413;
+  --zg-backdrop-1: #1a1916;
+  --zg-backdrop-2: #1e1813;
+  --zg-surface: #1f1e1c;
+  --zg-surface-accent: #2a2621;
+  --zg-surface-hover: #2a2926;
+  --zg-surface-active: #312f2b;
+  --zg-glass: #1f1e1c;
+
+  --zg-border: #2e2d2a;
+  --zg-border-strong: #454339;
+
+  --zg-text: #e8e6dc;
+  --zg-text-muted: #a8a69c;
+
+  --zg-accent-fill: #d97757;
+  --zg-accent-fill-hover: #e38a6b;
+  --zg-on-accent-fill: #141413;
+  --zg-accent-fg: #e8956f;
+
+  --zg-success: #9dbd78;
+  --zg-warn: #e0b84a;
+  --zg-error: #e8796b;
+  --zg-info: #8fb8e0;
+  --zg-scrim: #000000;
+
+  --zg-glass-alpha: 72%;
+  /* 90% 时暖深色顶栏的最坏合成值正好 4.50，没有余量；93% 为 4.91。 */
+  --zg-glass-thick-alpha: 93%;
+  --zg-scrim-alpha: 50%;
+  /* 图表系列色（深色）：同一组色相按深色表面重新取步。 */
+  --zg-series-1: #3987e5;
+  --zg-series-2: #d95926;
+  --zg-series-3: #199e70;
+  --zg-series-4: #c98500;
+  --zg-series-5: #d55181;
+  --zg-series-6: #008300;
+  --zg-series-7: #9085e9;
+  --zg-series-8: #e66767;
 }
 
 @theme {
@@ -118,6 +224,14 @@
   --color-warn: var(--zg-warn);
   --color-error: var(--zg-error);
   --color-info: var(--zg-info);
+  --color-series-1: var(--zg-series-1);
+  --color-series-2: var(--zg-series-2);
+  --color-series-3: var(--zg-series-3);
+  --color-series-4: var(--zg-series-4);
+  --color-series-5: var(--zg-series-5);
+  --color-series-6: var(--zg-series-6);
+  --color-series-7: var(--zg-series-7);
+  --color-series-8: var(--zg-series-8);
 
   /* Instrument Serif 的 CJK 覆盖为零，而本项目文案只有中文 ——
      标题归 sans，衬线只用在纯拉丁的地方：指标数字与 wordmark。

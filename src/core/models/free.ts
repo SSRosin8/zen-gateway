@@ -55,13 +55,3 @@ export function judgeFree(
   if (!catalog.ids.has(modelId)) return { free: false, reason: "retired" };
   return { free: true, reason: basis };
 }
-
-/**
- * 该模型在本网关上支持的协议面（覆写表回落到默认）。
- * 只供 `admin/project.ts` 展示，不要接成闸门：默认 `["chat", "responses"]` 会让所有
- * `/v1/messages` 请求被拒，而上游并不按模型区分面（理由见 `schema.ts` 的 `defaultSurfaces`）。
- * 真正的面能力闸门是 `ProtocolSurface.streaming`。
- */
-export function surfacesFor(modelId: string, rules: ModelRules): readonly string[] {
-  return rules.surfaceOverrides[modelId] ?? rules.defaultSurfaces;
-}

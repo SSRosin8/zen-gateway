@@ -1,5 +1,5 @@
-import { WORKER_CREATE_MAX, WorkerCreateSchema, type WorkerCreate } from "../../shared/contract.ts";
-import type { WorkerKind } from "../../shared/schema.ts";
+import { WORKER_CREATE_MAX, WorkerCreateSchema, type WorkerCreate } from "./contract.ts";
+import type { WorkerKind } from "./schema.ts";
 
 /**
  * 新建 Worker 的 id / 名称建议与校验。
@@ -86,4 +86,23 @@ export function bulkAnonymousWorkers(
     proxyId: node.id,
     enabled: true,
   }));
+}
+
+/**
+ * 按回显 IP 去重：已被占用的 IP（在用 Worker 的出口）与排在前面的候选都算占用，每个 IP
+ * 只保留第一个未被占用的候选。IP 未知（null）的不算重复：还不知道。返回出口重复的候选 id。
+ * 后台的批量导入对话框与批测后自动新建 Worker 共用这一条规则。
+ */
+export function duplicateEgressIds(
+  takenIps: Iterable<string>,
+  candidates: ReadonlyArray<{ id: string; egressIp: string | null }>,
+): Set<string> {
+  const taken = new Set(takenIps);
+  const out = new Set<string>();
+  for (const c of candidates) {
+    if (c.egressIp === null) continue;
+    if (taken.has(c.egressIp)) out.add(c.id);
+    else taken.add(c.egressIp);
+  }
+  return out;
 }

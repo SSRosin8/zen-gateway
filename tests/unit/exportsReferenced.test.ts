@@ -10,7 +10,7 @@ import { join } from "node:path";
  * 另一种做法是**在源码里手写标注**「本方法当前没有生产调用点」。
  * 这种方式本身不成立：
  *
- * - 标注会漂：`catalog.status()` 与 `free.surfacesFor()` 接上调用点后，
+ * - 标注会漂：`catalog.status()` 等成员接上调用点后，
  *   标注还在说没有调用点 —— 其中一处还与 `contract.ts` 里的说法
  *   直接矛盾（同一事实两份副本）；
  * - 反方向也错：文档写"六个"，实际约三十个。
@@ -58,12 +58,12 @@ const ALLOWED_UNREFERENCED: ReadonlyMap<string, string> = new Map([
 
 type ExportedMember = { file: string; name: string; line: number };
 
-function walk(dir: string): string[] {
+function walk(dir: string, exts: readonly string[] = [".ts"]): string[] {
   const out: string[] = [];
   for (const entry of readdirSync(join(ROOT, dir), { withFileTypes: true })) {
     const rel = `${dir}/${entry.name}`;
-    if (entry.isDirectory()) out.push(...walk(rel));
-    else if (entry.name.endsWith(".ts") && !entry.name.endsWith(".d.ts")) out.push(rel);
+    if (entry.isDirectory()) out.push(...walk(rel, exts));
+    else if (exts.some((e) => entry.name.endsWith(e)) && !entry.name.endsWith(".d.ts")) out.push(rel);
   }
   return out;
 }
@@ -96,11 +96,13 @@ function exportsOf(file: string): ExportedMember[] {
 const SELF = "tests/unit/exportsReferenced.test.ts";
 
 function allSourceFiles(): string[] {
-  return [...walk("src"), ...walk("tests"), ...walk("scripts")].filter((f) => f !== SELF);
+  // 引用方含 .tsx：`shared/` 里只被后台组件用到的导出，不能因为调用点是 .tsx 就算零引用。
+  const exts = [".ts", ".tsx", ".mjs"];
+  return [...walk("src", exts), ...walk("tests", exts), ...walk("scripts", exts)].filter((f) => f !== SELF);
 }
 
 describe("导出成员都有引用", () => {
-  const files = SCAN_DIRS.flatMap(walk);
+  const files = SCAN_DIRS.flatMap((d) => walk(d));
   const members = files.flatMap(exportsOf);
   const haystack = allSourceFiles().map((f) => ({ file: f, text: readFileSync(join(ROOT, f), "utf8") }));
 

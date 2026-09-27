@@ -1,14 +1,8 @@
-import { useState } from "react";
 import { DiagnosticsSchema, type DiagnosticLayer, type Diagnostics } from "../../shared/contract.ts";
-import { Mono, Panel, PrimaryButton, SecondaryButton, Strong } from "../components/Panel.tsx";
+import { PageHeader, Panel, SecondaryButton, SecondaryLink, Strong } from "../components/Panel.tsx";
 import { StatusIndicator, type StatusTone } from "../components/StatusIndicator.tsx";
-import { ConfirmDialog } from "../components/ConfirmDialog.tsx";
 import { FallbackView, StaleBanner } from "../components/StatusViews.tsx";
 import { useEndpoint } from "../lib/api.ts";
-import {
-  runDeepEgressTest,
-  useAction,
-} from "../lib/consoleApi.ts";
 
 /**
  * 诊断页 —— 服务进程内的分层检查（配置 → 存储 → Worker → Clash → 目录）。
@@ -16,8 +10,7 @@ import {
  * 能打开这一页说明服务层是通的，所以不再单列「服务」。网关停了的时候这一页
  * 打不开，那时用 `npm run doctor`。
  *
- * 深度出口测试会切换 Clash 分组的选中节点（进程外的全局状态），先确认；
- * 与批量探测互斥，服务端回 409 时在按钮旁说明原因。
+ * 出口实测不在这里做：它会切换 Clash 分组的选中节点，放在 Worker 页与出口页，与批量探测互斥。
  */
 const LAYER_STATUS: Record<DiagnosticLayer["status"], { tone: StatusTone; icon: string; label: string }> = {
   pass: { tone: "success", icon: "✓", label: "通过" },
@@ -41,7 +34,8 @@ export function DiagnosticsView({ data, refresh }: { data: Diagnostics; refresh:
   const firstFail = data.layers.find((l) => l.status === "fail") ?? null;
   return (
     <div className="space-y-4">
-      <Panel title="分层检查" action={<SecondaryButton onClick={refresh}>重新检查</SecondaryButton>}>
+      <PageHeader title="诊断" action={<SecondaryButton onClick={refresh}>重新检查</SecondaryButton>} />
+      <Panel title="分层检查">
         {data.layers.length === 0 ? (
           <StatusIndicator tone="warn" icon="!" label="服务端没有返回任何检查层" />
         ) : (
@@ -57,7 +51,7 @@ export function DiagnosticsView({ data, refresh }: { data: Diagnostics; refresh:
           ))}
         </ol>
       </Panel>
-      <DeepEgressPanel />
+      <EgressHint />
     </div>
   );
 }
@@ -85,85 +79,37 @@ function LayerItem({ layer }: { layer: DiagnosticLayer }) {
         <p className="mt-2 max-w-3xl">
           <Strong>下一步：</Strong>
           {layer.nextStep}
+          {LAYER_LINK[layer.id] !== undefined && layer.status !== "pass" && (
+            <a href={LAYER_LINK[layer.id]!.href} className="ml-2 text-accent-fg underline">
+              {LAYER_LINK[layer.id]!.label}
+            </a>
+          )}
         </p>
       )}
     </li>
   );
 }
 
-function DeepEgressPanel() {
-  const deep = useAction(runDeepEgressTest);
-  const [confirming, setConfirming] = useState(false);
-  const running = deep.state.status === "running";
+/**
+ * 各层「下一步」对应的页面。诊断只指路，不在这里重复一份操作：出口探测在 Worker 页，
+ * 目录与免费规则在模型页。
+ */
+const LAYER_LINK: Partial<Record<DiagnosticLayer["id"], { label: string; href: string }>> = {
+  workers: { label: "去 Worker 页", href: "#workers" },
+  clash: { label: "去出口页的 Clash 标签", href: "#proxy?tab=clash" },
+  catalog: { label: "去模型页", href: "#models" },
+};
+
+function EgressHint() {
   return (
     <Panel
-      title="深度出口测试"
-      action={
-        <PrimaryButton onClick={() => setConfirming(true)} disabled={running}>
-          {running ? "测试中…" : "深度出口测试"}
-        </PrimaryButton>
-      }
+      title="出口实测"
+      hint="Worker 页的「探测在用出口」逐个进行，结果标在每个 Worker 上，离开页面也不中断；出口页的批量探测覆盖出口池里全部已启用节点。"
     >
-      <p className="max-w-3xl text-text-muted">
-        对每个在用出口实测 IP 回显，结果写回配置并更新回显出口报告。回显服务可能与
-        Zen 命中不同规则，只证明该回显目标的出口。
-      </p>
-      <div aria-live="polite" className="mt-3">
-        {deep.state.status === "error" && (
-          <div role="alert">
-            <StatusIndicator
-              tone="error"
-              icon="✕"
-              label={
-                deep.state.httpStatus === 409
-                  ? `批量探测正在运行，占用着 Clash 分组；等它结束或在代理池页取消后再试。（${deep.state.message}）`
-                  : deep.state.message
-              }
-            />
-          </div>
-        )}
-        {deep.state.status === "done" && (
-          <div>
-            <StatusIndicator
-              tone={deep.state.data.results.every((r) => r.ok) ? "success" : "warn"}
-              icon={deep.state.data.results.every((r) => r.ok) ? "✓" : "!"}
-              label={`完成：${deep.state.data.results.filter((r) => r.ok).length}/${deep.state.data.results.length} 个出口成功${deep.state.data.changed ? "，已写回配置" : ""}`}
-            />
-            <ul className="mt-2 space-y-1">
-              {deep.state.data.results.map((r) => (
-                <li key={r.proxyId}>
-                  <Mono>{r.proxyId}</Mono>：
-                  {r.ok ? (
-                    <>
-                      <Mono>{r.egressIp}</Mono> · {r.latencyMs}ms
-                    </>
-                  ) : (
-                    <span className="text-error">
-                      {r.failureKind} —— {r.reason}
-                    </span>
-                  )}
-                </li>
-              ))}
-            </ul>
-          </div>
-        )}
+      <div className="flex flex-wrap gap-2">
+        <SecondaryLink href="#workers">去 Worker 页探测</SecondaryLink>
+        <SecondaryLink href="#proxy">去出口页批量探测</SecondaryLink>
       </div>
-      <ConfirmDialog
-        open={confirming}
-        title="开始深度出口测试"
-        confirmLabel="开始测试"
-        onCancel={() => setConfirming(false)}
-        onConfirm={() => {
-          setConfirming(false);
-          void deep.run();
-        }}
-      >
-        <p>
-          经 Clash 桥接的出口会逐个<Strong>切换 Clash 分组的选中节点</Strong>。那是 Clash 的全局状态：
-          测试期间本机其他走这个分组的流量也会跟着换出口，结束后不会自动切回。
-        </p>
-        <p>批量探测运行时不能开始。</p>
-      </ConfirmDialog>
     </Panel>
   );
 }

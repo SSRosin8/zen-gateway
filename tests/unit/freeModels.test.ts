@@ -1,9 +1,9 @@
 import { describe, expect, it } from "vitest";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
-import { judgeFree, surfacesFor } from "../../src/core/models/free.ts";
+import { judgeFree } from "../../src/core/models/free.ts";
 import { upstreamUrl } from "../../src/core/upstream/url.ts";
-import { ModelRulesSchema, type ProtocolId } from "../../src/shared/schema.ts";
+import { ModelRulesSchema } from "../../src/shared/schema.ts";
 
 const ROOT = new URL("../..", import.meta.url).pathname;
 
@@ -200,33 +200,18 @@ describe("免费模型判定", () => {
   });
 });
 
-describe("协议面覆写", () => {
-  it("无覆写时用默认集", () => {
-    expect(surfacesFor("x-free", defaults)).toEqual(defaults.defaultSurfaces);
-  });
-
-  it("有覆写时用覆写值", () => {
-    const r = rules({ surfaceOverrides: { "big-pickle": ["messages"] } });
-    expect(surfacesFor("big-pickle", r)).toEqual(["messages"]);
-  });
-
-  it("覆写不影响其他模型", () => {
-    const r = rules({ surfaceOverrides: { "big-pickle": ["messages"] } });
-    expect(surfacesFor("other-free", r)).toEqual(r.defaultSurfaces);
-  });
-
+describe("协议面只作展示", () => {
   /*
-   * 语义定案的关卡：`surfaces` 是**展示用的提示，不是放行闸门**。
+   * 语义定案的关卡：模型页的协议列（models.dev 声明 + 本机实测）是**展示，不是放行闸门**。
    *
-   * 定案依据是已有的测量（上游不按模型区分面）加一条后果（默认值
-   * `["chat","responses"]` 当闸门会拒掉所有 `/v1/messages`，而那个面是可用的）。
-   * 但"它没有被当闸门用"这个性质写在注释里必然漂 —— 下一个人看到
-   * `surfacesFor()` 就在手边，很自然会在转发路径上加一句"这个模型不支持这个面"。
+   * 声明来自第三方、可能落后于 Zen，实测只说明「用过」不说明「只能用」；接成闸门会拒掉
+   * 可用的请求。但"它没有被当闸门用"这个性质写在注释里必然漂 —— 下一个人看到声明缓存
+   * 就在手边，很自然会在转发路径上加一句"这个模型不支持这个面"。
    *
    * 所以守它的只能是调用点本身（纪律 #4）。转发路径 = 协议面实现与中继，
-   * 它们**不得**读这三个符号中的任何一个。
+   * 它们**不得**读这些符号中的任何一个。
    */
-  it("**转发路径不读 surfaces** —— 它是展示用的，接成闸门会拒掉可用的 /v1/messages", () => {
+  it("**转发路径不读协议声明与实测** —— 它们是展示用的，接成闸门会拒掉可用的请求", () => {
     const relayPaths = [
       "src/server/routes/relay.ts",
       "src/core/protocols/chat.ts",
@@ -234,7 +219,7 @@ describe("协议面覆写", () => {
       "src/core/protocols/messages.ts",
       "src/core/protocols/registry.ts",
     ];
-    const forbidden = ["surfacesFor", "defaultSurfaces", "surfaceOverrides"];
+    const forbidden = ["ProtocolDeclarations", "models/protocols", "modelProtocols", "protocolSource"];
 
     let scanned = 0;
     const offenders: string[] = [];
@@ -328,8 +313,6 @@ describe("免费判定：freeSuffix 空串的第二道防护", () => {
     return {
       freeSuffix,
       extraFreeIds: [],
-      defaultSurfaces: ["chat"] as ProtocolId[],
-      surfaceOverrides: {},
     };
   }
 

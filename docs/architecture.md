@@ -18,7 +18,7 @@ zen-gateway 是本机单用户 HTTP 网关。请求经过 Relay Token 鉴权、�
 - core/proxy：dispatcher 池、Clash Controller、selector 锁、出口探测、订阅解析和导入；clash/setupImport.ts 是 Controller 发现与合并（setup 与管理面共用），clash/diagnose.ts 是 Clash 层诊断（doctor 与管理面共用）。
 - server：启动装配、Hono 路由、Relay/loopback 守卫、配置补丁（patch.ts 与 patchSections.ts）、管理投影、批量探测执行、进程内诊断和 opencode.json 读写；routes/admin/ 下按功能拆分 clash、diagnostics、opencode 等管理路由。
 - store：配置读写、端口解析、SQLite 迁移、统计和亲和持久化。
-- admin：React/Vite 管理后台，构建产物由网关进程在独立端口伺服（server/adminSite.ts；设了局域网口令时监听 0.0.0.0），包括快速开始、概览、网关、代理池、Worker、模型、用量和诊断页。
+- admin：React/Vite 管理后台，构建产物由网关进程在独立端口伺服（server/adminSite.ts；设了局域网口令时监听 0.0.0.0），包括快速开始、概览、Worker、出口、客户端接入、网关、模型、用量和诊断页。
 
 shared 不能导入 node:*，因为它会被浏览器构建。Node 专属能力只放在 server、store 和运行时 core 模块。
 
@@ -72,7 +72,7 @@ tap 使用手写 ReadableStream 保持原字节和时序，使用流式 UTF-8 �
 
 ModelCatalog 为 keyed 和 keyless 保存最后成功目录。响应必须非空、结构正确并通过条目数和 8 MiB 体积上限；失败刷新不会抹掉旧缓存；刷新失败后的退避同时作用于 /v1/models 的 ensure 路径和转发路径的 refreshIfStale。转发路径通常只读缓存，判定为 `retired` 且缓存过期时会发起后台刷新，但不会等待它完成或把目录请求加入重试链。目录缺失时免费判定按配置规则放行并标记未核验；/v1/models 在从未成功取得目录时返回 502 upstream_unreachable，目录取得但免费集合为空时才返回成功空列表。
 
-defaultSurfaces 和 surfaceOverrides 只用于管理展示，不是放行闸门。放行能力由 ProtocolSurface.streaming 决定。
+模型页的协议列不是放行闸门，放行能力由 ProtocolSurface.streaming 决定。声明由 core/models/protocols.ts 的 ProtocolDeclarations 从 models.dev 拉取：只保留 `opencode` 下 id → AI SDK 包名映射出的协议，边读边限 32 MiB、20 秒超时、并发合流，成功缓存 6 小时，失败退避 5 分钟且保留旧缓存；启动后预热，/api/models 只读缓存并在过期时后台刷新。它不经 Worker 出口（不是发往 Zen 的请求，也不应占用 selector 锁），也不进入免费判定。实测来自 StatsStore.modelProtocols：upstream_attempts 中 2xx 的 (model, protocol)，默认近 30 天窗口。旧配置的 defaultSurfaces / surfaceOverrides 在 ConfigSchema 的 models 预处理里丢弃。
 
 WorkerPool 是唯一持有 Worker 运行状态的组件。启用认证 Worker 必须有 key；匿名 Worker 经 WorkerSchema 归一化为空 key，按免 key 请求发送。匿名请求是否被上游接受属于上游策略。
 
@@ -100,9 +100,9 @@ Clash 支持 manual 和 auto。转发路径由 pickBridge 按配置取内核、�
 
 补丁合并顺序为 gateway → routing → models → workers → clash → subscriptions → proxies：Worker 先改绑，之后再删除其原代理是合法的；删除内核或订阅连带删除其导入的代理，其中仍被引用的则整个请求失败。全部合并完成后再过一次全量 ConfigSchema。
 
-Clash 发现与导入和 setup 共用 setupImport.ts；导入经 applyConfig 热更新，合并基于发现完成后重读的配置。进程内诊断（server/admin/diagnostics.ts）与 doctor 共用 Worker 和 Clash 层实现，目录层走 /v1/models 同一条 ensureCatalog 路径并报告服务进程自身的 NODE_EXTRA_CA_CERTS；各层独立运行，不在首个失败处停止。深度诊断与 /api/probe 共用同一个探测与写回函数，都经 BatchProbeRunner.runExclusive 与批量探测共享同一把互斥锁，避免同时切换 selector；/api/probe 可用 proxyIds 只探指定出口，后台据此逐个探测以显示进度。
+Clash 发现与导入和 setup 共用 setupImport.ts；导入经 applyConfig 热更新，合并基于发现完成后重读的配置。进程内诊断（server/admin/diagnostics.ts）与 doctor 共用 Worker 和 Clash 层实现，目录层走 /v1/models 同一条 ensureCatalog 路径并报告服务进程自身的 NODE_EXTRA_CA_CERTS；各层独立运行，不在首个失败处停止。/api/probe 经 BatchProbeRunner.runExclusive 与批量探测共享同一把互斥锁，避免同时切换 selector；它可用 proxyIds 只探指定出口，后台据此逐个探测以显示进度。
 
-批量探测由 reducer、SQLite 状态和 BatchProbeRunner 组成，状态为 idle、screening、running、paused、cancelling、done；两段进度分开显示，同一时刻只允许一批运行，进程重启会收尾遗留任务。前端轮询以服务端状态为准，并用 generation 防止旧响应覆盖取消后的状态；轮询失败时保留上次数据并提示可能过期。
+批量探测由 reducer、SQLite 状态和 BatchProbeRunner 组成，状态为 idle、screening、running、paused、cancelling、done；范围是全部已启用节点加在用的本机直连（batchTargets）；两段进度分开显示，逐个节点的状态只保存在进程内存里（结果已写回配置，重启不需要恢复）；同一时刻只允许一批运行，进程重启会收尾遗留任务。createWorkers 为真时，结束后为可用、未被引用且回显 IP 不重复的节点一次写盘建匿名 Worker，命名与后台批量导入共用 shared/workerIds.ts。前端轮询以服务端状态为准，并用 generation 防止旧响应覆盖取消后的状态；轮询失败时保留上次数据并提示可能过期。
 
 订阅支持 Clash YAML/JSON、SIP008、分享链和多层 Base64。多 User-Agent 协商、纯函数解析和幂等合并共同构成刷新流程；节点 id 由订阅 id 和节点名派生，并保留启用状态与已测出口 IP。
 

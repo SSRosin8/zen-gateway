@@ -1,9 +1,9 @@
 import { useEffect, useId, useRef, useState, type ReactNode } from "react";
 import { Nav } from "./Nav.tsx";
-import { SidebarIcon, THEME_ICON } from "./Icons.tsx";
+import { SidebarIcon, SkinIcon, THEME_ICON } from "./Icons.tsx";
 import { Truncate } from "./Panel.tsx";
 import type { PageId } from "../lib/router.ts";
-import { SIDEBAR_KEY, THEME_OPTIONS, nextPreference, useTheme } from "../lib/theme.ts";
+import { SIDEBAR_KEY, SKIN_OPTIONS, THEME_OPTIONS, nextPreference, useSkin, useTheme } from "../lib/theme.ts";
 
 /**
  * 应用外壳：左侧栏 + 流式内容区。
@@ -122,6 +122,7 @@ export function Shell({
           }`}
         >
           <ThemeButton />
+          <SkinButton />
           <button
             type="button"
             onClick={() => setCollapsed(!collapsed)}
@@ -200,6 +201,19 @@ function ThemeButton() {
       className={iconButton}
     >
       {THEME_ICON[preference]}
+    </button>
+  );
+}
+
+/** 换皮肤：在冷灰蓝与暖米白之间切换。与配色按钮一样，名称说出当前值与下一步。 */
+function SkinButton() {
+  const { skin, setSkin } = useSkin();
+  const next = skin === "cool" ? "warm" : "cool";
+  const label = (v: typeof skin) => SKIN_OPTIONS.find((o) => o.value === v)?.label ?? v;
+  const text = `皮肤：${label(skin)}，点击切换为${label(next)}`;
+  return (
+    <button type="button" onClick={() => setSkin(next)} aria-label={text} title={text} data-skin-value={skin} className={iconButton}>
+      <SkinIcon />
     </button>
   );
 }
