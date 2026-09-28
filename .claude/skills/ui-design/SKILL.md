@@ -49,7 +49,7 @@ paths:
 - `StaleBanner` / `FallbackView`（`StatusViews.tsx`）：断连横幅与首次加载三态。
 - `ClashImportFlow`（快速开始与出口页共用）、`OpenCodeConfigCard`（快速开始与客户端接入页共用）：同一流程只有一个组件。
 - `SecretField`：已保存凭证的三态编辑（留空不改 / 设置新值 / 清空），必填凭证 `allowClear={false}`。
-- `WorkerEditor`、`BulkImportDialog`：Worker 新增编辑与从 Clash 节点批量导入（一次 `workers.create`）。
+- `WorkerEditor`、`BulkImportDialog`：Worker 新增编辑与从 Clash 节点批量导入（一次 `workers.create`）；`ProxyEditor`：手工直连代理的新增与连接编辑。
 - `PrimaryButton` / `SecondaryButton`（`danger`、`compact`）：唯一主操作 / 其余操作。
 - `FilterChip` / `segmentClass` + `SEGMENTED_TRACK`：分段控件，筛选与时间范围用 `aria-pressed`，页内标签用 tablist；选中段是实色滑块 + 加粗。
 - `FIELD` / `TEXTAREA`（`lib/styles.ts`）：输入框、下拉框、文本域的唯一类名。

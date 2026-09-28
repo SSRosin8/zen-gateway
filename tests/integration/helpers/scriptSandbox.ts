@@ -6,6 +6,7 @@ import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { promisify } from "node:util";
 import { ConfigSchema, CONFIG_VERSION, type Config } from "../../../src/shared/schema.ts";
+import { freePort } from "./freePort.ts";
 
 /*
  * setup 与 doctor 两个脚本的运行沙箱。
@@ -32,19 +33,12 @@ export let fakeClashPort: number;
 let fakeClash: Server | undefined;
 let strays: number[];
 
-/**
- * 为当前测试文件注册沙箱。
- *
- * `firstPort` 由调用方给出,各文件的段必须互不重叠 —— 测试文件并行运行,
- * 且要避开 service.test.ts 的 19876+ 段与真实服务。每个用例占两个端口。
- */
-export function useScriptSandbox(firstPort: number): void {
-  let nextPort = firstPort;
-
+/** 为当前测试文件注册沙箱。端口每个用例向系统现要（见 `freePort.ts`）。 */
+export function useScriptSandbox(): void {
   beforeEach(async () => {
     dataDir = await mkdtemp(join(tmpdir(), "zg-scripts-"));
-    port = nextPort++;
-    fakeClashPort = nextPort++;
+    port = await freePort();
+    fakeClashPort = await freePort();
     strays = [];
   });
 

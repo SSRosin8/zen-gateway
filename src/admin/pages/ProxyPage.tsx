@@ -10,7 +10,8 @@ import { useRowNotes } from "../lib/rowNotes.ts";
 import { FIELD } from "../lib/styles.ts";
 import { ConfirmDialog } from "../components/ConfirmDialog.tsx";
 import { parseHash, toHash, type ViewState } from "../lib/router.ts";
-import { useBatchProbe } from "../lib/api.ts";
+import { patchConfig, useBatchProbe } from "../lib/api.ts";
+import { ProxyEditor, isEditableProxy } from "../components/ProxyEditor.tsx";
 import { probeEgress } from "../lib/consoleApi.ts";
 import { SubscriptionTab } from "../components/SubscriptionTab.tsx";
 import { ClashSection } from "../components/ClashSection.tsx";
@@ -88,7 +89,9 @@ export function ProxyPage({
   const rows = useRowNotes(refresh);
   const [selected, setSelected] = useState<ReadonlySet<string>>(new Set());
   const [pendingDelete, setPendingDelete] = useState<readonly ProxyView[]>([]);
-  const [renaming, setRenaming] = useState<string | null>(null);
+  /** 行内展开的表单：改名（任意节点）或编辑连接信息（仅手工直连代理）。一次只开一个。 */
+  const [expanded, setExpanded] = useState<{ id: string; kind: "rename" | "edit" } | null>(null);
+  const [creating, setCreating] = useState(false);
   /** 正在单独探测的节点。一次只探一个：探测要切 selector，服务端也会拒绝并发。 */
   const [probing, setProbing] = useState<readonly string[]>([]);
   /** 上一批结束后又单独探测过的节点：它们的结果比那一批新，不再显示批测状态。 */
@@ -238,7 +241,10 @@ export function ProxyPage({
           <RowMenu
             label={`${p.name || p.id} 的更多操作`}
             items={[
-              { label: "改名", onSelect: () => setRenaming(p.id) },
+              ...(isEditableProxy(p)
+                ? [{ label: "编辑连接", onSelect: () => setExpanded({ id: p.id, kind: "edit" as const }) }]
+                : []),
+              { label: "改名", onSelect: () => setExpanded({ id: p.id, kind: "rename" }) },
               {
                 label: "删除",
                 danger: true,
@@ -281,7 +287,33 @@ export function ProxyPage({
         ) : tab === "clash" ? (
           <ClashSection clash={data.clash} refresh={() => refresh?.()} />
         ) : (
-          <Panel title={`节点（${filtered.length}/${data.proxies.length}）`} action={<BatchProbeBar control={batch} />}>
+          <Panel
+            title={`节点（${filtered.length}/${data.proxies.length}）`}
+            action={
+              <span className="flex flex-wrap items-center gap-2">
+                <SecondaryButton onClick={() => setCreating(true)} disabled={creating}>
+                  添加手工代理
+                </SecondaryButton>
+                <BatchProbeBar control={batch} />
+              </span>
+            }
+          >
+            {creating && (
+              <div className="mb-4 rounded-md border border-border p-4">
+                <ProxyEditor
+                  mode="create"
+                  existingIds={data.proxies.map((x) => x.id)}
+                  onCancel={() => setCreating(false)}
+                  onSave={async (patch) => {
+                    await patchConfig(patch);
+                    setCreating(false);
+                    const id = patch.proxies?.create?.[0]?.id;
+                    if (id !== undefined) rows.set([id], { tone: "success", text: "已添加，探测后可绑定到 Worker" });
+                    refresh?.();
+                  }}
+                />
+              </div>
+            )}
             <BulkBar count={chosen.length} onClear={() => setSelected(new Set())}>
               <SecondaryButton compact disabled={probing.length > 0 || batchActive} onClick={() => void probeMany(chosen.map((p) => p.id))}>
                 探测
@@ -322,24 +354,39 @@ export function ProxyPage({
               selection={{ selected, onChange: setSelected, rowLabel: nameOf }}
               page={view.page_}
               onPageChange={(next) => navigate({ page_: next })}
-              expandedRowKey={renaming}
-              renderExpanded={(p) => (
-                <RenameForm
-                  initial={p.name}
-                  onCancel={() => setRenaming(null)}
-                  onSave={async (name) => {
-                    const ok = await rows.apply([p.id], { proxies: { update: { [p.id]: { name } } } }, "已改名", {
-                      proxies: { update: { [p.id]: { name: p.name || p.id } } },
-                    });
-                    if (ok) setRenaming(null);
-                  }}
-                />
-              )}
+              expandedRowKey={expanded?.id ?? null}
+              renderExpanded={(p) =>
+                expanded?.kind === "edit" ? (
+                  <ProxyEditor
+                    mode="edit"
+                    proxy={p}
+                    existingIds={data.proxies.map((x) => x.id)}
+                    onCancel={() => setExpanded(null)}
+                    onSave={async (patch) => {
+                      await patchConfig(patch);
+                      setExpanded(null);
+                      rows.set([p.id], { tone: "success", text: "已保存，回显出口需重新探测" });
+                      refresh?.();
+                    }}
+                  />
+                ) : (
+                  <RenameForm
+                    initial={p.name}
+                    onCancel={() => setExpanded(null)}
+                    onSave={async (name) => {
+                      const ok = await rows.apply([p.id], { proxies: { update: { [p.id]: { name } } } }, "已改名", {
+                        proxies: { update: { [p.id]: { name: p.name || p.id } } },
+                      });
+                      if (ok) setExpanded(null);
+                    }}
+                  />
+                )
+              }
               empty={
                 data.proxies.length === 0 ? (
                   <>
                     <p className="text-heading-16 font-medium">还没有代理</p>
-                    <p className="mt-1 text-text-muted">从本机 Clash 导入节点，或添加订阅。</p>
+                    <p className="mt-1 text-text-muted">从本机 Clash 导入节点、添加订阅，或添加一个手工 HTTP / SOCKS 代理。</p>
                     <div className="mt-3 flex justify-center gap-2">
                       <SecondaryButton onClick={() => navigate({ tab: "clash" })}>导入 Clash 节点</SecondaryButton>
                       <SecondaryButton onClick={() => navigate({ tab: "subscriptions" })}>添加订阅</SecondaryButton>

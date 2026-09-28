@@ -171,8 +171,121 @@ describe("代理补丁", () => {
     expect((await patch(app, { proxies: { update: { ghost: { enabled: false } } } })).status).toBe(404);
   });
 
-  it("连接信息字段不开放", () => {
-    expect(ConfigPatchSchema.safeParse({ proxies: { update: { p1: { host: "203.0.113.9" } } } }).success).toBe(false);
+  it("导入的节点不能改连接信息，配置不变", async () => {
+    const { app, getConfig } = makeApp(makeConfig());
+    const before = getConfig();
+    const r = await patch(app, { proxies: { update: { p1: { host: "203.0.113.9" } } } });
+    expect(r.status).toBe(422);
+    expect(JSON.stringify(r.body)).toContain("不是手工直连代理");
+    expect(getConfig()).toBe(before);
+  });
+
+  it("只开放直连协议：桥接协议名在 schema 层就拒绝", () => {
+    expect(ConfigPatchSchema.safeParse({ proxies: { create: [{ id: "m1", name: "x", type: "vless", host: "h", port: 1 }] } }).success).toBe(false);
+    expect(ConfigPatchSchema.safeParse({ proxies: { update: { m1: { type: "anytls" } } } }).success).toBe(false);
+  });
+});
+
+describe("手工代理的新增与编辑", () => {
+  const PASS = "proxy-pass-must-not-leak";
+
+  async function withManual() {
+    const fx = makeApp(makeConfig());
+    const r = await patch(fx.app, {
+      proxies: { create: [{ id: "m1", name: "手工", type: "socks5", host: "203.0.113.9", port: 1080, username: "u", password: PASS }] },
+    });
+    expect(r.status).toBe(200);
+    return fx;
+  }
+
+  it("新建的是手工直连代理，未探测，口令不回显", async () => {
+    const { app, getConfig } = await withManual();
+    expect(getConfig().proxies.find((p) => p.id === "m1")).toMatchObject({
+      source: "manual",
+      direct: true,
+      bridgeable: false,
+      egressIp: null,
+      username: "u",
+      password: PASS,
+    });
+    const list = await get(app, "/api/proxies");
+    const view = (list.body as { proxies: Array<{ id: string; username: string | null; password: { present: boolean } }> }).proxies.find((p) => p.id === "m1")!;
+    expect(view.username).toBe("u");
+    expect(view.password.present).toBe(true);
+    expect(JSON.stringify(list.body)).not.toContain(PASS);
+  });
+
+  it("id 重复拒绝整个请求", async () => {
+    const { app, getConfig } = await withManual();
+    const r = await patch(app, { proxies: { create: [{ id: "p1", name: "撞名", type: "http", host: "h.invalid", port: 8080 }] } });
+    expect(r.status).toBe(422);
+    expect(getConfig().proxies.filter((p) => p.id === "p1")).toHaveLength(1);
+  });
+
+  it("改连接信息清掉实测 IP；只改名不清", async () => {
+    const { app, getConfig } = await withManual();
+    // 先模拟一次探测写回。
+    const probed = structuredClone(getConfig());
+    probed.proxies.find((p) => p.id === "m1")!.egressIp = "198.51.100.7";
+    const fx = makeApp(probed);
+
+    await patch(fx.app, { proxies: { update: { m1: { name: "改名" } } } });
+    expect(fx.getConfig().proxies.find((p) => p.id === "m1")!.egressIp).toBe("198.51.100.7");
+
+    // 值与当前相同不算换出口。
+    await patch(fx.app, { proxies: { update: { m1: { port: 1080 } } } });
+    expect(fx.getConfig().proxies.find((p) => p.id === "m1")!.egressIp).toBe("198.51.100.7");
+
+    await patch(fx.app, { proxies: { update: { m1: { port: 1081 } } } });
+    const m1 = fx.getConfig().proxies.find((p) => p.id === "m1")!;
+    expect(m1.port).toBe(1081);
+    expect(m1.egressIp).toBeNull();
+    // 没提到的凭证不动。
+    expect(m1.password).toBe(PASS);
+    void app;
+  });
+
+  it("换口令也算换出口身份；口令与用户名可以清空", async () => {
+    const { app, getConfig } = await withManual();
+    const probed = structuredClone(getConfig());
+    probed.proxies.find((p) => p.id === "m1")!.egressIp = "198.51.100.7";
+    const fx = makeApp(probed);
+
+    await patch(fx.app, { proxies: { update: { m1: { password: { set: "another-pass-xyz" } } } } });
+    expect(fx.getConfig().proxies.find((p) => p.id === "m1")).toMatchObject({ password: "another-pass-xyz", egressIp: null });
+
+    await patch(fx.app, { proxies: { update: { m1: { username: "", password: { clear: true } } } } });
+    const m1 = fx.getConfig().proxies.find((p) => p.id === "m1")!;
+    expect(m1.username).toBeUndefined();
+    expect(m1.password).toBeUndefined();
+    void app;
+  });
+
+  it("非法主机按路径报错，不回显输入", async () => {
+    const { app } = await withManual();
+    const r = await patch(app, { proxies: { update: { m1: { host: "bad host\r\nX: y" } } } });
+    expect(r.status).toBe(400);
+    expect(JSON.stringify(r.body)).not.toContain("bad host");
+  });
+});
+
+describe("gateway.port 补丁", () => {
+  it("写进配置，概览同时给出实际端口与配置端口", async () => {
+    const { app, getConfig } = makeApp(makeConfig());
+    const r = await patch(app, { gateway: { port: 20555 } });
+    expect(r.status).toBe(200);
+    expect(getConfig().gateway.port).toBe(20555);
+    const o = (await get(app, "/api/overview")).body as { gateway: { port: number; configuredPort: number } };
+    expect(o.gateway.configuredPort).toBe(20555);
+    // 监听端口不热切换：实际端口仍是进程启动时的那个。
+    expect(o.gateway.port).not.toBe(20555);
+  });
+
+  it("特权端口与越界值被拒绝", async () => {
+    const { app, getConfig } = makeApp(makeConfig());
+    expect((await patch(app, { gateway: { port: 80 } })).status).toBe(400);
+    expect((await patch(app, { gateway: { port: 70000 } })).status).toBe(400);
+    expect(getConfig().gateway.port).toBe(9999);
   });
 });
 

@@ -32,9 +32,9 @@ server/index.ts 先加载严格校验的 config.json，再尝试打开 SQLite，
 
 SIGTERM/SIGINT 触发优雅关闭：先停止 HTTP server 接收新连接，在有界时间内排空在途请求，再关闭出口连接池和数据库后退出；排空上限 5 秒（`SHUTDOWN_DRAIN_MS`），超时强制断开。
 
-PATCH /api/config 先原子写盘再替换进程内配置。并发写入串行化，并可用 expected 引用检测过期快照。配置变化会重置 Controller、dispatcher 和超时相关缓存，避免继续使用旧地址、旧凭证或旧连接。
+PATCH /api/config 先原子写盘再替换进程内配置。并发写入串行化，并可用 expected 引用检测过期快照。配置变化会重置 Controller、dispatcher 和超时相关缓存，避免继续使用旧地址、旧凭证或旧连接。例外是 gateway.port：只写盘，监听端口在 npm run restart 后才换；启停脚本与 doctor 按状态文件（zen-gateway.state.json）记录的端口找到运行中的实例（scripts/lib/instance.mjs）。
 
-npm start 和 npm restart 先构建，再由 scripts/service.mjs 管理服务。服务端提供 /health、/v1/*、协议无前缀别名和 /api/*，不伺服页面；管理后台由独立 Vite 开发服务器提供，Vite 只代理 /health 和 /api。运行方式见 [usage.md](usage.md#安装和运行)。
+npm start 和 npm restart 先构建，再由 scripts/service.mjs 管理服务。网关端口提供 /health、/v1/*、协议无前缀别名和 /api/*，不伺服页面；同一进程在独立的后台端口伺服 dist/admin，只把 /health 和 /api 交给网关。npm run dev 是开发用 Vite，同样只代理 /health 和 /api。运行方式见 [usage.md](usage.md#安装和运行)。
 
 ## 协议面与转发链
 
@@ -84,7 +84,7 @@ EgressService 统一管理 dispatcher、Clash Controller 和 selector 锁；转�
 
 - 直连 HTTP、HTTPS、SOCKS 使用支持 dispatch 的 undici 出口。
 - 桥接模式切换 selector 后经本地代理端口连接。
-- dispatcher 按代理 id 缓存，身份键包含桥接的 Clash 节点名（或直连的地址与口令摘要）和超时；身份变化即重建。节点名必须在键里，否则 keep-alive 复用会让出口停在旧节点。
+- dispatcher 按代理 id 缓存，身份键包含桥接的 Clash 节点名（或直连的协议、地址、用户名与口令摘要）和超时；身份变化即重建。节点名必须在键里，否则 keep-alive 复用会让出口停在旧节点。
 - Controller 缓存指纹含地址和凭证摘要，等长 secret 改变也会重建。
 - selector 切换和建连在同一把锁内，连接建立后即释放锁。
 

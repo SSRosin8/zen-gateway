@@ -164,6 +164,7 @@ function proxy(over: Partial<ProxyView> = {}): ProxyView {
     direct: false,
     bridgeable: true,
     egressIp: null,
+    username: null,
     password: { present: false, fingerprint: null },
     usedBy: [],
     resolvable: true,

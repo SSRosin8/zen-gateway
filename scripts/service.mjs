@@ -8,9 +8,10 @@
 
 import { spawn } from "node:child_process";
 import { existsSync, openSync } from "node:fs";
-import { chmod, mkdir, open, readFile, rm, stat, writeFile } from "node:fs/promises";
+import { chmod, mkdir, readFile, rm, stat, writeFile } from "node:fs/promises";
 import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
+import { atomicWriteFile } from "../src/store/atomicWrite.ts";
 import { resolveAdminPort, resolvePort } from "../src/store/port.ts";
 import { DIR_MODE, FILE_MODE } from "../src/store/paths.ts";
 import { createInstance, dataDirOf, pidRunsScript } from "./lib/instance.mjs";
@@ -45,7 +46,7 @@ try {
 /** 身份判定与 `doctor.mjs` 共用 `lib/instance.mjs`，避免两者结论矛盾。 */
 const instance = createInstance({ dataDir: DATA_DIR, port: PORT, entry: ENTRY });
 const { readState, pidAlive, probeHealth, inspect } = instance;
-const { stateFile: STATE_FILE, base: BASE } = instance;
+const STATE_FILE = instance.stateFile;
 
 const HEALTH_TIMEOUT_MS = 20_000;
 const HEALTH_INTERVAL_MS = 250;
@@ -101,9 +102,8 @@ async function lockHolder() {
 async function acquireLock() {
   for (let attempt = 0; attempt < 2; attempt += 1) {
     try {
-      const handle = await open(LOCK_FILE, "wx", FILE_MODE);
-      await handle.writeFile(`${process.pid}\n`, "utf8");
-      await handle.close();
+      // 先写临时文件再 link 落位：open("wx") 后、写入 pid 前的空锁会被并发 start 判成 garbage 抢走。
+      await atomicWriteFile(LOCK_FILE, `${process.pid}\n`, { exclusive: true });
       return { ok: true };
     } catch (err) {
       if (err?.code !== "EEXIST") {
@@ -184,7 +184,7 @@ const ADMIN_URL = ADMIN_PORT === 0 ? null : `http://127.0.0.1:${ADMIN_PORT}`;
 
 /** 启动成功后的一行提示：网关地址 + 后台地址。 */
 function started(pid) {
-  console.log(`zen-gateway 已启动(pid ${pid}) → ${BASE}`);
+  console.log(`zen-gateway 已启动(pid ${pid}) → ${instance.configuredBase}`);
   if (ADMIN_URL !== null) console.log(`管理后台 → ${ADMIN_URL}`);
 }
 
@@ -201,14 +201,15 @@ async function start() {
     const st = await inspect();
 
     if (st.identity === "ours" && st.healthy) {
-      console.log(`已在运行(pid ${st.state.pid}) → ${BASE}`);
+      console.log(`已在运行(pid ${st.state.pid}) → ${instance.base}`);
+      if (instance.port !== PORT) console.log(`配置的端口已改为 ${PORT},npm run restart 后生效。`);
       if (ADMIN_URL !== null) console.log(`管理后台 → ${ADMIN_URL}`);
       if (WANT_OPEN && ADMIN_URL !== null) openBrowser(ADMIN_URL);
       return 0;
     }
 
     if (st.foreignOnPort) {
-      console.error(`端口 ${PORT} 已被另一个进程占用(pid ${st.health.pid}),不是本脚本启动的。`);
+      console.error(`端口 ${instance.port} 已被另一个进程占用(pid ${st.health.pid}),不是本脚本启动的。`);
       console.error("先停掉它,否则两个实例会抢同一份 data/。");
       return 1;
     }
@@ -261,7 +262,8 @@ async function start() {
 
     const deadline = Date.now() + HEALTH_TIMEOUT_MS;
     while (Date.now() < deadline) {
-      const health = await probeHealth();
+      // 新进程监听当前解析的端口，而不是陈旧状态文件里的那个。
+      const health = await probeHealth(1000, PORT);
       if (health?.pid === child.pid) {
         started(child.pid);
         if (WANT_OPEN && ADMIN_URL !== null) openBrowser(ADMIN_URL);
@@ -289,7 +291,7 @@ async function stop() {
 
   if (st.state === null) {
     if (st.healthy) {
-      console.error(`端口 ${PORT} 上有实例(pid ${st.health.pid}),但不是本脚本启动的,未停止。`);
+      console.error(`端口 ${instance.port} 上有实例(pid ${st.health.pid}),但不是本脚本启动的,未停止。`);
       return 1;
     }
     console.log("未在运行");
@@ -336,12 +338,13 @@ async function status() {
 
   if (st.identity === "ours" && st.healthy) {
     console.log(
-      `运行中(pid ${st.state.pid}) · v${st.health.version} · 已运行 ${st.health.uptimeSeconds}s → ${BASE}`,
+      `运行中(pid ${st.state.pid}) · v${st.health.version} · 已运行 ${st.health.uptimeSeconds}s → ${instance.base}`,
     );
+    if (instance.port !== PORT) console.log(`配置的端口已改为 ${PORT},npm run restart 后生效。`);
     return 0;
   }
   if (st.foreignOnPort) {
-    console.log(`端口 ${PORT} 上有非本脚本启动的实例(pid ${st.health.pid})`);
+    console.log(`端口 ${instance.port} 上有非本脚本启动的实例(pid ${st.health.pid})`);
     return 1;
   }
   if (st.alive) {

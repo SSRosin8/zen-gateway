@@ -1,5 +1,5 @@
 import type { Config } from "../../shared/schema.ts";
-import { ClashBridgeSchema, SubscriptionSchema } from "../../shared/schema.ts";
+import { ClashBridgeSchema, ProxySchema, SubscriptionSchema } from "../../shared/schema.ts";
 import type { ConfigPatch, SecretPatch } from "../../shared/contract.ts";
 
 /**
@@ -90,15 +90,66 @@ export function applyClashPatch(
   return null;
 }
 
+/** 改了就意味着换了出口的字段；旧的 `egressIp` 不再属于它。 */
+const CONNECTION_FIELDS = ["type", "host", "port", "username", "password"] as const;
+
 export function applyProxiesPatch(
   next: Config,
   patch: NonNullable<ConfigPatch["proxies"]>,
 ): SectionFailure | null {
+  // 与 Worker 不同，不支持「删后同名新建」：下面的 delete 按 id 过滤，会把新建的一并删掉。
+  for (const spec of patch.create ?? []) {
+    if (next.proxies.some((x) => x.id === spec.id)) {
+      return { kind: "invalid_config", message: `代理 id 已存在:${spec.id}` };
+    }
+    const { username, ...rest } = spec;
+    next.proxies.push(
+      ProxySchema.parse({
+        ...rest,
+        ...(username !== undefined && username !== "" ? { username } : {}),
+        source: "manual",
+        direct: true,
+        bridgeable: false,
+        egressIp: null,
+      }),
+    );
+  }
+
   for (const [id, pp] of Object.entries(patch.update ?? {})) {
-    const proxy = next.proxies.find((x) => x.id === id);
-    if (proxy === undefined) return { kind: "not_found", message: `代理不存在:${id}` };
-    if (pp.enabled !== undefined) proxy.enabled = pp.enabled;
-    if (pp.name !== undefined) proxy.name = pp.name;
+    const index = next.proxies.findIndex((x) => x.id === id);
+    if (index === -1) return { kind: "not_found", message: `代理不存在:${id}` };
+    const current = next.proxies[index]!;
+    if (pp.enabled !== undefined) current.enabled = pp.enabled;
+    if (pp.name !== undefined) current.name = pp.name;
+
+    if (!CONNECTION_FIELDS.some((k) => pp[k] !== undefined)) continue;
+    // 导入的节点下次刷新会被覆盖；桥接节点的出口由 selector 节点名决定，改 host/端口没有意义。
+    if (current.source !== "manual" || !current.direct || current.bridgeable) {
+      return { kind: "invalid_config", message: `代理 ${id} 不是手工直连代理,连接信息由导入维护,不能在这里修改` };
+    }
+    const { username: _u, ...base } = current;
+    const username = pp.username ?? current.username ?? "";
+    const parsed = ProxySchema.safeParse({
+      ...base,
+      ...(pp.type !== undefined ? { type: pp.type } : {}),
+      ...(pp.host !== undefined ? { host: pp.host } : {}),
+      ...(pp.port !== undefined ? { port: pp.port } : {}),
+      ...(username !== "" ? { username } : {}),
+      password: applySecret(current.password ?? "", pp.password),
+    });
+    if (!parsed.success) {
+      // 只给路径与规则：值里可能有口令。
+      const where = parsed.error.issues.map((i) => i.path.map(String).join(".")).join(", ");
+      return { kind: "invalid_config", message: `代理 ${id} 的字段不合法:${where}` };
+    }
+    const { password, ...updated } = parsed.data;
+    const changed = CONNECTION_FIELDS.some((k) => (k === "password" ? (password ?? "") !== (current.password ?? "") : updated[k] !== current[k]));
+    next.proxies[index] = {
+      ...updated,
+      ...(password !== undefined && password !== "" ? { password } : {}),
+      // 出口换了，旧的实测 IP 会让隔离报告把它归到错误的组；置为未探测。
+      egressIp: changed ? null : current.egressIp,
+    };
   }
 
   if (patch.delete !== undefined) {

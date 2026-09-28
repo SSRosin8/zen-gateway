@@ -24,6 +24,8 @@ export function fakeOverview(overrides: Partial<Overview> = {}): Overview {
     health: { ok: true, version: "9.9.9", uptimeSeconds: 42, pid: 1234, storeWriteFailures: 0 },
     gateway: {
       port: 9877,
+      configuredPort: 9877,
+      portFromEnv: false,
       baseUrl: "https://example.invalid/zen/v1",
       relayToken: { present: true, fingerprint: "abcd1234" },
       maxAttempts: 3,

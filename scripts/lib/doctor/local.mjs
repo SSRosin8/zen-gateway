@@ -75,9 +75,9 @@ export async function layerService(ctx) {
     }
     return {
       status: "fail",
-      text: `端口 ${ctx.port} 被另一个进程占用(pid ${st.health.pid})`,
+      text: `端口 ${instance.port} 被另一个进程占用(pid ${st.health.pid})`,
       detail: "它能应答 /health,但既不是本脚本启动的实例,cmdline 也不像本项目。",
-      nextStep: `先停掉它,或把 gateway.port 改成一个空闲端口。\n查证:ss -ltnp | grep ${ctx.port}`,
+      nextStep: `先停掉它,或把 gateway.port 改成一个空闲端口。\n查证:ss -ltnp | grep ${instance.port}`,
     };
   }
 
@@ -115,6 +115,14 @@ export async function layerService(ctx) {
   }
   ctx.health = parsed.data;
 
+  if (instance.port !== ctx.port) {
+    return {
+      status: "warn",
+      text: `服务运行中(pid ${ctx.health.pid}),但配置的端口已改为 ${ctx.port}`,
+      detail: `当前监听 ${instance.base};客户端和 opencode.json 要等重启后才能改用新端口。`,
+      nextStep: "npm run restart",
+    };
+  }
   return {
     status: "pass",
     text: `服务运行中(pid ${ctx.health.pid})`,

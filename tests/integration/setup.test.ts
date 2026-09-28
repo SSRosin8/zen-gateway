@@ -21,7 +21,7 @@ import {
  */
 
 // 端口段见 useScriptSandbox 的说明。
-useScriptSandbox(20100);
+useScriptSandbox();
 
 /* ================================================================== *
  * setup:安全边界

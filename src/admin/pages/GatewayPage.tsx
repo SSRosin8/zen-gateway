@@ -1,9 +1,9 @@
 import type { Overview } from "../../shared/contract.ts";
 import { Mono, PageHeader, Panel } from "../components/Panel.tsx";
-import { RoutingSettingsForm, RuntimeSettingsForm } from "../components/GatewaySettingsForms.tsx";
+import { PortSettingsForm, RoutingSettingsForm, RuntimeSettingsForm } from "../components/GatewaySettingsForms.tsx";
 
 /**
- * 网关页 —— 网关自身：监听与上游、运行参数（尝试次数、超时）、调度与冷却。
+ * 网关页 —— 网关自身：监听（端口改动重启后生效）与上游、运行参数（尝试次数、超时）、调度与冷却。
  * 客户端连接要的 Relay Token 与 opencode.json 在客户端接入页。
  */
 
@@ -17,6 +17,9 @@ export function GatewayPage({ data, refresh }: { data: Overview; refresh?: () =>
           <dd>
             <Mono>127.0.0.1:{data.gateway.port}</Mono>
             <span className="ml-2 text-text-muted">仅回环，不对外监听</span>
+            {!data.gateway.portFromEnv && data.gateway.configuredPort !== data.gateway.port && (
+              <span className="ml-2 text-warn">配置已改为 {data.gateway.configuredPort}，重启后生效</span>
+            )}
           </dd>
           <dt className="text-text-muted">上游</dt>
           <dd>
@@ -28,6 +31,9 @@ export function GatewayPage({ data, refresh }: { data: Overview; refresh?: () =>
             <span className="ml-2 text-text-muted">pid {data.health.pid}</span>
           </dd>
         </dl>
+        <div className="mt-4 border-t border-border pt-4">
+          <PortSettingsForm data={data} refresh={refresh} />
+        </div>
       </Panel>
       <RuntimeSettingsForm data={data} refresh={refresh} />
       <RoutingSettingsForm data={data} refresh={refresh} />

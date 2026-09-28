@@ -158,7 +158,8 @@ export function makeApp(
         current = next;
         opts.onApply?.(next);
       },
-      effectivePort: () => current.gateway.port,
+      // 与生产一致：监听端口在启动时定下，之后改配置不跟着变。
+      effectivePort: () => config.gateway.port,
       runtimeWorkers: () => scheduler.runtimeWorkers(current, Date.now()),
       catalog,
       egress,

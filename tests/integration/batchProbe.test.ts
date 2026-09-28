@@ -55,7 +55,7 @@ afterEach(async () => {
 function makeConfig(): Config {
   return ConfigSchema.parse({
     version: CONFIG_VERSION,
-    gateway: { relayToken: "batch-test-relay-token-x", port: 19990 },
+    gateway: { relayToken: "batch-test-relay-token-x" },
     workers: [
       { id: "w1", kind: "authenticated", apiKey: KEY, proxyId: "p1" },
       { id: "w2", kind: "authenticated", apiKey: KEY, proxyId: "p2" },
@@ -304,7 +304,7 @@ describe("执行器", () => {
   it("没有可用 Worker 时 start 返回 false", () => {
     const config = ConfigSchema.parse({
       version: CONFIG_VERSION,
-      gateway: { relayToken: "batch-test-relay-token-x", port: 19991 },
+      gateway: { relayToken: "batch-test-relay-token-x" },
     });
     const { runner } = makeRunner(config);
     expect(runner.start()).toBe(false);
@@ -339,7 +339,7 @@ describe("执行器", () => {
      */
     const config = ConfigSchema.parse({
       version: CONFIG_VERSION,
-      gateway: { relayToken: "batch-test-relay-token-x", port: 19992 },
+      gateway: { relayToken: "batch-test-relay-token-x" },
       workers: [{ id: "ok", kind: "authenticated", apiKey: KEY, proxyId: "good" }],
       proxies: [
         { id: "good", name: "直连", type: "http", host: "127.0.0.1", port: echoPort, source: "manual", direct: true, bridgeable: false, egressIp: null },
@@ -384,7 +384,7 @@ describe("执行器", () => {
       const px = (id: string) => ({ id, name: `节点 ${id}`, type: "http" as const, host: "127.0.0.1", port: port2, source: "manual" as const, direct: true, bridgeable: false, egressIp: null });
       const config = ConfigSchema.parse({
         version: CONFIG_VERSION,
-        gateway: { relayToken: "batch-test-relay-token-x", port: 19993 },
+        gateway: { relayToken: "batch-test-relay-token-x" },
         workers: [{ id: "anon-1", kind: "anonymous", proxyId: "a" }],
         proxies: [px("a"), px("b"), px("c")],
         clash: { enabled: false, bridges: [] },
@@ -523,7 +523,7 @@ describe("批测结尾的暂停与取消", () => {
     const px = (id: string) => ({ id, name: `节点 ${id}`, type: "http" as const, host: "127.0.0.1", port: echoPort, source: "manual" as const, direct: true, bridgeable: false, egressIp: null });
     let current = ConfigSchema.parse({
       version: CONFIG_VERSION,
-      gateway: { relayToken: "batch-test-relay-token-x", port: 19994 },
+      gateway: { relayToken: "batch-test-relay-token-x" },
       proxies: [px("a"), px("b"), px("c")],
       clash: { enabled: false, bridges: [] },
     });
@@ -659,7 +659,7 @@ describe("批测前的内核锁定真的改变后续行为", () => {
   function bridgeConfig(activeBridgeId: string): Config {
     return ConfigSchema.parse({
       version: CONFIG_VERSION,
-      gateway: { relayToken: "batch-bridge-token-not-real", port: 19877 },
+      gateway: { relayToken: "batch-bridge-token-not-real" },
       workers: [{ id: "w1", kind: "authenticated", apiKey: KEY, proxyId: "p1" }],
       proxies: [
         {

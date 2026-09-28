@@ -49,6 +49,7 @@ function proxy(overrides: Partial<ProxyView> = {}): ProxyView {
     direct: false,
     bridgeable: true,
     egressIp: "198.51.100.1",
+    username: null,
     password: { present: false, fingerprint: null },
     usedBy: ["w1"],
     resolvable: true,
@@ -442,6 +443,8 @@ describe("网关页", () => {
     const data = fakeOverview({
       gateway: {
         port: 9877,
+        configuredPort: 9877,
+        portFromEnv: false,
         baseUrl: "https://example.invalid/zen/v1",
         relayToken: { present: true, fingerprint: "abcd1234" },
         maxAttempts: 3,
@@ -468,7 +471,7 @@ describe("网关页", () => {
 
   it("切换 OpenCode 1.x 后复制单数 provider 配置", async () => {
     const user = userEvent.setup();
-    render(<ClientPage data={fakeOverview({ gateway: { port: 9877, baseUrl: "https://example.invalid/zen/v1", relayToken: { present: true, fingerprint: "abcd1234" }, maxAttempts: 3, headersTimeoutMs: 60_000, bodyTimeoutMs: 300_000 } })} />);
+    render(<ClientPage data={fakeOverview({ gateway: { port: 9877, configuredPort: 9877, portFromEnv: false, baseUrl: "https://example.invalid/zen/v1", relayToken: { present: true, fingerprint: "abcd1234" }, maxAttempts: 3, headersTimeoutMs: 60_000, bodyTimeoutMs: 300_000 } })} />);
     await user.selectOptions(screen.getByRole("combobox", { name: "片段格式" }), "1");
     await user.click(screen.getByRole("button", { name: "复制" }));
     const copied = await navigator.clipboard.readText();
