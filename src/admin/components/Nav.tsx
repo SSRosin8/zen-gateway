@@ -22,14 +22,11 @@ import { PAGE_ICON } from "./Icons.tsx";
 export function Nav({
   current,
   badge,
-  onNavigate,
   collapsed = false,
 }: {
   current: PageId;
   /** 快速开始的进度文字，如「2/3」；null = 已完成，不显示。 */
   badge?: string | null;
-  /** 点击任一链接后调用（移动端用来收起抽屉）。 */
-  onNavigate?: () => void;
   /** 侧栏收起：只显示图标。 */
   collapsed?: boolean;
 }) {
@@ -54,8 +51,7 @@ export function Nav({
               <li key={page}>
                 <a
                   href={toHash({ ...parseHash(""), page })}
-                  onClick={onNavigate}
-                  /* 触摸目标 ≥44px。 */
+                  /* 命中区 ≥44px。 */
                   className={`group relative flex min-h-[44px] items-center gap-3 rounded-md no-underline transition-colors ${
                     collapsed ? "justify-center px-0" : "px-3"
                   } ${

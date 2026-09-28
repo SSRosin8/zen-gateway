@@ -118,6 +118,11 @@ export function WorkersPage({
   const chosen = data.workers.filter((w) => selected.has(w.id));
   const detail = view.detail === null ? null : (data.workers.find((w) => w.id === view.detail) ?? null);
 
+  /*
+   * 全是匿名 Worker 时「类型」恒为「匿名」、「API key」恒为「无需 key」，两列只重复第一列已有的信息，
+   * 还让表格更早出现横向滚动。按全部 Worker 判定而不是筛选结果，列不会因切筛选而跳动。
+   */
+  const hasAuthenticated = data.workers.some((w) => w.kind !== "anonymous");
   const columns: ReadonlyArray<Column<WorkerView>> = [
     {
       key: "id",
@@ -137,7 +142,7 @@ export function WorkersPage({
         </a>
       ),
     },
-    { key: "kind", header: "类型", render: (w) => <span>{workerKindLabel(w)}</span> },
+    ...(hasAuthenticated ? [{ key: "kind", header: "类型", render: (w: WorkerView) => <span>{workerKindLabel(w)}</span> }] : []),
     {
       key: "status",
       header: "状态",
@@ -160,21 +165,26 @@ export function WorkersPage({
       // 偶发还是持续：连续次数说明退避到第几级（`bad_request` 不计入）。
       render: (w) => <span className={w.consecutiveFails > 0 ? "text-warn" : "text-text-muted"}>{w.consecutiveFails}</span>,
     },
-    {
-      key: "key",
-      header: "API key",
-      render: (w) =>
-        w.kind === "anonymous" ? (
-          <span className="text-text-muted">无需 key</span>
-        ) : w.apiKey.present ? (
-          <Mono>{w.apiKey.fingerprint}</Mono>
-        ) : (
-          <span className="text-error">未配置</span>
-        ),
-    },
+    ...(hasAuthenticated
+      ? [
+          {
+            key: "key",
+            header: "API key",
+            render: (w: WorkerView) =>
+              w.kind === "anonymous" ? (
+                <span className="text-text-muted">无需 key</span>
+              ) : w.apiKey.present ? (
+                <Mono>{w.apiKey.fingerprint}</Mono>
+              ) : (
+                <span className="text-error">未配置</span>
+              ),
+          },
+        ]
+      : []),
     {
       key: "actions",
       header: "操作",
+      pinEnd: true,
       render: (w) => (
         <span className="flex gap-2">
           <SecondaryButton

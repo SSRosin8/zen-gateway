@@ -49,18 +49,22 @@
     text-align: right;
   }
 
+  /* 原生复选框与单选框默认是系统蓝，与主题的强调色不一致。 */
+  input[type="checkbox"],
+  input[type="radio"] {
+    accent-color: var(--zg-accent-fill);
+  }
+
   :focus-visible {
     outline: 2px solid var(--zg-accent-fg);
     outline-offset: 2px;
   }
 
   /*
-   * 毛玻璃材质。默认先写实色：不支持 backdrop-filter、要求减少透明度或提高对比度时就是实色。
-   * chrome 用于侧栏（背后只有固定的色场），thick 用于窄屏顶栏（内容会从它下面滚过，
-   * 所以更不透明）。
+   * 毛玻璃材质（侧栏，背后只有固定的色场）。默认先写实色：不支持 backdrop-filter、
+   * 要求减少透明度或提高对比度时就是实色。
    */
-  .zg-glass,
-  .zg-glass-thick {
+  .zg-glass {
     background-color: var(--zg-surface);
   }
 
@@ -69,12 +73,6 @@
       background-color: color-mix(in srgb, var(--zg-glass) var(--zg-glass-alpha), transparent);
       -webkit-backdrop-filter: blur(24px) saturate(1.5);
       backdrop-filter: blur(24px) saturate(1.5);
-    }
-
-    .zg-glass-thick {
-      background-color: color-mix(in srgb, var(--zg-glass) var(--zg-glass-thick-alpha), transparent);
-      -webkit-backdrop-filter: blur(20px) saturate(1.5);
-      backdrop-filter: blur(20px) saturate(1.5);
     }
   }
 
@@ -86,8 +84,7 @@
   }
 
   @media (prefers-reduced-transparency: reduce), (prefers-contrast: more), (forced-colors: active) {
-    .zg-glass,
-    .zg-glass-thick {
+    .zg-glass {
       background-color: var(--zg-surface);
       -webkit-backdrop-filter: none;
       backdrop-filter: none;

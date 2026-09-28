@@ -183,19 +183,13 @@ export function UsagePage({
         title="用量"
         status={data.sinceDay === null ? "全部历史" : `${data.sinceDay} 起（UTC 日）`}
         action={
-          <>
-            <div className={SEGMENTED_TRACK} role="group" aria-label="时间范围">
-              {USAGE_RANGES.map((opt) => (
-                <FilterChip key={opt.value} active={days === opt.value} onClick={() => onDays(opt.value)} label={opt.label} />
-              ))}
-            </div>
-            <SecondaryButton danger disabled={reset.state.status === "running"} onClick={() => setConfirming(true)}>
-              重置统计
-            </SecondaryButton>
-          </>
+          <div className={SEGMENTED_TRACK} role="group" aria-label="时间范围">
+            {USAGE_RANGES.map((opt) => (
+              <FilterChip key={opt.value} active={days === opt.value} onClick={() => onDays(opt.value)} label={opt.label} />
+            ))}
+          </div>
         }
       />
-      <FormStatus message={resetMessage} />
 
       <Panel title="总览">
         <div className="grid grid-cols-2 gap-6 sm:grid-cols-4">
@@ -298,6 +292,15 @@ export function UsagePage({
           </>
         )}
       </Panel>
+
+      {/* 清空全部统计放在页尾：破坏性操作不与高频的时间范围切换挨着，避免误点。 */}
+      <div className="flex flex-wrap items-center gap-3 border-t border-border pt-4">
+        <SecondaryButton danger disabled={reset.state.status === "running"} onClick={() => setConfirming(true)}>
+          重置统计
+        </SecondaryButton>
+        <span className="text-label-13 text-text-muted">清空全部用量，不只是当前时间范围。</span>
+        <FormStatus message={resetMessage} />
+      </div>
 
       <ConfirmDialog
         open={confirming}

@@ -7,7 +7,7 @@
  *      info 2.78 / mid-gray 2.11），下面的值是重算后的替代值，不是品牌原值。
  *   2. 内容层（卡片、表格、表单）只靠「表面色调 + 1px 边框」分层；阴影只有
  *      shadow-float（对话框）与 shadow-thumb（分段控件选中块）两种。
- *   3. 毛玻璃只用在导航层（侧栏、窄屏顶栏、对话框遮罩），经 index.css 的 .zg-glass-*；
+ *   3. 毛玻璃只用在导航层（侧栏、对话框遮罩），经 index.css 的 .zg-glass / .zg-scrim；
  *      合成后的对比度按最坏背景由测试计算。系统要求减少透明度或提高对比度时退回实色。
  *
  * 结构性 token（border / border-strong / *-fill / scrim）不承载文本，不参与规则 1，
@@ -55,7 +55,6 @@
 
   /* 透明度不是颜色 token：放在 --zg-*-alpha，测试单独读出来算合成色。 */
   --zg-glass-alpha: 72%;
-  --zg-glass-thick-alpha: 92%;
   --zg-scrim-alpha: 30%;
   /* 图表系列色：固定顺序，只做标记（线、柱、图例色块），不做文字。已用 dataviz 校验脚本验过 CVD 与区分度。 */
   --zg-series-1: #2a78d6;
@@ -97,7 +96,6 @@
   --zg-scrim: #000000;
 
   --zg-glass-alpha: 72%;
-  --zg-glass-thick-alpha: 90%;
   --zg-scrim-alpha: 50%;
   /* 图表系列色（深色）：同一组色相按深色表面重新取步。 */
   --zg-series-1: #3987e5;
@@ -143,7 +141,6 @@
   --zg-scrim: #141413;
 
   --zg-glass-alpha: 72%;
-  --zg-glass-thick-alpha: 92%;
   --zg-scrim-alpha: 30%;
   /* 图表系列色：固定顺序，只做标记（线、柱、图例色块），不做文字。已用 dataviz 校验脚本验过 CVD 与区分度。 */
   --zg-series-1: #2a78d6;
@@ -184,8 +181,6 @@
   --zg-scrim: #000000;
 
   --zg-glass-alpha: 72%;
-  /* 90% 时暖深色顶栏的最坏合成值正好 4.50，没有余量；93% 为 4.91。 */
-  --zg-glass-thick-alpha: 93%;
   --zg-scrim-alpha: 50%;
   /* 图表系列色（深色）：同一组色相按深色表面重新取步。 */
   --zg-series-1: #3987e5;

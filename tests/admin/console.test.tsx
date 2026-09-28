@@ -11,7 +11,7 @@ import type { FetchState } from "../../src/admin/lib/api.ts";
 import { fakeOverview } from "./App.test.tsx";
 
 /*
- * 控制台外壳与快速开始、诊断页：侧栏导航、窄屏抽屉、首启落点、步骤实时判据、
+ * 控制台外壳与快速开始、诊断页：侧栏导航、首启落点、步骤实时判据、
  * 诊断分层与 409。全部用语义查询表达。
  */
 
@@ -101,33 +101,6 @@ describe("侧栏导航", () => {
       </Shell>,
     );
     expect(screen.queryByLabelText(/首启进度/)).not.toBeInTheDocument();
-  });
-
-  it("窄屏菜单：按钮控制抽屉，打开后焦点进导航，Esc 关闭并还焦点，点导航项收起", async () => {
-    const user = userEvent.setup();
-    render(
-      <Shell current="overview" badge={null} version={null}>
-        <p />
-      </Shell>,
-    );
-    const toggle = screen.getByRole("button", { name: "菜单" });
-    expect(toggle).toHaveAttribute("aria-expanded", "false");
-    const drawer = document.getElementById(toggle.getAttribute("aria-controls")!)!;
-    expect(drawer).not.toBeNull();
-    expect(drawer.hasAttribute("data-open")).toBe(false);
-
-    await user.click(toggle);
-    expect(toggle).toHaveAttribute("aria-expanded", "true");
-    expect(drawer.hasAttribute("data-open")).toBe(true);
-    expect(within(drawer).getAllByRole("link")[0]).toHaveFocus();
-
-    await user.keyboard("{Escape}");
-    expect(toggle).toHaveAttribute("aria-expanded", "false");
-    expect(toggle).toHaveFocus();
-
-    await user.click(toggle);
-    await user.click(within(drawer).getByRole("link", { name: "诊断" }));
-    expect(toggle).toHaveAttribute("aria-expanded", "false");
   });
 
   it("配色按钮在侧栏里，且没有「配色」文字标签", () => {

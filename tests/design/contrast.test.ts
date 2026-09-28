@@ -363,10 +363,8 @@ describe("禁用态仍然可读", () => {
 /*
  * 毛玻璃合成后的对比度。
  *
- * 玻璃不是一个固定颜色：屏幕上的底色 = glass 按透明度叠在它背后的像素上。最坏情况按用途选：
- * - 侧栏（glass-alpha）是 sticky 的，背后只有固定的背景色场 → 用每个色标与 bg 合成。
- * - 窄屏顶栏（glass-thick-alpha）下面会滚过任意内容 → 模糊只会把像素往周围平均，
- *   所以最坏是某个最极端的颜色铺满：取全部前景色、accent-fill、border-strong 作背后像素。
+ * 玻璃不是一个固定颜色：屏幕上的底色 = glass 按透明度叠在它背后的像素上。
+ * 侧栏（glass-alpha）是 sticky 的，背后只有固定的背景色场 → 用每个色标与 bg 合成。
  * 悬停叠加用实色 surface-hover / surface-active，不参与合成。
  */
 describe("毛玻璃合成后仍 ≥4.5:1", () => {
@@ -377,8 +375,8 @@ describe("毛玻璃合成后仍 ≥4.5:1", () => {
     ["warm-dark", parseAlphaBlock(CSS, ':root[data-skin="warm"][data-theme="dark"]'), WARM_DARK],
   ];
 
-  it.each(ALPHAS)("%s：两种材质与遮罩的透明度都已声明", (_name, alphas) => {
-    expect(Object.keys(alphas).sort()).toEqual(["glass-alpha", "glass-thick-alpha", "scrim-alpha"]);
+  it.each(ALPHAS)("%s：侧栏玻璃与遮罩的透明度都已声明", (_name, alphas) => {
+    expect(Object.keys(alphas).sort()).toEqual(["glass-alpha", "scrim-alpha"]);
   });
 
   for (const [theme, alphas, tokens] of ALPHAS) {
@@ -392,27 +390,7 @@ describe("毛玻璃合成后仍 ≥4.5:1", () => {
         }
       }
     });
-
-    it(`${theme}：顶栏厚玻璃下滚过最极端的颜色，全部前景 ≥4.5`, () => {
-      const behind = [...FOREGROUNDS, "accent-fill", "border-strong", "bg", "surface"].map((k) => tokens[k]!);
-      for (const b of behind) {
-        const glass = composite(tokens["glass"]!, b, alphas["glass-thick-alpha"]!);
-        for (const fg of FOREGROUNDS) {
-          const ratio = contrastRatio(tokens[fg]!, glass);
-          expect(ratio, `${fg} on thick(${b}) = ${ratio.toFixed(2)}`).toBeGreaterThanOrEqual(4.5);
-        }
-      }
-    });
   }
-
-  it("浅色厚玻璃降到 85% 就不及格 —— 记录不能再调低的理由", () => {
-    const worst = Math.min(
-      ...[...FOREGROUNDS, "accent-fill"].flatMap((b) =>
-        FOREGROUNDS.map((fg) => contrastRatio(LIGHT[fg]!, composite(LIGHT["glass"]!, LIGHT[b]!, 0.85))),
-      ),
-    );
-    expect(worst).toBeLessThan(4.5);
-  });
 });
 
 /*
