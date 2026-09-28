@@ -200,6 +200,15 @@ describe("用量:缺失如实记为缺失", () => {
     expect(stats.modelUsage(dayKey(nextDay))[0]).toMatchObject({ requestsWithUsage: 1 });
   });
 
+  it("按模型的结果按合计 token 从多到少排，与图例同序", () => {
+    // 「少」只有一行但那行更大、「多」由两行小的相加超过它：按单行排会把「少」排前面。
+    stats.recordUsage({ model: "a-less", workerId: "w1", at: T0, usage: usage({ promptTokens: 600, completionTokens: 0 }) });
+    stats.recordUsage({ model: "b-more", workerId: "w1", at: T0, usage: usage({ promptTokens: 500, completionTokens: 0 }) });
+    stats.recordUsage({ model: "b-more", workerId: "w2", at: T0, usage: usage({ promptTokens: 500, completionTokens: 0 }) });
+
+    expect(stats.modelUsage().map((r) => r.model)).toEqual(["b-more", "a-less"]);
+  });
+
   it("不同 Worker 的同一模型在 per-model 聚合里合并", () => {
     stats.recordUsage({ model: "m", workerId: "w1", at: T0, usage: usage() });
     stats.recordUsage({ model: "m", workerId: "w2", at: T0, usage: usage() });

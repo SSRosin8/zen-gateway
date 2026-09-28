@@ -367,7 +367,9 @@ export class StatsStore {
         ${saturatingSum("requests_dropped_usage")} AS requests_dropped_usage
       FROM (${usageUnion(sinceDay !== undefined)})
       GROUP BY model
-      ORDER BY input_tokens + output_tokens DESC, model ASC
+      -- 按聚合后的合计排序。不能写 input_tokens + output_tokens：带运算的表达式里 SQLite
+      -- 取的是源表的同名列（组内任意一行），不是上面的别名，排序就与合计无关。
+      ORDER BY ${saturatingSum("input_tokens")} + ${saturatingSum("output_tokens")} DESC, model ASC
     `);
     const rows = (sinceDay === undefined ? stmt.all() : stmt.all(sinceDay, sinceDay)) as Array<
       Record<string, unknown>

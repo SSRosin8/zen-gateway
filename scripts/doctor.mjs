@@ -113,13 +113,13 @@ async function main() {
     return;
   }
   if (warnings.length > 0) {
-    console.log(`全部层可用,但有 ${warnings.length} 条告警:`);
+    console.log(`全部层可用，但有 ${warnings.length} 条告警：`);
     for (const w of warnings) console.log(`  ! ${w}`);
     // 告警不影响退出码：「能用但不理想」返回非 0 会让 `npm run doctor && …` 在可用系统上失败。
     return;
   }
   console.log("已执行的诊断检查全部通过；不代表每个模型可调用或 Zen 实际出口已隔离。");
-  if (!ctx.deep) console.log("回显出口未实测 —— 可运行:npm run doctor -- --deep；Zen 实际出口仍需单独核对。");
+  if (!ctx.deep) console.log("回显出口未实测 —— 可运行：npm run doctor -- --deep；Zen 实际出口仍需单独核对。");
 }
 
 await main();

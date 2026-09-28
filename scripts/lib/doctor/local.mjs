@@ -15,7 +15,7 @@ export async function layerConfig(ctx) {
     return {
       status: "fail",
       text: "配置不存在",
-      nextStep: `npm start —— 首次启动会自动生成默认配置与 Relay Token。\n（doctor 刻意不替你生成:那会改变状态。）`,
+      nextStep: `npm start —— 首次启动会自动生成默认配置与 Relay Token。\n（doctor 刻意不替你生成：那会改变状态。）`,
     };
   }
 
@@ -39,12 +39,12 @@ export async function layerConfig(ctx) {
   } catch (err) {
     if (err instanceof ConfigError) {
       const advice = {
-        unreadable: `检查文件是否损坏或磁盘是否可读:${join(ctx.dataDir, "config.json")}`,
-        malformed: `修正 JSON 语法。报错里给了大致字节位置,用编辑器跳过去看。`,
+        unreadable: `检查文件是否损坏或磁盘是否可读：${join(ctx.dataDir, "config.json")}`,
+        malformed: `修正 JSON 语法。报错里给了大致字节位置，用编辑器跳过去看。`,
         invalid: `按上面的字段路径逐条修正。路径形如 workers.0.proxyId,指的是第 1 个 Worker。`,
         permission: `chmod 600 ${join(ctx.dataDir, "config.json")}`,
       }[err.kind];
-      return { status: "fail", text: `配置无法加载(${err.kind})`, detail: err.message, nextStep: advice };
+      return { status: "fail", text: `配置无法加载（${err.kind}）`, detail: err.message, nextStep: advice };
     }
     return { status: "fail", text: "配置无法加载", detail: safeErrorMessage(err) };
   }
@@ -66,18 +66,18 @@ export async function layerService(ctx) {
       ctx.health = HealthSchema.parse(st.health);
       return {
         status: "warn",
-        text: `服务运行中(pid ${st.health.pid}),但不是 npm start 启动的`,
+        text: `服务运行中（pid ${st.health.pid}），但不是 npm start 启动的`,
         detail:
-          `跑的是本项目的代码(cmdline 已核对),没有状态文件 —— 典型是 npm run dev:server。\n` +
+          `跑的是本项目的代码（cmdline 已核对），没有状态文件 —— 典型是 npm run dev:server。\n` +
           `v${ctx.health.version} · 已运行 ${humanMs(ctx.health.uptimeSeconds * 1000)} · ${instance.base}\n` +
-          `注意 npm stop / npm run status 管不到它(它们只认状态文件),要停就用 kill ${st.health.pid}。`,
+          `注意 npm stop / npm run status 管不到它（它们只认状态文件），要停就用 kill ${st.health.pid}。`,
       };
     }
     return {
       status: "fail",
-      text: `端口 ${instance.port} 被另一个进程占用(pid ${st.health.pid})`,
-      detail: "它能应答 /health,但既不是本脚本启动的实例,cmdline 也不像本项目。",
-      nextStep: `先停掉它,或把 gateway.port 改成一个空闲端口。\n查证:ss -ltnp | grep ${instance.port}`,
+      text: `端口 ${instance.port} 被另一个进程占用（pid ${st.health.pid}）`,
+      detail: "它能应答 /health，但既不是本脚本启动的实例，cmdline 也不像本项目。",
+      nextStep: `先停掉它，或把 gateway.port 改成一个空闲端口。\n查证：ss -ltnp | grep ${instance.port}`,
     };
   }
 
@@ -85,15 +85,15 @@ export async function layerService(ctx) {
     if (st.alive && st.identity === "ours") {
       return {
         status: "fail",
-        text: `服务进程(pid ${st.state.pid})存活但健康检查未通过`,
-        nextStep: `看日志:tail -50 ${join(ctx.dataDir, "zen-gateway.log")}\n或重启:npm run restart`,
+        text: `服务进程（pid ${st.state.pid}）存活但健康检查未通过`,
+        nextStep: `看日志：tail -50 ${join(ctx.dataDir, "zen-gateway.log")}\n或重启：npm run restart`,
       };
     }
     if (st.alive) {
       return {
         status: "fail",
-        text: `状态文件记录的 pid ${st.state.pid} 存活,但无法确认是本服务`,
-        nextStep: `手工确认:ps -p ${st.state.pid} -o pid,cmd`,
+        text: `状态文件记录的 pid ${st.state.pid} 存活，但无法确认是本服务`,
+        nextStep: `手工确认：ps -p ${st.state.pid} -o pid,cmd`,
       };
     }
     return {
@@ -118,14 +118,14 @@ export async function layerService(ctx) {
   if (instance.port !== ctx.port) {
     return {
       status: "warn",
-      text: `服务运行中(pid ${ctx.health.pid}),但配置的端口已改为 ${ctx.port}`,
+      text: `服务运行中（pid ${ctx.health.pid}），但配置的端口已改为 ${ctx.port}`,
       detail: `当前监听 ${instance.base};客户端和 opencode.json 要等重启后才能改用新端口。`,
       nextStep: "npm run restart",
     };
   }
   return {
     status: "pass",
-    text: `服务运行中(pid ${ctx.health.pid})`,
+    text: `服务运行中（pid ${ctx.health.pid}）`,
     detail: `v${ctx.health.version} · 已运行 ${humanMs(ctx.health.uptimeSeconds * 1000)} · ${instance.base}`,
   };
 }
@@ -140,14 +140,14 @@ export async function layerStore(ctx) {
     return {
       status: "warn",
       text: `统计/亲和持久化累计写失败 ${failures} 次`,
-      detail: "转发不受影响,但统计数字不可信(报表可能偏低或全 0)。",
-      nextStep: `查磁盘与权限:df -h ${ctx.dataDir} && ls -l ${join(ctx.dataDir, "runtime.db")}\n日志里有具体原因:grep -i 'runtime\\|统计' ${join(ctx.dataDir, "zen-gateway.log")}`,
+      detail: "转发不受影响，但统计数字不可信（报表可能偏低或全 0）。",
+      nextStep: `查磁盘与权限：df -h ${ctx.dataDir} && ls -l ${join(ctx.dataDir, "runtime.db")}\n日志里有具体原因：grep -i 'runtime\\|统计' ${join(ctx.dataDir, "zen-gateway.log")}`,
     };
   }
 
   // readOnly 打开：openDb() 会跑迁移，而档位升级不可逆。服务持有 WAL 库时并发只读是安全的。
   const dbFile = join(ctx.dataDir, "runtime.db");
-  let dbInfo = "统计库未创建(转发不受影响)";
+  let dbInfo = "统计库未创建（转发不受影响）";
   try {
     const db = new DatabaseSync(dbFile, { readOnly: true });
     try {
@@ -160,10 +160,10 @@ export async function layerStore(ctx) {
     }
   } catch (err) {
     // 库不可读不是失败：index.ts 刻意不让它阻止启动。
-    dbInfo = `统计库不可读(转发不受影响):${safeErrorMessage(err)}`;
+    dbInfo = `统计库不可读（转发不受影响）：${safeErrorMessage(err)}`;
   }
 
-  return { status: "pass", text: "统计写入正常(0 次失败)", detail: dbInfo };
+  return { status: "pass", text: "统计写入正常（0 次失败）", detail: dbInfo };
 }
 
 /** 第 4 层：至少一个可用 Worker。判定与管理面诊断共用 `diagnoseWorkers`。 */

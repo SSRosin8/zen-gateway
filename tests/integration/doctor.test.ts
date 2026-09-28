@@ -129,7 +129,7 @@ describe("doctor 只报第一个失败的层", () => {
     const result = await run(DOCTOR);
 
     expect(result.code).toBe(1);
-    expect(result.stdout).toContain("配置无法加载(malformed)");
+    expect(result.stdout).toContain("配置无法加载（malformed）");
     expect(result.stdout).toContain("后续 6 层未检查");
 
     /*
@@ -197,7 +197,7 @@ describe("doctor 的第 6 层区分上游不可达与免费集为空", () => {
     });
 
     expect(result.code).toBe(1);
-    expect(result.stdout).toContain("上游模型目录拉不到(502)");
+    expect(result.stdout).toContain("上游模型目录拉不到（502）");
     expect(result.stdout).toContain("服务进程没有设 NODE_EXTRA_CA_CERTS");
   }, 40_000);
 });

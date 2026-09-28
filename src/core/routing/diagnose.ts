@@ -36,7 +36,7 @@ export function diagnoseWorkers(
   if (usable.length === 0) {
     return {
       status: "fail",
-      text: `${workers.length} 个 Worker 全部不可用(已停用或认证 Worker 缺 apiKey)`,
+      text: `${workers.length} 个 Worker 全部不可用（已停用或认证 Worker 缺 apiKey）`,
       detail: workers
         .map((w) => `${w.id}: ${!w.enabled ? "已停用" : w.kind === "authenticated" && w.apiKey.trim() === "" ? "认证 Worker 的 apiKey 为空" : "不可用"}`)
         .join("\n"),
@@ -45,16 +45,16 @@ export function diagnoseWorkers(
   }
 
   const bound = usable.filter((w) => w.proxyId !== null).length;
-  const shape = `其中 ${bound} 个绑定了出口代理,${usable.length - bound} 个走本机直连。`;
+  const shape = `其中 ${bound} 个绑定了出口代理，${usable.length - bound} 个走本机直连。`;
 
   if (runtime === null) {
     return {
       status: usable.length < workers.length ? "warn" : "pass",
-      text: `${usable.length}/${workers.length} 个 Worker 可用(仅配置形态)`,
+      text: `${usable.length}/${workers.length} 个 Worker 可用（仅配置形态）`,
       detail:
         `${shape}\n` +
-        `⚠️ 没能从 /api/overview 拿到运行期状态,所以「是否就绪(不在冷却中)」这一项未检查。\n` +
-        `   doctor 刻意不自己算一遍冷却:那会是第二份并行真相,且必然与调度器分叉。`,
+        `⚠️ 没能从 /api/overview 拿到运行期状态，所以「是否就绪（不在冷却中）」这一项未检查。\n` +
+        `   doctor 刻意不自己算一遍冷却：那会是第二份并行真相，且必然与调度器分叉。`,
     };
   }
 
@@ -73,14 +73,14 @@ export function diagnoseWorkers(
 
   return {
     status,
-    text: `${ready.length}/${usable.length} 个 Worker 就绪(共配置 ${workers.length} 个)`,
+    text: `${ready.length}/${usable.length} 个 Worker 就绪（共配置 ${workers.length} 个）`,
     detail: [shape, ...coolingLines].join("\n"),
     ...(allCooling
       ? {
           nextStep:
             "全部 Worker 都在冷却 —— 此刻转发会打到最早恢复的那个。\n" +
-            "若冷却类别是 auth,那是 key 配错了(固定 60 秒短退避,会反复暴露);\n" +
-            "若是 rate_limit,那是上游限流,等它过去。",
+            "若冷却类别是 auth，那是 key 配错了（固定 60 秒短退避，会反复暴露）；\n" +
+            "若是 rate_limit，那是上游限流，等它过去。",
         }
       : {}),
   };
