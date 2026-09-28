@@ -1,5 +1,5 @@
-import { describe, expect, it } from "vitest";
-import { render } from "@testing-library/react";
+import { describe, expect, it, vi } from "vitest";
+import { render, waitFor } from "@testing-library/react";
 import { UsageChart, buildSeries, smoothPath } from "../../src/admin/components/UsageChart.tsx";
 import type { DailyPoint } from "../../src/shared/contract.ts";
 
@@ -143,4 +143,53 @@ describe("面积图的曲线", () => {
     expect(smoothPath([[0, 1], [10, 2]])).toBe("M0.0,1.0 L10.0,2.0");
     expect(smoothPath([])).toBe("");
   });
+});
+
+describe("横轴与窄屏", () => {
+  it("横轴从这段时间里第一天有数据时开始，不画之前全是 0 的日子", () => {
+    const { container } = render(
+      <UsageChart points={points} sinceDay="2026-08-23" metric="input" shape="bar" seriesLabel="模型" today={new Date(`${today}T12:00:00Z`)} />,
+    );
+    const dayLabels = [...container.querySelectorAll("svg text")].map((t) => t.textContent).filter((t) => /^\d\d-\d\d$/.test(t ?? ""));
+    expect(dayLabels).toEqual(["09-20", "09-21"]);
+  });
+
+  it("时间范围之外的数据不把横轴拉长", () => {
+    const early = [...points, point("2026-09-01", "a", 5)];
+    const { container } = render(
+      <UsageChart points={early} sinceDay="2026-09-20" metric="input" shape="bar" seriesLabel="模型" today={new Date(`${today}T12:00:00Z`)} />,
+    );
+    const dayLabels = [...container.querySelectorAll("svg text")].map((t) => t.textContent).filter((t) => /^\d\d-\d\d$/.test(t ?? ""));
+    expect(dayLabels[0]).toBe("09-20");
+  });
+
+  it("按容器实际宽度作画：窄容器的画布就是那么宽，刻度字不被整体缩小", async () => {
+    // jsdom 没有布局：用一个立即回报 320px 的 ResizeObserver 代替浏览器。
+    class FixedWidth {
+      constructor(private cb: ResizeObserverCallback) {}
+      observe() {
+        this.cb([{ contentRect: { width: 320 } } as ResizeObserverEntry], this as unknown as ResizeObserver);
+      }
+      disconnect() {}
+      unobserve() {}
+    }
+    vi.stubGlobal("ResizeObserver", FixedWidth);
+    const { container } = render(
+      <UsageChart points={points} sinceDay="2026-09-20" metric="input" shape="bar" seriesLabel="模型" today={new Date(`${today}T12:00:00Z`)} />,
+    );
+    await waitFor(() => expect(container.querySelector("svg")!.getAttribute("viewBox")).toMatch(/^0 0 320 /));
+    vi.unstubAllGlobals();
+  });
+});
+
+it("挂上时同步量一次宽度，不等 ResizeObserver 的首次回调", async () => {
+  // 没有 ResizeObserver 回调的环境（后台标签）里也按容器宽度作画。
+  vi.stubGlobal("ResizeObserver", class { observe() {} disconnect() {} unobserve() {} });
+  const spy = vi.spyOn(HTMLElement.prototype, "clientWidth", "get").mockReturnValue(1100);
+  const { container } = render(
+    <UsageChart points={points} sinceDay="2026-09-20" metric="input" shape="bar" seriesLabel="模型" today={new Date(`${today}T12:00:00Z`)} />,
+  );
+  await waitFor(() => expect(container.querySelector("svg")!.getAttribute("viewBox")).toMatch(/^0 0 1100 /));
+  spy.mockRestore();
+  vi.unstubAllGlobals();
 });

@@ -18,9 +18,9 @@ import { FIELD } from "../lib/styles.ts";
  * 列表表（Worker、出口节点、订阅、Clash 内核、模型）都分页；`SimpleTable` 只给行数天然很少的
  * 聚合小表（用量按模型 / Worker、网关拒绝）。
  *
- * ## 窄屏横向滚动
+ * ## 横向滚动
  *
- * 所有表格都包在 `TableScroll` 里：列数多于窄屏宽度时在面板内部横向滚动，
+ * 所有表格都包在 `TableScroll` 里：列宽合计超过面板宽度时在面板内部横向滚动，
  * 而不是把整页撑宽（那会让导航和其他面板一起出现横向滚动条）。
  */
 
@@ -35,6 +35,11 @@ export type Column<T> = {
   readonly header: string;
   /** 数字列右对齐 + `tabular-nums`（延迟、token 数、计数逐位可比）。 */
   readonly numeric?: boolean;
+  /**
+   * 固定在右端（操作列）。表格比容器宽时在内部横向滚动，操作列不跟着滚出视野：
+   * 窗口较窄时「编辑」「停用」始终点得到。只给最后一列用。
+   */
+  readonly pinEnd?: boolean;
   readonly render: (row: T) => ReactNode;
 };
 
@@ -58,6 +63,17 @@ export function TableScroll({ label, children }: { label: string; children: Reac
 function numericAttr(numeric: boolean | undefined) {
   return numeric === true ? { "data-numeric": "" } : {};
 }
+
+function pinAttr(pin: boolean | undefined) {
+  return pin === true ? { "data-pin": "end" } : {};
+}
+
+/*
+ * 固定列自带实色底（否则滚过去的内容会从底下透出来），所以行悬停色要由行的 group 传给它；
+ * 左边框把它和滚动区分开。
+ */
+const PIN_END_HEAD = "sticky right-0 z-20 border-l border-border pl-3";
+const PIN_END_CELL = "sticky right-0 z-[1] border-l border-border bg-surface pl-3 transition-colors group-hover:bg-surface-hover";
 
 /**
  * 表格主体。`DataTable` 与 `SimpleTable` 共用，保证行高、边框、状态标记一致。
@@ -138,6 +154,10 @@ function TableBody<T>({
           },
           ...rawColumns,
         ];
+  // 固定在右端的列只能是最后一列：放在中间会盖住它右边滚过来的列。
+  if (columns.some((c, i) => c.pinEnd === true && i !== columns.length - 1)) {
+    throw new Error(`表格 ${label} 的固定列必须是最后一列`);
+  }
   return (
     <TableScroll label={label}>
       {/* border-separate + 单元格边框：border-collapse 下 sticky 表头的边框会留在原地
@@ -151,8 +171,11 @@ function TableBody<T>({
               <th
                 key={col.key}
                 scope="col"
-                className={`sticky top-0 z-10 border-b border-border-strong bg-surface pr-4 font-medium last:pr-3 ${i === 0 ? "pl-3" : ""}`}
+                className={`sticky top-0 z-10 border-b border-border-strong bg-surface pr-4 font-medium last:pr-3 ${i === 0 ? "pl-3" : ""} ${
+                  col.pinEnd === true ? PIN_END_HEAD : ""
+                }`}
                 {...numericAttr(col.numeric)}
+                {...pinAttr(col.pinEnd)}
               >
                 {"headerNode" in col && col.headerNode !== undefined ? col.headerNode : col.header}
               </th>
@@ -167,7 +190,7 @@ function TableBody<T>({
             return (
               <Fragment key={key}>
                 <tr
-                  className="relative transition-colors *:border-b *:border-border last:*:border-b-0 hover:bg-surface-hover"
+                  className="group relative transition-colors *:border-b *:border-border last:*:border-b-0 hover:bg-surface-hover"
                   /* 行高 36px：紧凑密度。行本身不是点击目标，行内按钮自带 ≥24px 的目标。 */
                   style={{ height: `${ROW_HEIGHT}px` }}
                   {...{ [rowAttr]: key }}
@@ -176,8 +199,9 @@ function TableBody<T>({
                     <td
                       key={col.key}
                       /* 不加纵向内边距：行高由 tr 的 36px 决定，单元格内容必须单行（≤32px 的行内按钮）。 */
-                      className={`whitespace-nowrap pr-4 last:pr-3 ${i === 0 ? "pl-3" : ""}`}
+                      className={`whitespace-nowrap pr-4 last:pr-3 ${i === 0 ? "pl-3" : ""} ${col.pinEnd === true ? PIN_END_CELL : ""}`}
                       {...numericAttr(col.numeric)}
+                      {...pinAttr(col.pinEnd)}
                     >
                       {i === 0 && tone !== null && <RowMark tone={tone} />}
                       {col.render(row)}

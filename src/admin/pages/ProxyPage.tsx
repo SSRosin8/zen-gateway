@@ -225,6 +225,7 @@ export function ProxyPage({
     {
       key: "actions",
       header: "操作",
+      pinEnd: true,
       render: (p) => (
         <span className="flex gap-2">
           <SecondaryButton

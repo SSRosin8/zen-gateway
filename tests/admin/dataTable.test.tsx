@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { render, screen } from "@testing-library/react";
 import { DataTable, PAGE_SIZE, ROW_HEIGHT } from "../../src/admin/components/DataTable.tsx";
 
@@ -38,5 +38,32 @@ describe("DataTable 的固定高度", () => {
       expect(screen.queryByText(/共 \d+ 条/)).not.toBeInTheDocument();
       unmount();
     }
+  });
+});
+
+describe("DataTable 的固定操作列", () => {
+  const pinned = [
+    { key: "id", header: "id", render: (r: { id: string }) => r.id },
+    { key: "actions", header: "操作", pinEnd: true, render: () => <button type="button">编辑</button> },
+  ];
+
+  it("表头与每一行的操作格都标为固定，其他列不标", () => {
+    const { container } = render(
+      <DataTable label="t" rows={rows(3)} columns={pinned} rowKey={(r) => r.id} page={1} onPageChange={() => {}} empty={<p>空</p>} />,
+    );
+    const marked = [...container.querySelectorAll("[data-pin='end']")];
+    expect(marked).toHaveLength(4);
+    expect(marked.every((el) => el === el.parentElement!.lastElementChild)).toBe(true);
+    expect(marked[0]).toHaveTextContent("操作");
+  });
+
+  it("固定列不在最后时直接报错，而不是盖住右边的列", () => {
+    vi.spyOn(console, "error").mockImplementation(() => {});
+    expect(() =>
+      render(
+        <DataTable label="t" rows={rows(1)} columns={[...pinned].reverse()} rowKey={(r) => r.id} page={1} onPageChange={() => {}} empty={<p>空</p>} />,
+      ),
+    ).toThrow(/固定列必须是最后一列/);
+    vi.restoreAllMocks();
   });
 });

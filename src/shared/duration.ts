@@ -8,3 +8,8 @@ export function humanMs(ms: number): string {
   if (abs < 86_400_000) return `${(ms / 3_600_000).toFixed(1)}小时`;
   return `${Math.round(ms / 86_400_000)}天`;
 }
+
+/** 「多久以前」：1 秒以内说「刚刚」，不写「1ms前」这种读起来像误差的数。 */
+export function humanAgo(ms: number): string {
+  return Number.isFinite(ms) && ms < 1000 ? "刚刚" : `${humanMs(ms)}前`;
+}

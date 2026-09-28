@@ -29,11 +29,11 @@ export function heading(text) {
 
 /** 「下一步建议」：诊断输出要告诉用户该跑什么，而不只是哪层失败。 */
 export function nextStep(text) {
-  console.log(`\n  下一步:`);
+  console.log(`\n  下一步：`);
   for (const row of String(text).split("\n")) {
     console.log(`    ${row}`);
   }
 }
 
 // 与管理面诊断共用一份实现。
-export { humanMs } from "../../src/shared/duration.ts";
+export { humanAgo, humanMs } from "../../src/shared/duration.ts";

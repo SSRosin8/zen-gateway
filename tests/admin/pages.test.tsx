@@ -566,7 +566,24 @@ describe("Worker 页", () => {
     expect(JSON.stringify(payload)).not.toContain("fake-stale-key-not-real");
   });
 
-  it("匿名 Worker 的凭证列显示无需 key", () => {
+  it("混有认证 Worker 时，匿名 Worker 的凭证列显示无需 key", () => {
+    render(
+      <WorkersPage
+        data={fakeOverview({
+          workers: [
+            worker({ id: "anon-1", kind: "anonymous", apiKey: { present: false, fingerprint: null } }),
+            worker({ id: "auth-1", kind: "authenticated", apiKey: { present: true, fingerprint: "abcd1234" } }),
+          ],
+        })}
+        view={parseHash("#workers")}
+        navigate={noop}
+      />,
+    );
+    expect(screen.getByText("无需 key")).toBeInTheDocument();
+    expect(screen.queryByText("未配置")).not.toBeInTheDocument();
+  });
+
+  it("全是匿名 Worker 时不显示「类型」与「API key」两列", () => {
     render(
       <WorkersPage
         data={fakeOverview({ workers: [worker({ kind: "anonymous", apiKey: { present: false, fingerprint: null } })] })}
@@ -574,8 +591,10 @@ describe("Worker 页", () => {
         navigate={noop}
       />,
     );
-    expect(screen.getByText("无需 key")).toBeInTheDocument();
-    expect(screen.queryByText("未配置")).not.toBeInTheDocument();
+    const headers = screen.getAllByRole("columnheader").map((h) => h.textContent);
+    expect(headers).toContain("操作");
+    expect(headers).not.toContain("类型");
+    expect(headers).not.toContain("API key");
   });
 
   it("显示连续失败次数 —— 那是「客户端一直在发坏请求」的证据", () => {

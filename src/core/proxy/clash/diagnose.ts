@@ -24,12 +24,12 @@ export async function diagnoseClash(cfg: Config): Promise<LayerResult> {
 
   if (!cfg.clash.enabled) {
     if (!needsBridge) {
-      return { status: "skip", text: "Clash 未启用,且没有代理需要桥接 —— 跳过" };
+      return { status: "skip", text: "Clash 未启用，且没有代理需要桥接 —— 跳过" };
     }
     // schema 的 superRefine 已拦这种组合；走到这里说明配置被外部改过，如实报出。
     return {
       status: "fail",
-      text: "有代理只能经 Clash 桥接,但 clash.enabled 为 false",
+      text: "有代理只能经 Clash 桥接，但 clash.enabled 为 false",
       nextStep: "把 clash.enabled 设为 true,或停用那些只能桥接的代理。",
     };
   }
@@ -52,7 +52,7 @@ export async function diagnoseClash(cfg: Config): Promise<LayerResult> {
     } catch (err) {
       const why =
         err instanceof ControllerError && err.kind === "auth"
-          ? `鉴权被拒(${err.status})—— apiSecret 不对`
+          ? `鉴权被拒（${err.status}）—— apiSecret 不对`
           : // 绝不回显 apiSecret —— safeErrorMessage 兜住任何含凭证的底层消息。
             safeErrorMessage(err);
       results.push({ bridge, controller, ok: false, why });
@@ -69,7 +69,7 @@ export async function diagnoseClash(cfg: Config): Promise<LayerResult> {
       detail: lines.join("\n"),
       nextStep:
         "确认 Clash 正在运行且开了 External Controller。\n" +
-        "若 apiSecret 不对:从 Clash 的配置或管理界面取得 secret，填进 clash.bridges[].apiSecret。\n" +
+        "若 apiSecret 不对：从 Clash 的配置或管理界面取得 secret，填进 clash.bridges[].apiSecret。\n" +
         "或跑 npm run setup 重新探测。",
     };
   }
@@ -90,11 +90,11 @@ export async function diagnoseClash(cfg: Config): Promise<LayerResult> {
   if (mismatches.length > 0) {
     return {
       status: "fail",
-      text: "Clash 控制面可连,但混合端口与配置不一致",
+      text: "Clash 控制面可连，但混合端口与配置不一致",
       detail: [...lines, "", ...mismatches].join("\n"),
       nextStep:
-        "把 clash.bridges[].localProxyPort 改成内核实际的 mixed-port(上面已给出)。\n" +
-        "不改的话桥接会连到一个没人监听的端口:所有桥接代理传输失败,而控制面是通的。",
+        "把 clash.bridges[].localProxyPort 改成内核实际的 mixed-port（上面已给出）。\n" +
+        "不改的话桥接会连到一个没人监听的端口：所有桥接代理传输失败，而控制面是通的。",
     };
   }
 
@@ -165,14 +165,14 @@ async function routingWarningsFor(
     if (!routed.targets.has(group)) {
       warnings.push(
         `⚠️ 分组「${group}」**不出现在任何路由规则里** —— rule 模式下切它不会改变任何流量。`,
-        `   规则实际导向:${[...routed.targets].map(([k, v]) => `${k}(${v} 条)`).join("、")}` +
-          `${routed.fallback === null ? "" : `;兜底(MATCH)→ ${routed.fallback}`}`,
-        `   后果:所有 Worker 访问回显目标时共用同一个公网 IP；Zen 实际连接仍需核对。`,
+        `   规则实际导向：${[...routed.targets].map(([k, v]) => `${k}（${v} 条）`).join("、")}` +
+          `${routed.fallback === null ? "" : `；兜底（MATCH）→ ${routed.fallback}`}`,
+        `   后果：所有 Worker 访问回显目标时共用同一个公网 IP；Zen 实际连接仍需核对。`,
       );
     } else if (routed.fallback !== null && routed.fallback !== group) {
       // 分组承载部分规则但不是兜底：探测与转发的目标 host 可能命中不同分支。
       warnings.push(
-        `! 分组「${group}」承载 ${routed.targets.get(group)} 条规则，而兜底(MATCH)指向「${routed.fallback}」。`,
+        `! 分组「${group}」承载 ${routed.targets.get(group)} 条规则，而兜底（MATCH）指向「${routed.fallback}」。`,
         `   转发到上游与探测打 IP 回显服务可能命中**不同的规则分支** ——`,
         `   --deep 仅测 IP 回显目标；Zen 实际出口需在请求期间核对 /connections 的上游连接、chains 与 rule。`,
       );
@@ -185,13 +185,13 @@ async function routingWarningsFor(
       warnings.push(
         `⚠️ 上游 ${upstreamHost} 命中第 ${route.index} 条规则 ${route.type},${route.payload} → ${route.proxy}` +
           `${route.ip === null ? "" : `(内核解析为 ${route.ip})`},不经过分组「${group}」。`,
-        `   后果:所有 Worker 的 Zen 请求都走 ${route.proxy},共用同一个出口;切换 selector 不改变它。`,
-        `   处理:在 Clash 规则最前面加 DOMAIN-SUFFIX,${upstreamHost},${group}` +
+        `   后果：所有 Worker 的 Zen 请求都走 ${route.proxy}，共用同一个出口；切换 selector 不改变它。`,
+        `   处理：在 Clash 规则最前面加 DOMAIN-SUFFIX,${upstreamHost},${group}` +
           `${route.ip === null ? "" : `,或让内核用公网 DNS 解析该域名`}。`,
       );
     } else if (route.kind === "unknown") {
       warnings.push(
-        `! 上游 ${upstreamHost} 在第 ${route.index} 条规则(${route.type})处无法离线判定;` +
+        `! 上游 ${upstreamHost} 在第 ${route.index} 条规则（${route.type}）处无法离线判定；` +
           `Zen 实际出口需在请求期间核对 /connections。`,
       );
     }

@@ -48,7 +48,7 @@ function hit(
   host: string,
   path: string,
   opts: { headers?: Record<string, string>; localAddress?: string } = {},
-): Promise<{ status: number; body: string; cookie: string | undefined }> {
+): Promise<{ status: number; body: string; cookie: string | undefined; cache: string | undefined }> {
   return new Promise((resolve, reject) => {
     const req = request(
       { host, port, path, headers: opts.headers, ...(opts.localAddress !== undefined ? { localAddress: opts.localAddress } : {}) },
@@ -56,7 +56,12 @@ function hit(
         let body = "";
         res.on("data", (c) => (body += c));
         res.on("end", () =>
-          resolve({ status: res.statusCode ?? 0, body, cookie: ([] as string[]).concat(res.headers["set-cookie"] ?? [])[0] }),
+          resolve({
+            status: res.statusCode ?? 0,
+            body,
+            cookie: ([] as string[]).concat(res.headers["set-cookie"] ?? [])[0],
+            cache: res.headers["cache-control"],
+          }),
         );
       },
     );
@@ -89,6 +94,24 @@ describe("后台页面", () => {
     for (const p of ["/../package.json", "/%2e%2e/package.json", "//etc/passwd", "/src/admin/main.tsx"]) {
       expect((await hit("127.0.0.1", p)).body, p).not.toContain("zen-gateway\"");
     }
+  });
+
+  it("升级后不沿用旧页面：页面每次确认，带哈希的资源长期缓存，旧资源名 404", async () => {
+    start();
+    await site!.sync(false);
+    // 页面：index.html 本身、页面路由回退都要 no-cache，否则升级后浏览器拿着旧 index.html 去要旧资源。
+    for (const p of ["/", "/index.html", "/workers"]) {
+      const r = await hit("127.0.0.1", p);
+      expect(r.body, p).toBe(INDEX);
+      expect(r.cache, p).toBe("no-cache");
+    }
+    const asset = await hit("127.0.0.1", "/assets/app.js");
+    expect(asset.body).toBe("console.log(1)");
+    expect(asset.cache).toContain("immutable");
+    // 旧构建的资源名：不能回退成 index.html（浏览器会把 HTML 当脚本执行）。
+    const stale = await hit("127.0.0.1", "/assets/index-OLDHASH.js");
+    expect(stale.status).toBe(404);
+    expect(stale.body).not.toContain("fake admin");
   });
 
   it("未设口令只监听回环；设口令后改为 0.0.0.0，关掉后退回", async () => {

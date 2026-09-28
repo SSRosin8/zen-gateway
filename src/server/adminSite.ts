@@ -48,9 +48,21 @@ export function createAdminSite(opts: {
   const forward = (c: { req: { raw: Request }; env: unknown }) => opts.gatewayFetch(c.req.raw, peerEnv(c.env));
   site.all("/api/*", forward);
   site.get("/health", forward);
+  /*
+   * 缓存：升级重启后浏览器必须拿到新的 index.html，否则它引用的是已被新构建删掉的旧资源名。
+   * 所以页面（index.html 与页面路由回退）一律 `no-cache`（每次向服务端确认）；
+   * `/assets/` 下的文件名带内容哈希，内容变了名字就变，可以长期缓存。
+   * 找不到的 `/assets/` 直接 404：回退成 index.html 会让浏览器把 HTML 当脚本执行，页面白屏且不报原因。
+   */
+  const page = (c: { header: (k: string, v: string) => void }) => c.header("Cache-Control", "no-cache");
+  site.use(
+    "/assets/*",
+    serveStatic({ root: opts.root, onFound: (_p, c) => c.header("Cache-Control", "public, max-age=31536000, immutable") }),
+  );
+  site.get("/assets/*", (c) => c.text("Not Found", 404, { "Cache-Control": "no-store" }));
   // 只伺服构建产物目录；serveStatic 拒绝 `..` 与重复斜杠，页面路由都回到 index.html。
-  site.use("/*", serveStatic({ root: opts.root }));
-  site.get("*", serveStatic({ root: opts.root, path: "index.html" }));
+  site.use("/*", serveStatic({ root: opts.root, onFound: (_p, c) => page(c) }));
+  site.get("*", serveStatic({ root: opts.root, path: "index.html", onFound: (_p, c) => page(c) }));
 
   const listener = getRequestListener(site.fetch);
   let server: Server | null = null;

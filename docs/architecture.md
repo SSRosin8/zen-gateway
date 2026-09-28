@@ -34,7 +34,7 @@ SIGTERM/SIGINT 触发优雅关闭：先停止 HTTP server 接收新连接，在�
 
 PATCH /api/config 先原子写盘再替换进程内配置。并发写入串行化，并可用 expected 引用检测过期快照。配置变化会重置 Controller、dispatcher 和超时相关缓存，避免继续使用旧地址、旧凭证或旧连接。例外是 gateway.port：只写盘，监听端口在 npm run restart 后才换；启停脚本与 doctor 按状态文件（zen-gateway.state.json）记录的端口找到运行中的实例（scripts/lib/instance.mjs）。
 
-npm start 和 npm restart 先构建，再由 scripts/service.mjs 管理服务。网关端口提供 /health、/v1/*、协议无前缀别名和 /api/*，不伺服页面；同一进程在独立的后台端口伺服 dist/admin，只把 /health 和 /api 交给网关。npm run dev 是开发用 Vite，同样只代理 /health 和 /api。运行方式见 [usage.md](usage.md#安装和运行)。
+npm start 和 npm restart 先构建，再由 scripts/service.mjs 管理服务。网关端口提供 /health、/v1/*、协议无前缀别名和 /api/*，不伺服页面；同一进程在独立的后台端口伺服 dist/admin，只把 /health 和 /api 交给网关。页面（index.html 与页面路由回退）带 `Cache-Control: no-cache`，升级重启后浏览器会重新确认并拿到引用新资源名的页面；`/assets/` 下带内容哈希的文件长期缓存，不存在的资源返回 404，不回退成页面。npm run dev 是开发用 Vite，同样只代理 /health 和 /api。运行方式见 [usage.md](usage.md#安装和运行)。
 
 ## 协议面与转发链
 

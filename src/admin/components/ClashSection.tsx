@@ -74,6 +74,7 @@ export function ClashSection({ clash, refresh }: { clash: Clash; refresh: () => 
     {
       key: "actions",
       header: "操作",
+      pinEnd: true,
       render: (b) => (
         <span className="flex gap-2">
           <SecondaryButton compact onClick={() => setEditing(editing === b.id ? null : b.id)}>

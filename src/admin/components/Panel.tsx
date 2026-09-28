@@ -100,7 +100,7 @@ export function PrimaryButton({
       type={type}
       onClick={onClick}
       disabled={disabled}
-      /* 触摸目标 ≥44px。 */
+      /* 命中区 ≥44px。 */
       className="inline-flex min-h-[44px] items-center justify-center gap-2 rounded-sm bg-accent-fill px-4 font-medium text-on-accent-fill transition-colors enabled:hover:bg-accent-fill-hover enabled:active:bg-accent-fill-hover disabled:cursor-not-allowed disabled:bg-border-strong disabled:text-text"
     >
       {children}

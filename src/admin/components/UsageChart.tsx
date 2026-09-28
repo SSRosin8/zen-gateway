@@ -1,4 +1,4 @@
-import { useId, useMemo, useRef, useState } from "react";
+import { useEffect, useId, useMemo, useRef, useState } from "react";
 import type { DailyPoint } from "../../shared/contract.ts";
 
 /**
@@ -15,6 +15,9 @@ import type { DailyPoint } from "../../shared/contract.ts";
  * - 文字一律用文字 token，不用系列色；图例常在（≥2 个系列）。
  * - 悬停：面积图用竖线跟随最近的一天，柱图每根柱是命中区；键盘可逐天移动。提示框里值在前、名在后。
  * - 另有数据表视图（`showTable`），提示框里的每个数都能不悬停就读到。
+ *
+ * - 按容器实际宽度作画（`useWidth`），不是固定画布整体缩放：刻度字在任何宽度下都是 11px。
+ *   横轴从这段时间里第一天有数据时开始，之前全是 0 的日子不占宽度（页头已写明时间范围）。
  *
  * 不引图表库：一张图、两种形状，内联 SVG 足够，也不给构建链加依赖。
  * 形状值保留 `line` 作为面积图的 URL 取值：已分享的链接（`shape=line`）不失效。
@@ -49,9 +52,15 @@ function valueOf(p: DailyPoint, metric: Metric): number {
   }
 }
 
-/** 从 sinceDay 到今天（UTC）的每一天；sinceDay 为 null 时从数据里最早的一天起。 */
+/**
+ * 从这段时间里第一天有数据的日子到今天（UTC）的每一天。选 30 天而只有最近两天有用量时，
+ * 横轴不再有 28 天贴底的空白；没有数据时返回空。
+ */
 export function dayAxis(points: readonly DailyPoint[], sinceDay: string | null, today = new Date()): string[] {
-  const first = sinceDay ?? points.reduce<string | null>((m, p) => (m === null || p.day < m ? p.day : m), null);
+  const first = points.reduce<string | null>(
+    (m, p) => ((sinceDay === null || p.day >= sinceDay) && (m === null || p.day < m) ? p.day : m),
+    null,
+  );
   if (first === null) return [];
   const end = today.toISOString().slice(0, 10);
   const out: string[] = [];
@@ -153,6 +162,31 @@ export function smoothPath(p: ReadonlyArray<readonly [number, number]>): string 
   return d;
 }
 
+/** 画布默认宽度：jsdom 没有布局、首帧还没量到时用它。 */
+const DEFAULT_WIDTH = 960;
+
+/**
+ * 元素的内容宽度，随尺寸变化更新。用回调 ref：图表在「没有用量」时不渲染容器，
+ * 数据到了才挂上，固定的 ref 对象在那之前跑完的 effect 不会再观察它。
+ */
+function useWidth(): [(el: HTMLElement | null) => void, number] {
+  const [el, setEl] = useState<HTMLElement | null>(null);
+  const [width, setWidth] = useState(DEFAULT_WIDTH);
+  useEffect(() => {
+    if (el === null) return;
+    // 挂上时先同步量一次：ResizeObserver 的首次回调要等下一帧渲染，页面在后台标签时不会来。
+    if (el.clientWidth > 0) setWidth(el.clientWidth);
+    if (typeof ResizeObserver === "undefined") return;
+    const ro = new ResizeObserver(([entry]) => {
+      const w = Math.round(entry?.contentRect.width ?? 0);
+      if (w > 0) setWidth(w);
+    });
+    ro.observe(el);
+    return () => ro.disconnect();
+  }, [el]);
+  return [setEl, width];
+}
+
 const color = (slot: number | null) => (slot === null ? "var(--zg-border-strong)" : `var(--zg-series-${slot + 1})`);
 
 export function UsageChart({
@@ -176,13 +210,13 @@ export function UsageChart({
   const series = useMemo(() => buildSeries(points, days, metric), [points, days, metric]);
   const [hover, setHover] = useState<number | null>(null);
   const svgRef = useRef<SVGSVGElement>(null);
+  const [boxRef, W] = useWidth();
   const titleId = useId();
 
   if (days.length === 0 || series.length === 0) {
     return <p className="py-10 text-center text-text-muted">这段时间还没有用量。跑一次 opencode run 之后回来看。</p>;
   }
 
-  const W = 960;
   const H = 280;
   const pad = { l: 48, r: 12, t: 12, b: 28 };
   const iw = W - pad.l - pad.r;
@@ -195,7 +229,8 @@ export function UsageChart({
   const x = (i: number) => pad.l + band * (i + 0.5);
   const barW = Math.min(24, Math.max(2, band - 2));
   const ticks = Array.from({ length: Math.round(top / step) + 1 }, (_, i) => i * step);
-  const labelEvery = Math.max(1, Math.ceil(days.length / 10));
+  // 日期标签（「09-27」）约 40px 宽，每个至少留 64px，容器窄时不会挤在一起。
+  const labelEvery = Math.max(1, Math.ceil(days.length / Math.max(2, Math.floor(iw / 64))));
 
   const pick = (clientX: number) => {
     const rect = svgRef.current?.getBoundingClientRect();
@@ -226,7 +261,7 @@ export function UsageChart({
         </ul>
       )}
 
-      <div className="relative">
+      <div className="relative" ref={boxRef}>
         <svg
           ref={svgRef}
           viewBox={`0 0 ${W} ${H}`}
