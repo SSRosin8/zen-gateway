@@ -8,9 +8,10 @@
 
 import { spawn } from "node:child_process";
 import { existsSync, openSync } from "node:fs";
-import { chmod, mkdir, open, readFile, rm, stat, writeFile } from "node:fs/promises";
+import { chmod, mkdir, readFile, rm, stat, writeFile } from "node:fs/promises";
 import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
+import { atomicWriteFile } from "../src/store/atomicWrite.ts";
 import { resolveAdminPort, resolvePort } from "../src/store/port.ts";
 import { DIR_MODE, FILE_MODE } from "../src/store/paths.ts";
 import { createInstance, dataDirOf, pidRunsScript } from "./lib/instance.mjs";
@@ -101,9 +102,8 @@ async function lockHolder() {
 async function acquireLock() {
   for (let attempt = 0; attempt < 2; attempt += 1) {
     try {
-      const handle = await open(LOCK_FILE, "wx", FILE_MODE);
-      await handle.writeFile(`${process.pid}\n`, "utf8");
-      await handle.close();
+      // 先写临时文件再 link 落位：open("wx") 后、写入 pid 前的空锁会被并发 start 判成 garbage 抢走。
+      await atomicWriteFile(LOCK_FILE, `${process.pid}\n`, { exclusive: true });
       return { ok: true };
     } catch (err) {
       if (err?.code !== "EEXIST") {

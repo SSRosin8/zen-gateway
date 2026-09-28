@@ -19,7 +19,7 @@ import { dataDir, port, startServer, useScriptSandbox, writeConfig } from "./hel
  * 以及首启自动写 opencode.json 的真实入口。
  */
 
-useScriptSandbox(20300);
+useScriptSandbox();
 
 const layerOf = (body: unknown, id: string) =>
   DiagnosticsSchema.parse(body).layers.find((l) => l.id === id)!;

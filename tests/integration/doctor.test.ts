@@ -20,7 +20,7 @@ import {
  */
 
 // 端口段见 useScriptSandbox 的说明。
-useScriptSandbox(19940);
+useScriptSandbox();
 
 /* ================================================================== *
  * doctor:只读

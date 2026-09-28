@@ -4,6 +4,7 @@ import { chmod, mkdir, mkdtemp, readFile, rm, stat, writeFile } from "node:fs/pr
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { promisify } from "node:util";
+import { freePort } from "./helpers/freePort.ts";
 
 const execFileAsync = promisify(execFile);
 const PROJECT = resolve(import.meta.dirname, "..", "..");
@@ -24,8 +25,6 @@ let port: number;
 /** 需要在用例结束后确保被清理的进程。 */
 let strays: number[];
 
-// 避开常用端口与其他用例；每个用例递增。
-let nextPort = 19876;
 
 /*
  * 首启会生成指向真实 Zen 的默认配置，目录预热随即访问外网：结果随运行环境变化，
@@ -45,7 +44,7 @@ async function writeOfflineConfig(): Promise<void> {
 
 beforeEach(async () => {
   dataDir = await mkdtemp(join(tmpdir(), "zg-svc-"));
-  port = nextPort++;
+  port = await freePort();
   strays = [];
   await writeOfflineConfig();
 });
@@ -451,7 +450,7 @@ describe("端口解析与服务端一致", () => {
   }
 
   it("不设 ZG_PORT 时，两处都认 config.json 的 gateway.port", async () => {
-    const configured = nextPort++;
+    const configured = await freePort();
     await writeConfigPort(configured);
 
     const started = await runWithoutEnvPort(["start"]);
@@ -470,7 +469,7 @@ describe("端口解析与服务端一致", () => {
 
   it("ZG_PORT 优先于 config.json —— 两处的优先级必须相同", async () => {
     // 配置里写一个端口，环境变量给另一个；服务必须听环境变量那个。
-    const ignored = nextPort++;
+    const ignored = await freePort();
     await writeConfigPort(ignored);
 
     const started = await run(["start"]); // run() 会注入 ZG_PORT=port

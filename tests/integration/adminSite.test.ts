@@ -6,6 +6,7 @@ import { request } from "node:http";
 import { createAdminSite, type AdminSite } from "../../src/server/adminSite.ts";
 import { hashLanPassword } from "../../src/server/admin/lanAccess.ts";
 import { makeApp, makeConfig } from "./helpers/adminFixture.ts";
+import { freePort } from "./helpers/freePort.ts";
 
 /*
  * `npm start` 起的管理后台页面（server/adminSite.ts）：真实 socket，真实监听地址切换。
@@ -28,14 +29,13 @@ function lanIp(): string | null {
 let root: string;
 let site: AdminSite | undefined;
 let port: number;
-let nextPort = 25_173;
 
 beforeEach(async () => {
   root = await mkdtemp(join(tmpdir(), "zg-site-"));
   await mkdir(join(root, "assets"));
   await writeFile(join(root, "index.html"), INDEX);
   await writeFile(join(root, "assets", "app.js"), "console.log(1)");
-  port = nextPort++;
+  port = await freePort();
 });
 
 afterEach(async () => {

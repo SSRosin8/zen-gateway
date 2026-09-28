@@ -26,6 +26,7 @@ Vitest 转译不替代 TypeScript 类型检查；构建配置与测试也必须�
 联网的 `npm run discover:upstream` 不进入本地关卡，结果单独说明。
 测试只连本机：`npm test` 注入 `tests/support/offlineGuard.mjs`，测试进程及其子进程访问
 外网会直接失败；需要上游的用例用本机假服务，配置里的 `baseUrl` 也要指向回环地址。
+要监听的端口向系统申请（`tests/integration/helpers/freePort.ts` 或 `listen(0)`），不手写固定端口段。
 CI（`.github/workflows/ci.yml`）在 PR 与 `main` 推送上运行同一个 `npm run validate`，
 是合入的必需检查；它不替代本地运行，也不使用任何仓库 secret。
 

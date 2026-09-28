@@ -20,7 +20,7 @@ import {
  */
 
 // 端口段见 useScriptSandbox 的说明。
-useScriptSandbox(20200);
+useScriptSandbox();
 
 /* ================================================================== *
  * 凭证不进输出
