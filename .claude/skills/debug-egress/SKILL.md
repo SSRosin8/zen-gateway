@@ -19,7 +19,7 @@ description: 排查 zen-gateway 的出口隔离、Clash 桥接和上游连通问
 3. `mixed-port` 与 `localProxyPort` 不一致：控制面通、数据面全挂。端口只以内核
    `GET /configs` 为准；bridge 发 HTTP `CONNECT`，不能指向 SOCKS 专用端口。
 4. 回显出口显示"未探测"：只有 `POST /api/probe` 与批量探测经 `applyProbeResults`
-   写回 `egressIp`，没跑过就没有数据。
+   写回 `egressIp`，没跑过就没有数据；后台改过手工代理的连接信息后也会回到未探测。
 5. 出口按实测 IP 分组而不是代理 id；未测出 IP 的不能判为独立出口。直连出口用
    `DIRECT_EGRESS_ID` 参与比较。
 6. 探测目标与转发目标不同域，可能命中不同规则。企业 DNS 把 `opencode.ai` 解析到

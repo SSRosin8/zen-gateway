@@ -71,6 +71,7 @@ function proxy(overrides: Partial<ProxyView> = {}): ProxyView {
     direct: false,
     bridgeable: true,
     egressIp: "198.51.100.1",
+    username: null,
     password: { present: false, fingerprint: null },
     usedBy: ["w1"],
     resolvable: true,

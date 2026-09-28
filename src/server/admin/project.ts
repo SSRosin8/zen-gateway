@@ -197,6 +197,7 @@ export function proxyViews(config: Config): ProxyView[] {
       direct: p.direct,
       bridgeable: p.bridgeable,
       egressIp: p.egressIp,
+      username: p.username ?? null,
       password: displayFingerprint(p.password ?? ""),
       usedBy: usedByProxy.get(p.id) ?? [],
       resolvable: resolved.ok,

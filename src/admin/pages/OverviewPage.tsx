@@ -63,7 +63,15 @@ export function attentionItems(
     out.push({ id: "no-key", tone: "error", text: `${noKey.length} 个认证 Worker 缺少 API key`, action: { label: "去填写", href: "#workers?status=unusable" } });
   }
   if (opencode.status === "ready" && opencode.data.exists && !opencode.data.pointsToGateway) {
-    out.push({ id: "opencode", tone: "warn", text: "项目 opencode.json 没有指向本网关（多半是 Relay Token 轮换后没重写）", action: { label: "重写", href: "#client" } });
+    out.push({ id: "opencode", tone: "warn", text: "项目 opencode.json 没有指向本网关（多半是轮换 Relay Token 或改端口后没重写）", action: { label: "重写", href: "#client" } });
+  }
+  if (!data.gateway.portFromEnv && data.gateway.configuredPort !== data.gateway.port) {
+    out.push({
+      id: "port-restart",
+      tone: "warn",
+      text: `端口已改为 ${data.gateway.configuredPort}，仍在 ${data.gateway.port} 上监听；运行 npm run restart 后生效`,
+      action: { label: "查看", href: "#gateway" },
+    });
   }
   const cooling = data.workers.filter((w) => w.inPool && !w.ready);
   if (cooling.length > 0) {

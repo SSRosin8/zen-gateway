@@ -20,13 +20,19 @@ function validPort(value: unknown): value is number {
   return typeof value === "number" && Number.isInteger(value) && value >= 1 && value <= 65535;
 }
 
+/** 端口是否由 `ZG_PORT` 决定（此时配置里的 `gateway.port` 不生效）。 */
+export function portFromEnv(): boolean {
+  const fromEnv = process.env["ZG_PORT"];
+  return fromEnv !== undefined && fromEnv !== "";
+}
+
 /**
  * 解析该用哪个端口。`root` 只在测试里传，与 `configPath` 约定一致。
  * 非法 `ZG_PORT` 抛错而不静默回落。
  */
 export function resolvePort(root?: string): number {
   const fromEnv = process.env["ZG_PORT"];
-  if (fromEnv !== undefined && fromEnv !== "") {
+  if (portFromEnv()) {
     const parsed = Number(fromEnv);
     if (!validPort(parsed)) {
       throw new PortResolveError(`ZG_PORT 不是合法端口:${fromEnv}`);

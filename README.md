@@ -4,8 +4,8 @@ zen-gateway 是一个运行在本机的 OpenCode Zen 网关。它接收 OpenAI �
 Chat Completions、Responses，以及 Anthropic Messages 请求，只放行配置为免费
 模型的请求，并按 Worker 选择配置的直连或 Clash 出口。
 
-这是单用户工具：上游固定为 Zen，管理面只监听本机回环地址，不提供多租户或
-对外服务。请求体按原始字节转发，网关只解析路由、模型和流式事件所需的字段。
+这是单用户工具：上游固定为 Zen，网关只监听本机回环地址，管理后台可在设置访问口令后
+开放给局域网；不提供多租户或对外服务。请求体按原始字节转发，网关只解析路由、模型和流式事件所需的字段。
 
 ## 快速开始
 
@@ -23,8 +23,8 @@ npm run open      # 可选：用浏览器打开管理后台
 
 首次启动会创建 `data/config.json` 并生成 Relay Token。管理后台的 Worker 页可
 新增、编辑和删除 Worker；认证 Worker 填 Zen API key，匿名 Worker 不发送任何
-上游凭证。代理和 Clash 内核可以手工写入配置，也可以用 `npm run setup` 探测
-本机 Controller：
+上游凭证。手工 HTTP / SOCKS 代理可以在出口页新增和编辑；Clash 内核与节点可以在
+出口页导入、手工写入配置，也可以用 `npm run setup` 探测本机 Controller：
 
 ```bash
 npm run setup -- --dry-run
@@ -64,7 +64,8 @@ opencode run --model opencode/big-pickle "Reply with exactly: OK"
   覆盖 CLI 的配置、探测（逐个或批量）、订阅刷新与诊断。
 
 管理 API 只接受本机回环请求，并要求回环 Host；浏览器 Origin 也必须来自回环
-HTTP(S) 地址。凭证只以“是否存在 + 指纹”形式返回。
+HTTP(S) 地址。开启局域网访问后，带有效口令会话、Host 为私网 IP 且 Origin 同源的
+请求也放行（见 [局域网访问](docs/usage.md#局域网访问)）。凭证只以“是否存在 + 指纹”形式返回。
 
 ## 常用命令
 

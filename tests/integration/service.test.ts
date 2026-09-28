@@ -482,6 +482,32 @@ describe("端口解析与服务端一致", () => {
     await expect(fetch(`http://127.0.0.1:${ignored}/health`)).rejects.toThrow();
   });
 
+  it("配置端口改了但还没重启：status/stop 仍找到运行中的实例，restart 换到新端口", async () => {
+    /*
+     * 后台可以改 `gateway.port`，而监听端口要重启才换。脚本若只按新端口探，
+     * 会把运行中的实例报成「未在运行」，restart 停不掉它，新进程再启动就留下两个实例。
+     */
+    const first = await freePort();
+    const second = await freePort();
+    await writeConfigPort(first);
+    expect((await runWithoutEnvPort(["start"])).code).toBe(0);
+
+    await writeConfigPort(second);
+    const st = await runWithoutEnvPort(["status"]);
+    expect(st.code, st.stdout).toBe(0);
+    expect(st.stdout).toContain(String(first));
+    expect(st.stdout).toContain(`已改为 ${second}`);
+
+    const restarted = await runWithoutEnvPort(["restart"]);
+    expect(restarted.code, restarted.stderr).toBe(0);
+    expect(restarted.stdout).toContain(String(second));
+    await expect(fetch(`http://127.0.0.1:${first}/health`)).rejects.toThrow();
+    expect((await fetch(`http://127.0.0.1:${second}/health`)).status).toBe(200);
+
+    expect((await runWithoutEnvPort(["stop"])).code).toBe(0);
+    await expect(fetch(`http://127.0.0.1:${second}/health`)).rejects.toThrow();
+  });
+
   it("ZG_PORT 非法时明确报错，不静默回落", async () => {
     // 静默回落会让「我明明设了 ZG_PORT」变成一个查不出的问题。
     const env = { ...process.env, ZG_DATA_DIR: dataDir, ZG_PROJECT_ROOT: dataDir, ZG_PORT: "not-a-port" };

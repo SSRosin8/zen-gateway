@@ -21,7 +21,13 @@ import { join, resolve } from "node:path";
  */
 export function createInstance({ dataDir, port, entry, altEntries = [] }) {
   const stateFile = join(dataDir, "zen-gateway.state.json");
-  const base = `http://127.0.0.1:${port}`;
+  /*
+   * 探测的端口：状态文件记录的实例还活着时用它启动时的端口，否则用当前解析的端口。
+   * 后台改了 `gateway.port` 而尚未重启时，两者不同；按新端口探会把运行中的实例报成
+   * 「未在运行」，`restart` 也就停不掉它、新进程又抢不到旧端口之外的东西。
+   */
+  let current = port;
+  const baseOf = (p) => `http://127.0.0.1:${p}`;
   /**
    * 认得出「是我们的代码」的全部入口。`entry` 是构建产物（`npm start`），
    * `altEntries` 是其他启动方式（如 `npm run dev:server`，没有状态文件）。
@@ -52,9 +58,9 @@ export function createInstance({ dataDir, port, entry, altEntries = [] }) {
   }
 
   /** 探一次 `/health`。结构不合的一律当作「不是我们的服务」返回 null。 */
-  async function probeHealth(timeoutMs = 1000) {
+  async function probeHealth(timeoutMs = 1000, probePort = current) {
     try {
-      const res = await fetch(`${base}/health`, { signal: AbortSignal.timeout(timeoutMs) });
+      const res = await fetch(`${baseOf(probePort)}/health`, { signal: AbortSignal.timeout(timeoutMs) });
       if (!res.ok) return null;
       const body = await res.json();
       if (body?.ok !== true) return null;
@@ -75,8 +81,9 @@ export function createInstance({ dataDir, port, entry, altEntries = [] }) {
    */
   async function inspect() {
     const state = await readState();
-    const health = await probeHealth();
     const alive = state !== null && pidAlive(state.pid);
+    current = alive ? state.port : port;
+    const health = await probeHealth(1000, current);
 
     let identity = "unknown";
     if (alive) {
@@ -113,7 +120,22 @@ export function createInstance({ dataDir, port, entry, altEntries = [] }) {
     };
   }
 
-  return { base, stateFile, readState, pidAlive, probeHealth, inspect };
+  return {
+    /** 最近一次 `inspect` 探测的地址；尚未 inspect 时为当前解析的端口。 */
+    get base() {
+      return baseOf(current);
+    },
+    /** 当前解析的端口（配置或 `ZG_PORT`），新启动的进程会监听它。 */
+    configuredBase: baseOf(port),
+    get port() {
+      return current;
+    },
+    stateFile,
+    readState,
+    pidAlive,
+    probeHealth,
+    inspect,
+  };
 }
 
 /**

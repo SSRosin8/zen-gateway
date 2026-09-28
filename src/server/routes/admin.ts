@@ -27,6 +27,7 @@ import { probeExclusive } from "./admin/probe.ts";
 import { adminError, issuesText, MAX_ADMIN_BODY_BYTES, readJsonBody } from "./admin/common.ts";
 import { safeErrorMessage } from "../../shared/redact.ts";
 import { dayKey } from "../../store/db/stats.ts";
+import { portFromEnv } from "../../store/port.ts";
 import { applyConfigPatch } from "../admin/patch.ts";
 import { BodyTooLargeError, readBoundedBody } from "../boundedBody.ts";
 import {
@@ -153,6 +154,8 @@ export function createAdminRoutes(deps: AdminDeps): Hono {
       health: deps.health(),
       gateway: {
         port: deps.effectivePort(),
+        configuredPort: config.gateway.port,
+        portFromEnv: portFromEnv(),
         baseUrl: config.gateway.baseUrl,
         relayToken: displayFingerprint(config.gateway.relayToken),
         maxAttempts: config.gateway.maxAttempts,

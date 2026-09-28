@@ -44,7 +44,11 @@ selector，结束后 selector 可能停在最后一个节点；结果的含义�
 [回显 IP 的测量范围](#回显-ip-的测量范围)。
 
 端口按 `ZG_PORT`、`data/config.json` 的 `gateway.port`、默认值 9876 解析。服务端、
-service 脚本和 Vite 代理使用同一解析逻辑。数据目录可用 `ZG_DATA_DIR` 指定，
+service 脚本和 Vite 代理使用同一解析逻辑。后台网关页可改配置端口，写盘后要
+`npm run restart` 才换监听端口。在此之前启停脚本与 `doctor` 按状态文件记录的端口
+找到运行中的实例，`status`、已在运行时的 `start` 与 `doctor` 会提示端口待重启；
+`npm run dev` 的代理按新端口转发，这段时间连不上运行中的网关。重启后在客户端接入页
+重写 `opencode.json`。数据目录可用 `ZG_DATA_DIR` 指定，
 适合测试或运行多个隔离实例。
 
 首次启动（数据目录中还没有 `config.json`）时，如果项目根没有 `opencode.json`，服务会
@@ -92,8 +96,8 @@ API 地址必须是本机 HTTP 回环地址。
 当前 UI 支持（每项都对应上面[管理 API](#管理-api)中的端点）：
 
 - 概览页是「需要处理」清单：目录不可达、没有可用 Worker、Worker 共用回显出口、
-  Worker 冷却中、`opencode.json` 未指向网关、近期有请求被网关拒绝等，每条带一个
-  跳到对应页面的处理入口；没有问题时只显示服务状态。
+  Worker 冷却中、`opencode.json` 未指向网关、配置端口已改但未重启、近期有请求被网关
+  拒绝等，每条带一个跳到对应页面的处理入口；没有问题时只显示服务状态。
 - Worker 页：新增、行内编辑、启停与删除；编辑时留空 key 表示保留旧值。认证 Worker
   必须有 key，要去掉 key 就改为匿名 Worker。可多选后批量启用、停用或删除。启停和删除
   匿名 Worker 的结果显示在对应行（或列表上方），10 秒内可撤销；删除认证 Worker 丢掉的
@@ -104,7 +108,10 @@ API 地址必须是本机 HTTP 回环地址。
   这些 Worker。点 Worker id 打开详情侧栏，汇总配置、运行状态、用量和出口（上游尝试是累计值，
   token 是近 30 天）。
 - 出口页：节点列表（分页、多选批量启停 / 探测 / 删除、单个节点探测、改名；被 Worker
-  引用的节点不能删），状态列同时显示回显 IP；批量探测覆盖全部已启用节点，逐行显示
+  引用的节点不能删；状态列同时显示回显 IP）。「添加手工代理」新建 HTTP / HTTPS /
+  SOCKS4 / SOCKS5 直连代理，手工直连代理的更多操作里有「编辑连接」（协议、主机、端口、
+  用户名、口令三态）；改了连接信息后回显出口变为未探测，要重新探测。导入的节点只能
+  启停、改名和删除。批量探测覆盖全部已启用节点，逐行显示
   排队、探测中、成功或失败，启动前确认，可选「为可用且出口不重复的节点新建匿名
   Worker」（默认不勾）。取消后已探到的结果照样写回，没轮到的节点标「已跳过」，也不再
   新建 Worker；结束后行内只保留失败与跳过的原因，之后单独探测过的节点以新结果为准。订阅标签新建、编辑、删除与刷新订阅；Clash 标签探测并导入本机
@@ -113,7 +120,8 @@ API 地址必须是本机 HTTP 回环地址。
   文件未指向当前 token 时常驻重写提示），查看并一键写入项目根 `opencode.json`，按
   OpenCode 1.x/2.x 复制客户端配置片段（片段里的 Relay Token 为占位符），设置局域网
   访问口令。
-- 网关页：实际监听信息；编辑最多尝试的 Worker 数、两个超时和调度设置（策略、亲和时长、
+- 网关页：实际监听信息与配置端口（重启后生效；由 `ZG_PORT` 指定时只读）；编辑最多
+  尝试的 Worker 数、两个超时和调度设置（策略、亲和时长、
   各类冷却）。
 - 模型页：编辑免费后缀、显式免费名单和目录交集开关。
 - 用量页：时间范围今天（UTC）/ 7 天 / 30 天 / 全部，统计按 UTC 日分桶，所以「今天」从 UTC 零点算起；
@@ -314,7 +322,7 @@ opencode run --model opencode/big-pickle "Reply with exactly: OK"
 
 ### 调度 `routing`
 
-`routing` 可省略，省略时全部取默认值。后台没有编辑入口，修改后需重启。
+`routing` 可省略，省略时全部取默认值。后台网关页可编辑，保存即时生效；手工改配置文件后需重启。
 
 | 字段 | 默认值 | 含义 |
 |---|---|---|
@@ -401,7 +409,8 @@ rule 模式下可能不参与选路，在 global 模式下则会影响本机其�
 头到达，所以长时间生成的非流式请求不会阻塞同一内核下的其他 Worker。为保证 Clash
 在切换后才选路，桥接连接统一经 HTTP CONNECT 隧道建立。
 
-`egressIp` 只能由探测写回，`null` 是“尚未测量”，不代表已与其它出口独立。
+`egressIp` 的实测值只能由探测写回；手工直连代理的连接信息被修改时会置为 `null`。
+`null` 是“尚未测量”，不代表已与其它出口独立。
 
 ### 回显 IP 的测量范围
 
@@ -460,12 +469,17 @@ rule 模式下可能不参与选路，在 global 模式下则会影响本机其�
 
 `PATCH /api/config` 各节的规则：
 
-- 凭证字段（Worker `apiKey`、内核 `apiSecret`、订阅 `url`、`gateway.relayToken`）是三态：
+- 凭证字段（Worker `apiKey`、内核 `apiSecret`、订阅 `url`、代理 `password`、`gateway.relayToken`）是三态：
   缺席不动、`{ "set": "…" }` 替换、`{ "clear": true }` 清空；`gateway.relayToken` 另可
   `{ "rotate": true }`，由服务端生成新 token，响应不回显。轮换后客户端和
   `opencode.json` 里的旧 token 立即失效，需要重写。
-- `workers`、`clash.bridges`、`subscriptions` 支持 `create`/`update`/`delete`；`proxies`
-  只开放 `update`（`enabled`、`name`）与 `delete`，连接信息来自导入。未知 id 得 404。
+- `workers`、`clash.bridges`、`subscriptions`、`proxies` 支持 `create`/`update`/`delete`。
+  `proxies.create` 只建手工直连代理（`type` 为 `http`/`https`/`socks4`/`socks5`）；
+  `proxies.update` 的 `type`、`host`、`port`、`username`、`password`（三态）只对手工直连
+  代理生效，改到订阅、Controller 或桥接节点得 422；连接信息真的变了时 `egressIp` 置为
+  `null`。`proxies.create` 一次最多 64 条；同一请求里不能删掉再同名新建代理。未知 id 得 404。
+- `gateway.port` 只写盘；`GET /api/overview` 的 `gateway.port` 是实际监听端口，
+  `configuredPort` 是配置值，两者不同且 `portFromEnv` 为假时表示等待重启。
 - 被 Worker 引用的代理不能删除；删除 Clash 内核或订阅会连带删除它们导入的代理，
   其中有被引用的则整个请求失败（422，消息点名 Worker）。同一请求里先改绑 Worker
   再删除是允许的。

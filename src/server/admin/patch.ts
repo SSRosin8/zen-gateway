@@ -41,6 +41,10 @@ export function applyConfigPatch(
   /* ---- gateway ---- */
   if (patch.gateway !== undefined) {
     const g = patch.gateway;
+    // 只写盘；监听端口在重启时才换，概览用 `configuredPort` 与实际端口的差异提示重启。
+    if (g.port !== undefined) {
+      next.gateway.port = g.port;
+    }
     if (g.maxAttempts !== undefined) {
       next.gateway.maxAttempts = g.maxAttempts;
     }

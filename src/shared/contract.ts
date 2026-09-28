@@ -4,10 +4,12 @@ import {
   ClashBridgeSchema,
   ClashConfigSchema,
   CooldownConfigSchema,
+  DirectProtocolSchema,
   GatewaySchema,
   IdSchema,
   ModelRulesSchema,
   ProtocolIdSchema,
+  ProxySchema,
   ProxySourceSchema,
   RoutingConfigSchema,
   RoutingStrategySchema,
@@ -109,7 +111,12 @@ export const CatalogSlotViewSchema = z.object({
 export const OverviewSchema = z.object({
   health: HealthSchema,
   gateway: z.object({
+    /** 进程实际监听的端口。 */
     port: z.number().int(),
+    /** 配置文件里的 `gateway.port`；与 `port` 不同且 `portFromEnv` 为假时，重启后才生效。 */
+    configuredPort: z.number().int(),
+    /** 端口来自 `ZG_PORT`：改配置里的端口不会生效。 */
+    portFromEnv: z.boolean(),
     baseUrl: z.string(),
     relayToken: SecretPresenceSchema,
     maxAttempts: z.number().int(),
@@ -295,8 +302,9 @@ export const WorkerCreateSchema = z.strictObject({
 });
 export type WorkerCreate = z.infer<typeof WorkerCreateSchema>;
 
-/** 网关设置的可改字段。不含 `port`：改它要重启，只能改配置文件。 */
+/** 网关设置的可改字段。`port` 写盘后要重启才生效（监听端口不热切换），概览据此提示。 */
 export const GatewayPatchSchema = z.strictObject({
+  port: GatewaySchema.shape.port.unwrap().optional(),
   maxAttempts: GatewaySchema.shape.maxAttempts.unwrap().optional(),
   headersTimeoutMs: GatewaySchema.shape.headersTimeoutMs.unwrap().optional(),
   bodyTimeoutMs: GatewaySchema.shape.bodyTimeoutMs.unwrap().optional(),
@@ -348,12 +356,44 @@ export const ClashPatchSchema = z.strictObject({
     .optional(),
 });
 
-/** 代理只开放启停与改名；连接信息来自导入，手改会与下次导入冲突。 */
+const proxy = ProxySchema.shape;
+
+/**
+ * 手工直连代理的连接信息。只开放直连协议：桥接节点要靠 Clash selector 里的节点名，
+ * 那只能来自导入。`password` 走凭证三态；`username` 空串表示不用认证。
+ */
+const ProxyConnectionPatch = {
+  type: DirectProtocolSchema.optional(),
+  host: proxy.host.optional(),
+  port: proxy.port.optional(),
+  username: z.string().max(256).optional(),
+  password: SecretPatchSchema.optional(),
+};
+
+/**
+ * 代理补丁。`create` 只建手工直连代理；`update` 的连接信息字段只对手工直连代理生效，
+ * 订阅与 Controller 导入的节点改了会在下次刷新、导入时被覆盖，服务端拒绝。
+ */
 export const ProxiesPatchSchema = z.strictObject({
+  create: z
+    .array(
+      z.strictObject({
+        id: IdSchema,
+        name: proxy.name,
+        type: DirectProtocolSchema,
+        host: proxy.host,
+        port: proxy.port,
+        username: z.string().max(256).optional(),
+        password: proxy.password.unwrap().optional(),
+        enabled: z.boolean().default(true),
+      }),
+    )
+    .max(64)
+    .optional(),
   update: z
     .record(
       z.string(),
-      z.strictObject({ enabled: z.boolean().optional(), name: z.string().min(1).max(200).optional() }),
+      z.strictObject({ enabled: z.boolean().optional(), name: proxy.name.optional(), ...ProxyConnectionPatch }),
     )
     .optional(),
   /** 被 Worker 引用的代理拒绝删除：Worker 会静默退回直连，破坏出口隔离。 */
@@ -433,6 +473,8 @@ export const ProxyViewSchema = z.object({
   bridgeable: z.boolean(),
   /** 最近一次实测的公网出口 IP。null = 未探测（不是「没有出口」）。 */
   egressIp: z.string().nullable(),
+  /** 代理认证用户名（不是凭证，编辑表单要回填）；没有时为 null。 */
+  username: z.string().nullable(),
   password: SecretPresenceSchema,
   /** 引用它的 Worker id。由服务端计算，避免与 `patch.ts` 的引用完整性校验分叉。 */
   usedBy: z.array(z.string()),

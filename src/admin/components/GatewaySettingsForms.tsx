@@ -176,6 +176,68 @@ export function RuntimeSettingsForm({ data, refresh }: { data: Overview; refresh
   );
 }
 
+/** 与 `GatewaySchema.port` 相同的范围；低于 1024 的特权端口不接受。 */
+export function validatePort(raw: string): { ok: true; value: number } | { ok: false; message: string } {
+  const bounds = GatewaySchema.shape.port.unwrap();
+  const trimmed = raw.trim();
+  const value = Number(trimmed);
+  const min = bounds.minValue ?? 1024;
+  const max = bounds.maxValue ?? 65535;
+  if (trimmed === "" || !Number.isInteger(value) || value < min || value > max) {
+    return { ok: false, message: `端口必须是 ${min} 到 ${max} 的整数` };
+  }
+  return { ok: true, value };
+}
+
+/**
+ * 监听端口。只写配置文件：监听中的端口不热切换（在途连接和客户端都连着旧端口），
+ * 重启后生效。`ZG_PORT` 设置时配置里的值不起作用，表单只读并说明原因。
+ */
+export function PortSettingsForm({ data, refresh }: { data: Overview; refresh?: (() => void) | undefined }) {
+  const form = useFormState({ port: String(data.gateway.configuredPort) });
+  const { saving, message, setMessage, save } = useSave(refresh, form.markSaved);
+  useLeaveGuard(form.dirty);
+  const pending = !data.gateway.portFromEnv && data.gateway.configuredPort !== data.gateway.port;
+
+  return (
+    <form
+      aria-label="监听端口"
+      className="flex flex-wrap items-end gap-3"
+      noValidate
+      onSubmit={(event) => {
+        event.preventDefault();
+        const port = validatePort(form.value.port);
+        if (!port.ok) return setMessage({ tone: "error", text: port.message });
+        save({ gateway: { port: port.value } });
+      }}
+    >
+      <Field label="配置的端口">
+        <input
+          type="number"
+          min={1024}
+          max={65535}
+          step={1}
+          value={form.value.port}
+          disabled={data.gateway.portFromEnv}
+          onChange={(e) => form.set({ port: e.target.value })}
+          className={`${FIELD} w-40`}
+        />
+      </Field>
+      <SecondaryButton type="submit" disabled={saving || data.gateway.portFromEnv || !form.dirty}>
+        {saving ? "保存中…" : "保存端口"}
+      </SecondaryButton>
+      <FormStatus message={message} />
+      <p className="basis-full text-text-muted">
+        {data.gateway.portFromEnv
+          ? "当前端口由环境变量 ZG_PORT 指定，配置里的端口不生效。"
+          : pending
+            ? `已保存为 ${data.gateway.configuredPort}，运行 npm run restart 后生效；之后在客户端接入页重写 opencode.json。`
+            : "保存后运行 npm run restart 生效，客户端与 opencode.json 需改用新端口。"}
+      </p>
+    </form>
+  );
+}
+
 export function RoutingSettingsForm({ data, refresh }: { data: Overview; refresh?: (() => void) | undefined }) {
   const initialCooldown = {} as Record<CooldownKey, string>;
   for (const key of Object.keys(COOLDOWN_FIELDS) as CooldownKey[]) initialCooldown[key] = formatDuration(data.routing.cooldown[key], "s");
