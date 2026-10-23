@@ -50,7 +50,7 @@ export function StaleBanner({ stale, hidden = false }: { stale: StaleInfo | null
   if (stale === null) {
     return recovered ? (
       <div role="status" className="mb-4 rounded-md border border-success bg-surface px-4 py-3">
-        <StatusIndicator tone="success" icon="✓" label="已重新连接，数据已刷新" />
+        <StatusIndicator tone="success" icon="check" label="已重新连接，数据已刷新" />
       </div>
     ) : null;
   }
@@ -62,7 +62,7 @@ function StaleBannerInner({ stale }: { stale: StaleInfo }) {
   const age = humanMs(Math.max(0, now - stale.lastSuccessAt));
   return (
     <div role="status" className="mb-4 rounded-md border border-warn bg-surface-accent px-4 py-3">
-      <StatusIndicator tone="warn" icon="!" label={`与网关的连接中断，显示的是 ${age}前的数据`} />
+      <StatusIndicator tone="warn" icon="alert" label={`与网关的连接中断，显示的是 ${age}前的数据`} />
       <p className="mt-1 text-text-muted">
         {stale.failure.kind === "offline" ? (
           <>
@@ -96,7 +96,7 @@ export function FallbackView({ state }: { state: FetchState<unknown> }) {
       <h2 className="mb-4 text-heading-16 font-medium">服务</h2>
       {state.status === "offline" && (
         <>
-          <StatusIndicator tone="error" icon="✕" label="未连接到网关服务" />
+          <StatusIndicator tone="error" icon="cross" label="未连接到网关服务" />
           <p className="mt-3 text-text-muted">
             网关没在运行。跑 <code className="font-mono text-accent-fg">npm start</code> 启动它。
           </p>
@@ -104,7 +104,7 @@ export function FallbackView({ state }: { state: FetchState<unknown> }) {
       )}
       {state.status === "error" && (
         <>
-          <StatusIndicator tone="error" icon="✕" label="响应异常" />
+          <StatusIndicator tone="error" icon="cross" label="响应异常" />
           <p className="mt-3 text-text-muted">{state.message}</p>
         </>
       )}
@@ -122,7 +122,7 @@ export function LoadingView() {
       <section className="rounded-lg border border-border-strong bg-surface">
         <header className="flex flex-wrap items-center justify-between gap-3 border-b border-border-strong px-4 py-3 sm:px-5">
           <h2 className="text-heading-16 font-medium">服务</h2>
-          <StatusIndicator tone="neutral" icon="○" label="检测中" />
+          <StatusIndicator tone="neutral" icon="idle" label="检测中" />
         </header>
         <div className="grid grid-cols-2 gap-6 px-4 py-4 sm:grid-cols-4 sm:px-5" aria-hidden="true">
           {[0, 1, 2, 3].map((i) => (

@@ -1,4 +1,5 @@
 import { useId, useRef } from "react";
+import { MoreIcon } from "./Icons.tsx";
 
 /**
  * 行的「更多」菜单。行内最多放两个常用按钮，其余进这里。
@@ -35,7 +36,7 @@ export function RowMenu({ label, items }: { label: string; items: readonly RowMe
         popoverTarget={id}
         className="inline-flex min-h-8 min-w-8 items-center justify-center rounded-xs border border-border-strong bg-surface text-text-muted transition-colors hover:bg-surface-hover hover:text-text active:bg-surface-active"
       >
-        <span aria-hidden="true">⋯</span>
+        <MoreIcon />
       </button>
       <div
         ref={menu}

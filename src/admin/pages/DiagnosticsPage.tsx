@@ -3,6 +3,7 @@ import { PageHeader, Panel, SecondaryButton, SecondaryLink, Strong } from "../co
 import { StatusIndicator, type StatusTone } from "../components/StatusIndicator.tsx";
 import { FallbackView, StaleBanner } from "../components/StatusViews.tsx";
 import { useEndpoint } from "../lib/api.ts";
+import type { StatusIconName } from "../components/Icons.tsx";
 
 /**
  * 诊断页 —— 服务进程内的分层检查（配置 → 存储 → Worker → Clash → 目录）。
@@ -12,11 +13,11 @@ import { useEndpoint } from "../lib/api.ts";
  *
  * 出口实测不在这里做：它会切换 Clash 分组的选中节点，放在 Worker 页与出口页，与批量探测互斥。
  */
-const LAYER_STATUS: Record<DiagnosticLayer["status"], { tone: StatusTone; icon: string; label: string }> = {
-  pass: { tone: "success", icon: "✓", label: "通过" },
-  warn: { tone: "warn", icon: "!", label: "警告" },
-  fail: { tone: "error", icon: "✕", label: "失败" },
-  skip: { tone: "neutral", icon: "○", label: "跳过" },
+const LAYER_STATUS: Record<DiagnosticLayer["status"], { tone: StatusTone; icon: StatusIconName; label: string }> = {
+  pass: { tone: "success", icon: "check", label: "通过" },
+  warn: { tone: "warn", icon: "alert", label: "警告" },
+  fail: { tone: "error", icon: "cross", label: "失败" },
+  skip: { tone: "neutral", icon: "idle", label: "跳过" },
 };
 
 export function DiagnosticsPage() {
@@ -37,11 +38,11 @@ export function DiagnosticsView({ data, refresh }: { data: Diagnostics; refresh:
       <PageHeader title="诊断" action={<SecondaryButton onClick={refresh}>重新检查</SecondaryButton>} />
       <Panel title="分层检查">
         {data.layers.length === 0 ? (
-          <StatusIndicator tone="warn" icon="!" label="服务端没有返回任何检查层" />
+          <StatusIndicator tone="warn" icon="alert" label="服务端没有返回任何检查层" />
         ) : (
           <StatusIndicator
             tone={firstFail === null ? (data.layers.some((l) => l.status === "warn") ? "warn" : "success") : "error"}
-            icon={firstFail === null ? "✓" : "✕"}
+            icon={firstFail === null ? "check" : "cross"}
             label={firstFail === null ? "没有失败的检查层" : `第一个失败层：${firstFail.title}`}
           />
         )}

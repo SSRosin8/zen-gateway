@@ -69,7 +69,7 @@ export function ClashImportFlow({
       <FormStatus message={discover.state.status === "error" ? { tone: "error", text: discover.state.message } : null} />
 
       {controllers !== null && controllers.length === 0 && (
-        <StatusIndicator tone="warn" icon="!" label="没有探测到本机 Clash 控制面，填写地址后重试" />
+        <StatusIndicator tone="warn" icon="alert" label="没有探测到本机 Clash 控制面，填写地址后重试" />
       )}
 
       {controllers !== null && controllers.length > 0 && (
@@ -142,10 +142,10 @@ function ControllerRow({
   const disabled = c.status === "unreachable";
   const status =
     c.status === "ok"
-      ? { tone: "success" as const, icon: "✓", label: "可连接" }
+      ? { tone: "success" as const, icon: "check" as const, label: "可连接" }
       : c.status === "auth_required"
-        ? { tone: "warn" as const, icon: "!", label: "需要 secret" }
-        : { tone: "error" as const, icon: "✕", label: c.reason ?? "无法连接" };
+        ? { tone: "warn" as const, icon: "alert" as const, label: "需要 secret" }
+        : { tone: "error" as const, icon: "cross" as const, label: c.reason ?? "无法连接" };
   return (
     <div className="rounded-md border border-border-strong px-3 py-2" data-controller={c.apiBase}>
       <label className="flex min-h-[44px] flex-wrap items-center gap-x-3 gap-y-1">
@@ -194,7 +194,7 @@ function ImportSummary({
     <div data-import-summary={result.dryRun ? "preview" : "applied"}>
       <StatusIndicator
         tone={result.dryRun ? "info" : "success"}
-        icon={result.dryRun ? "○" : "✓"}
+        icon={result.dryRun ? "idle" : "check"}
         label={result.dryRun ? "预览（尚未写入）" : "已导入，立即生效"}
       />
       <p className="mt-1">
@@ -206,7 +206,7 @@ function ImportSummary({
         <ul className="mt-1 space-y-1">
           {s.warnings.map((w) => (
             <li key={w}>
-              <StatusIndicator tone="warn" icon="!" label={w} />
+              <StatusIndicator tone="warn" icon="alert" label={w} />
             </li>
           ))}
         </ul>

@@ -92,7 +92,7 @@ export function attentionItems(
   return out.sort((a, b) => rank[a.tone] - rank[b.tone]);
 }
 
-const ICON = { error: "✕", warn: "!", info: "○" } as const;
+const ICON = { error: "cross", warn: "alert", info: "idle" } as const;
 
 export function OverviewPage({
   data,
@@ -152,13 +152,21 @@ export function OverviewPage({
 
       <Panel title={items.length === 0 ? "需要处理" : `需要处理（${items.length}）`}>
         {items.length === 0 ? (
-          <StatusIndicator tone="success" icon="✓" label="一切正常，没有需要处理的事" />
+          <StatusIndicator tone="success" icon="check" label="一切正常，没有需要处理的事" />
         ) : (
           <ul className="divide-y divide-border" aria-label="需要处理的事项">
             {items.map((item) => (
-              <li key={item.id} className="flex min-h-[52px] flex-wrap items-center gap-x-4 gap-y-2 py-2" data-attention={item.id}>
+              /*
+               * 文字列限宽、按钮紧随其后：宽屏下按钮推到右边缘时，视线要横跨整块面板才对得上是哪一条。
+               * 各行的按钮仍在同一列对齐。
+               */
+              <li
+                key={item.id}
+                className="grid min-h-[52px] grid-cols-[minmax(0,40rem)_auto] items-center justify-start gap-x-6 gap-y-2 py-2"
+                data-attention={item.id}
+              >
                 <StatusIndicator tone={item.tone} icon={ICON[item.tone]} label={item.text} />
-                <span className="ml-auto">
+                <span>
                   <SecondaryLink href={item.action.href}>{item.action.label}</SecondaryLink>
                 </span>
               </li>
