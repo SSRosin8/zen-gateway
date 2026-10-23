@@ -1,4 +1,5 @@
 import { useEffect, useId, useRef, useState, type ReactNode } from "react";
+import { InfoIcon } from "./Icons.tsx";
 
 /**
  * 说明提示：一个 ⓘ 按钮，悬停、键盘聚焦或点击时在旁边浮出说明，移开或 Esc 收起。
@@ -69,7 +70,7 @@ export function HintTip({ label, children }: { label: string; children: ReactNod
         }}
         className="inline-flex h-6 w-6 items-center justify-center rounded-full text-label-13 text-text-muted transition-colors hover:bg-surface-hover hover:text-text"
       >
-        <span aria-hidden="true">ⓘ</span>
+        <InfoIcon />
       </button>
       {pos !== null && (
         <span

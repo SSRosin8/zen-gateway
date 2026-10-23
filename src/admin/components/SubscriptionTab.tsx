@@ -7,6 +7,7 @@ import { SecretField, useSecretField } from "./SecretField.tsx";
 import { patchConfig, useSubscriptionRefresh } from "../lib/api.ts";
 import { formatLocalTime } from "../lib/format.ts";
 import { FIELD } from "../lib/styles.ts";
+import type { StatusIconName } from "./Icons.tsx";
 
 type Subscription = ProxyList["subscriptions"][number];
 
@@ -86,7 +87,8 @@ export function SubscriptionTab({ data, refresh: refreshList }: { data: ProxyLis
             const running = state.status === "running";
             return (
               <li key={s.id} className="rounded-md border border-border-strong p-4" data-subscription={s.id}>
-                <div className="flex flex-wrap items-center justify-between gap-3">
+                {/* 名称列限宽、操作紧随其后（与概览「需要处理」同理），各行的按钮对齐成一列。 */}
+                <div className="grid grid-cols-[minmax(0,40rem)_auto] items-center justify-start gap-x-6 gap-y-3">
                   <div className="min-w-0">
                     <div className="font-medium">{s.name}</div>
                     {/* 已脱敏 —— 服务端过了 redactUrl，这里只是显示。 */}
@@ -127,7 +129,7 @@ export function SubscriptionTab({ data, refresh: refreshList }: { data: ProxyLis
                   {state.status === "done" && <RefreshReport result={state.result} />}
                   {state.status === "error" && (
                     <p role="alert" className="mt-2">
-                      <StatusIndicator tone="error" icon="✕" label={state.message} />
+                      <StatusIndicator tone="error" icon="cross" label={state.message} />
                     </p>
                   )}
                 </div>
@@ -268,19 +270,19 @@ function SubscriptionEditor({
  * 四态而不是两态。**停用**时也要把失败原因带上（如果有）：一条 early return
  * 会让最常见的那类输入看不到原因。拉取时间按本地时区显示；完整 ISO 放在外层 `title`。
  */
-export function subscriptionStatus(s: Subscription): { tone: StatusTone; icon: string; label: string } {
+export function subscriptionStatus(s: Subscription): { tone: StatusTone; icon: StatusIconName; label: string } {
   if (!s.enabled) {
     const suffix = s.lastErrorKind === null ? "" : ` · 上次失败（${s.lastErrorKind}）`;
-    return { tone: "neutral", icon: "○", label: `已停用${suffix}` };
+    return { tone: "neutral", icon: "idle", label: `已停用${suffix}` };
   }
   if (s.lastErrorKind !== null) {
-    return { tone: "error", icon: "✕", label: `上次拉取失败（${s.lastErrorKind}）` };
+    return { tone: "error", icon: "cross", label: `上次拉取失败（${s.lastErrorKind}）` };
   }
   if (s.lastFetchedAt === null) {
     // 「从没拉过」不是错误 —— 但也绝不能显示成成功。
-    return { tone: "warn", icon: "?", label: "从未拉取" };
+    return { tone: "warn", icon: "unknown", label: "从未拉取" };
   }
-  return { tone: "success", icon: "✓", label: `上次拉取 ${formatLocalTime(s.lastFetchedAt)}` };
+  return { tone: "success", icon: "check", label: `上次拉取 ${formatLocalTime(s.lastFetchedAt)}` };
 }
 
 /** 一次刷新的结果明细。 */
@@ -288,7 +290,7 @@ function RefreshReport({ result }: { result: SubscriptionRefresh }) {
   if (!result.ok) {
     return (
       <p role="alert" className="mt-2">
-        <StatusIndicator tone="error" icon="✕" label={`刷新失败（${result.failureKind}）：${result.reason}`} />
+        <StatusIndicator tone="error" icon="cross" label={`刷新失败（${result.failureKind}）：${result.reason}`} />
       </p>
     );
   }

@@ -4,6 +4,7 @@ import { StatusIndicator } from "../components/StatusIndicator.tsx";
 import { Mono, Truncate } from "../components/Panel.tsx";
 import type { ProbeRun } from "./api.ts";
 import { humanMs } from "./format.ts";
+import type { StatusIconName } from "../components/Icons.tsx";
 
 /*
  * Worker 的状态判定与出口单元格。Worker 页、概览与详情侧栏共用一份：两份必然分叉，
@@ -29,10 +30,10 @@ export function workerKindLabel(w: Pick<WorkerView, "kind">): string {
 
 export function workerStatus(w: WorkerView): {
   tone: "success" | "warn" | "error" | "neutral";
-  icon: string;
+  icon: StatusIconName;
   label: string;
 } {
-  if (!w.enabled) return { tone: "neutral", icon: "○", label: "已停用" };
+  if (!w.enabled) return { tone: "neutral", icon: "idle", label: "已停用" };
   /*
    * 启用了但没 key —— 必须与「已停用」分开。
    *
@@ -40,18 +41,18 @@ export function workerStatus(w: WorkerView): {
    * 这里按 kind 判断，避免把合法的匿名 Worker 误报成缺少凭证。
    */
   if (w.kind === "authenticated" && !w.apiKey.present) {
-    return { tone: "error", icon: "✕", label: "缺少 API key" };
+    return { tone: "error", icon: "cross", label: "缺少 API key" };
   }
-  if (!w.inPool) return { tone: "error", icon: "✕", label: "不在候选池" };
+  if (!w.inPool) return { tone: "error", icon: "cross", label: "不在候选池" };
   if (!w.ready) {
     const why = w.lastFailure === null ? "" : `（${w.lastFailure}）`;
     return {
       tone: "warn",
-      icon: "◴",
+      icon: "progress",
       label: `冷却中 ${humanMs(w.cooldownRemainingMs)}${why}`,
     };
   }
-  return { tone: "success", icon: "✓", label: "就绪" };
+  return { tone: "success", icon: "check", label: "就绪" };
 }
 
 /** 在用出口的探测 id，与服务端 `usedProxyIds` 同一判据：候选池里的 Worker，直连记 `__direct__`。 */
@@ -66,11 +67,11 @@ export function probeTargets(workers: readonly WorkerView[]): string[] {
 export function EgressCell({ w, shared, probe }: { w: WorkerView; shared: boolean; probe: ProbeRun }) {
   const id = w.proxyId ?? DIRECT_EGRESS_ID;
   const result = probe.results[id];
-  if (probe.current === id) return <StatusIndicator tone="info" icon="◴" label="探测中…" />;
+  if (probe.current === id) return <StatusIndicator tone="info" icon="progress" label="探测中…" />;
   if (result !== undefined && !result.ok) {
     return (
       <span className="inline-flex items-baseline gap-2">
-        <StatusIndicator tone="error" icon="✕" label="探测失败" />
+        <StatusIndicator tone="error" icon="cross" label="探测失败" />
         <Truncate text={result.reason} maxWidth="16rem" className="text-label-13 text-text-muted" />
       </span>
     );
@@ -82,7 +83,7 @@ export function EgressCell({ w, shared, probe }: { w: WorkerView; shared: boolea
     <span className="inline-flex items-baseline gap-2">
       <Mono>{w.egressIp}</Mono>
       {w.proxyId === null && <span className="text-label-13 text-text-muted">本机直连</span>}
-      {shared && <StatusIndicator tone="error" icon="✕" label="共用" />}
+      {shared && <StatusIndicator tone="error" icon="cross" label="共用" />}
       {result?.ok === true && <span className="text-label-13 text-text-muted">{result.latencyMs}ms</span>}
     </span>
   );

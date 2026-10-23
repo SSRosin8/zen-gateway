@@ -15,6 +15,7 @@ import { ProxyEditor, isEditableProxy } from "../components/ProxyEditor.tsx";
 import { probeEgress } from "../lib/consoleApi.ts";
 import { SubscriptionTab } from "../components/SubscriptionTab.tsx";
 import { ClashSection } from "../components/ClashSection.tsx";
+import type { StatusIconName } from "../components/Icons.tsx";
 
 export { subscriptionStatus } from "../components/SubscriptionTab.tsx";
 
@@ -45,7 +46,7 @@ function isBroken(p: ProxyView): boolean {
   return p.enabled && !p.resolvable;
 }
 
-function proxyStatus(p: ProxyView): { tone: StatusTone; icon: string; label: string } {
+function proxyStatus(p: ProxyView): { tone: StatusTone; icon: StatusIconName; label: string } {
   /*
    * ## 停用与不可解析要**一起**说，不是二选一
    *
@@ -59,13 +60,13 @@ function proxyStatus(p: ProxyView): { tone: StatusTone; icon: string; label: str
    * `describeResolveFailure`，与转发失败时用户看到的是同一句话。
    */
   if (!p.enabled) {
-    return { tone: "neutral", icon: "○", label: p.unresolvableReason ?? "已停用" };
+    return { tone: "neutral", icon: "idle", label: p.unresolvableReason ?? "已停用" };
   }
   if (!p.resolvable) {
-    return { tone: "error", icon: "✕", label: p.unresolvableReason ?? "无法解析出口" };
+    return { tone: "error", icon: "cross", label: p.unresolvableReason ?? "无法解析出口" };
   }
-  if (p.egressIp === null) return { tone: "warn", icon: "?", label: "未探测出口" };
-  return { tone: "success", icon: "✓", label: "可用" };
+  if (p.egressIp === null) return { tone: "warn", icon: "unknown", label: "未探测出口" };
+  return { tone: "success", icon: "check", label: "可用" };
 }
 
 /** 被 Worker 引用的节点不能删：Worker 会静默退回直连，破坏出口隔离。 */
@@ -196,7 +197,7 @@ export function ProxyPage({
       render: (p) => {
         const note = rows.noteOf(p.id);
         if (note !== undefined) return <RowNoteView note={note} busy={rows.busy} onUndo={() => void rows.runUndo(p.id)} />;
-        if (probing.includes(p.id)) return <StatusIndicator tone="info" icon="◴" label="探测中…" />;
+        if (probing.includes(p.id)) return <StatusIndicator tone="info" icon="progress" label="探测中…" />;
         const b = batchNodeFor(p.id);
         if (b !== undefined && b.state !== "ok") return <BatchNodeCell node={b} />;
         const s = proxyStatus(p);
@@ -428,19 +429,19 @@ export function ProxyPage({
 function BatchNodeCell({ node }: { node: BatchProgressView["nodes"][number] }) {
   switch (node.state) {
     case "queued":
-      return <StatusIndicator tone="neutral" icon="○" label="排队中" />;
+      return <StatusIndicator tone="neutral" icon="idle" label="排队中" />;
     case "probing":
-      return <StatusIndicator tone="info" icon="◴" label="探测中…" />;
+      return <StatusIndicator tone="info" icon="progress" label="探测中…" />;
     case "failed":
     case "skipped":
       return (
         <span className="inline-flex items-baseline gap-2">
-          <StatusIndicator tone={node.state === "failed" ? "error" : "warn"} icon={node.state === "failed" ? "✕" : "!"} label={node.state === "failed" ? "探测失败" : "已跳过"} />
+          <StatusIndicator tone={node.state === "failed" ? "error" : "warn"} icon={node.state === "failed" ? "cross" : "alert"} label={node.state === "failed" ? "探测失败" : "已跳过"} />
           <Truncate text={node.reason} maxWidth="16rem" className="text-label-13 text-text-muted" />
         </span>
       );
     case "ok":
-      return <StatusIndicator tone="success" icon="✓" label="可用" />;
+      return <StatusIndicator tone="success" icon="check" label="可用" />;
   }
 }
 

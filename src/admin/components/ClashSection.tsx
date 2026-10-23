@@ -60,7 +60,7 @@ export function ClashSection({ clash, refresh }: { clash: Clash; refresh: () => 
       key: "enabled",
       header: "状态",
       render: (b) =>
-        b.enabled ? <StatusIndicator tone="success" icon="✓" label="启用" /> : <StatusIndicator tone="neutral" icon="○" label="已停用" />,
+        b.enabled ? <StatusIndicator tone="success" icon="check" label="启用" /> : <StatusIndicator tone="neutral" icon="idle" label="已停用" />,
     },
     { key: "api", header: "控制面", render: (b) => <Mono>{b.apiBase}</Mono> },
     { key: "port", header: "代理端口", numeric: true, render: (b) => <Mono>{`${b.localProxyHost}:${b.localProxyPort}`}</Mono> },
