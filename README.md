@@ -1,5 +1,7 @@
 # zen-gateway
 
+[English](README.en.md) | [中文](README.md)
+
 zen-gateway 是一个运行在本机的 OpenCode Zen 网关。它接收 OpenAI 兼容的
 Chat Completions、Responses，以及 Anthropic Messages 请求，只放行配置为免费
 模型的请求，并按 Worker 选择配置的直连或 Clash 出口。

@@ -206,7 +206,7 @@ describe("docs/usage.md 的配置示例", () => {
 const DOC_ROOT = fileURLToPath(new URL("../..", import.meta.url));
 
 function markdownFiles(): string[] {
-  const out = ["README.md", "AGENTS.md", "CLAUDE.md", "CONTRIBUTING.md", "SECURITY.md"];
+  const out = ["README.md", "README.en.md", "AGENTS.md", "CLAUDE.md", "CONTRIBUTING.md", "SECURITY.md"];
   for (const f of readdirSync(join(DOC_ROOT, "docs"))) if (f.endsWith(".md")) out.push(`docs/${f}`);
   const skills = join(DOC_ROOT, ".claude/skills");
   for (const d of readdirSync(skills, { withFileTypes: true })) {
@@ -279,8 +279,8 @@ describe("文档相对链接与锚点", () => {
 
   it("每个相对链接的文件和锚点都存在", () => {
     const files = markdownFiles();
-    // 输入集下界：5 个根文档 + 至少 4 份 docs + 3 个 SKILL.md + 2 个 reference.md。
-    expect(files.length).toBeGreaterThanOrEqual(14);
+    // 输入集下界：6 个根文档 + 至少 4 份 docs + 3 个 SKILL.md + 2 个 reference.md。
+    expect(files.length).toBeGreaterThanOrEqual(15);
 
     const links = files.flatMap((f) => relativeLinks(f, readFileSync(join(DOC_ROOT, f), "utf8")));
     const broken: string[] = [];
