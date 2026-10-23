@@ -1,6 +1,6 @@
 import { useState, type ReactNode } from "react";
 import type { OpenCodeView, Overview, ProxyList } from "../../shared/contract.ts";
-import { FormStatus, Mono, SecondaryButton, Strong, errorMessage, type FormMessage } from "../components/Panel.tsx";
+import { FormStatus, Mono, PageHeader, SecondaryButton, Strong, errorMessage, type FormMessage } from "../components/Panel.tsx";
 import { WorkerEditor } from "../components/WorkerEditor.tsx";
 import { BulkImportDialog } from "../components/BulkImportDialog.tsx";
 import { patchConfig } from "../lib/api.ts";
@@ -82,19 +82,24 @@ export function StartPage({
 
   return (
     <div className="space-y-4">
-      <header className="flex flex-wrap items-baseline gap-x-4 gap-y-1">
-        <h1 className="text-heading-20 font-medium">快速开始</h1>
-        <StatusIndicator
-          tone={progress.complete ? "success" : "neutral"}
-          icon={progress.complete ? "✓" : "○"}
-          label={
-            progress.complete
-              ? "必需步骤都已完成，可以用 OpenCode 验证"
-              : `已完成 ${progress.done}/${progress.total} 步`
-          }
-        />
-        <span className="text-text-muted">状态来自网关实时数据，在其他页面改好的设置这里也会打勾。</span>
-      </header>
+      {/* 与其他页同一个页头：标题字重、间距一致。状态行里进度在前，说明在后。 */}
+      <PageHeader
+        title="快速开始"
+        status={
+          <span className="inline-flex flex-wrap items-center gap-x-4 gap-y-1">
+            <StatusIndicator
+              tone={progress.complete ? "success" : "neutral"}
+              icon={progress.complete ? "check" : "idle"}
+              label={
+                progress.complete
+                  ? "必需步骤都已完成，可以用 OpenCode 验证"
+                  : `已完成 ${progress.done}/${progress.total} 步`
+              }
+            />
+            <span>状态来自网关实时数据，在其他页面改好的设置这里也会打勾。</span>
+          </span>
+        }
+      />
 
       <ol className="overflow-hidden rounded-lg border border-border-strong bg-surface">
         <Step n={1} id="catalog" done={steps.catalog} title="上游目录可达">
@@ -241,7 +246,7 @@ function Step({
           {optional && <span className="ml-2 text-label-13 font-normal text-text-muted">可选</span>}
         </span>
         {done !== null && (
-          <StatusIndicator tone={done ? "success" : "neutral"} icon={done ? "✓" : "○"} label={done ? "已完成" : "待完成"} />
+          <StatusIndicator tone={done ? "success" : "neutral"} icon={done ? "check" : "idle"} label={done ? "已完成" : "待完成"} />
         )}
       </div>
       <div className="min-w-0">{children}</div>

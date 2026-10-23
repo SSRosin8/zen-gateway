@@ -104,7 +104,7 @@ export function ModelsPage({
         return (
           <StatusIndicator
             tone={tone}
-            icon={m.free ? "✓" : "✕"}
+            icon={m.free ? "check" : "cross"}
             label={m.free ? "可用" : "已拒绝"}
           />
         );
@@ -134,7 +134,7 @@ export function ModelsPage({
      */
     return (
       <Panel title="模型">
-        <StatusIndicator tone="error" icon="✕" label="拿不到上游模型目录" />
+        <StatusIndicator tone="error" icon="cross" label="拿不到上游模型目录" />
         <p className="mt-3 text-text-muted">
           目录从未成功拉取过，所以这一页没有数据可显示 —— 这<Strong>不是</Strong>
           「一个免费模型都没有」。

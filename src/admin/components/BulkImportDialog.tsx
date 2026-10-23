@@ -86,7 +86,7 @@ export function BulkImportDialog({
             <div className="mt-3 space-y-3">
               <StatusIndicator
                 tone={proxies?.status === "loading" || proxies === undefined ? "neutral" : "error"}
-                icon={proxies?.status === "loading" || proxies === undefined ? "○" : "✕"}
+                icon={proxies?.status === "loading" || proxies === undefined ? "idle" : "cross"}
                 label={
                   proxies?.status === "loading" || proxies === undefined
                     ? "代理列表加载中"
@@ -212,7 +212,7 @@ function BulkBody({
               <Truncate text={p.clashNodeName ?? p.name} maxWidth="28rem" />
             </label>
             <span className="inline-flex shrink-0 items-center gap-2 text-label-13 text-text-muted">
-              {duplicates.has(p.id) && <StatusIndicator tone="warn" icon="!" label="出口重复" />}
+              {duplicates.has(p.id) && <StatusIndicator tone="warn" icon="alert" label="出口重复" />}
               {p.egressIp === null ? "未探测" : <Mono>{p.egressIp}</Mono>}
             </span>
           </li>
@@ -220,7 +220,7 @@ function BulkBody({
         {visible.length === 0 && <li className="px-2 py-2 text-text-muted">没有匹配的节点。</li>}
       </ul>
       {tooMany && (
-        <StatusIndicator tone="warn" icon="!" label={`一次最多创建 ${WORKER_CREATE_MAX} 个，请减少选择`} />
+        <StatusIndicator tone="warn" icon="alert" label={`一次最多创建 ${WORKER_CREATE_MAX} 个，请减少选择`} />
       )}
       <div className="flex flex-wrap items-center justify-end gap-2">
         <FormStatus message={message} />

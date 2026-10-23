@@ -1,6 +1,6 @@
 import { useState, type ReactNode } from "react";
 import { Nav } from "./Nav.tsx";
-import { SidebarIcon, SkinIcon, THEME_ICON } from "./Icons.tsx";
+import { STATUS_ICON, SidebarIcon, SkinIcon, THEME_ICON } from "./Icons.tsx";
 import { Truncate } from "./Panel.tsx";
 import type { PageId } from "../lib/router.ts";
 import { SIDEBAR_KEY, SKIN_OPTIONS, THEME_OPTIONS, nextPreference, useSkin, useTheme } from "../lib/theme.ts";
@@ -59,7 +59,7 @@ export function Shell({
               collapsed ? "justify-center px-0" : ""
             }`}
           >
-            <span aria-hidden="true">◴</span>
+            <span className="inline-flex">{STATUS_ICON.progress}</span>
             {!collapsed && <Truncate text={task.label} maxWidth="10rem" />}
           </a>
         )}
