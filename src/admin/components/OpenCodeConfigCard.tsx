@@ -9,6 +9,7 @@ import {
   useAction,
 } from "../lib/consoleApi.ts";
 import { FIELD } from "../lib/styles.ts";
+import type { StatusIconName } from "./Icons.tsx";
 
 /**
  * OpenCode 项目配置的状态 + 写入按钮。快速开始与网关页共用。
@@ -16,10 +17,10 @@ import { FIELD } from "../lib/styles.ts";
  * 写入由服务端完成（它持有真实 Relay Token），前端只发版本选择。
  * 已存在且指向网关时按钮文案是「重写」，表示会刷新 baseURL/apiKey 但保留其余键。
  */
-export function openCodeStatusLabel(s: OpenCodeView): { tone: "success" | "warn" | "neutral"; icon: string; label: string } {
-  if (!s.exists) return { tone: "neutral", icon: "○", label: `${s.path} 还不存在` };
-  if (s.pointsToGateway) return { tone: "success", icon: "✓", label: `${s.path} 已指向本网关` };
-  return { tone: "warn", icon: "!", label: `${s.path} 未指向本网关` };
+export function openCodeStatusLabel(s: OpenCodeView): { tone: "success" | "warn" | "neutral"; icon: StatusIconName; label: string } {
+  if (!s.exists) return { tone: "neutral", icon: "idle", label: `${s.path} 还不存在` };
+  if (s.pointsToGateway) return { tone: "success", icon: "check", label: `${s.path} 已指向本网关` };
+  return { tone: "warn", icon: "alert", label: `${s.path} 未指向本网关` };
 }
 
 export function OpenCodeConfigCard({
@@ -37,10 +38,10 @@ export function OpenCodeConfigCard({
   const [version, setVersion] = useState<"1" | "2" | null>(null);
   const chosen = version ?? versionFromDetected(detected);
 
-  if (status.status === "loading") return <StatusIndicator tone="neutral" icon="○" label="检测中" />;
-  if (status.status === "offline") return <StatusIndicator tone="error" icon="✕" label="未连接到网关服务" />;
+  if (status.status === "loading") return <StatusIndicator tone="neutral" icon="idle" label="检测中" />;
+  if (status.status === "offline") return <StatusIndicator tone="error" icon="cross" label="未连接到网关服务" />;
   if (status.status === "error") {
-    return <StatusIndicator tone="error" icon="✕" label={`拿不到 OpenCode 配置状态：${status.message}`} />;
+    return <StatusIndicator tone="error" icon="cross" label={`拿不到 OpenCode 配置状态：${status.message}`} />;
   }
 
   const s = status.data;
@@ -63,7 +64,7 @@ export function OpenCodeConfigCard({
           {s.shape === null ? <span className="text-text-muted">无</span> : <Mono>{s.shape}</Mono>}
         </span>
       </div>
-      {s.unwritableReason !== null && <StatusIndicator tone="warn" icon="!" label={`不会改写：${s.unwritableReason}`} />}
+      {s.unwritableReason !== null && <StatusIndicator tone="warn" icon="alert" label={`不会改写：${s.unwritableReason}`} />}
       <div className="flex flex-wrap items-center gap-2">
         <select
           aria-label="OpenCode 版本"

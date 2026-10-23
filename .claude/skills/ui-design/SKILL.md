@@ -16,7 +16,7 @@ paths:
 - 毛玻璃只在导航层：侧栏 `zg-glass`、对话框遮罩 `zg-scrim`（只允许 Shell 与两个对话框使用）。透明度写在 `--zg-*-alpha`，测试按最坏背景算合成对比度；减少透明度 / 提高对比度时退回实色。
 - 禁用态换实色（`disabled:bg-border-strong` 等），不用 `disabled:opacity-*`（源码扫描会拦）。
 - `accent-fill` 只做填充，唯一前景是 `on-accent-fill`；不做整行或大面积背景。
-- 状态用 `StatusIndicator`（图标 + 文字，空值会抛），行状态用 `RowMark` 左边框，不用背景色块。
+- 状态用 `StatusIndicator`（`STATUS_ICON` 图标名 + 文字，不传字符，空值会抛），行状态用 `RowMark` 左边框，不用背景色块。
 - 每个视图最多一个 `PrimaryButton`；行内编辑打开时，页头按钮退为描边；嵌入别的页面的共用流程只用描边按钮。
 - 视图状态（页面、标签、搜索、筛选、页码）进 hash URL，筛选组件受控。
 - JSX 里不写 markdown，强调用 `Strong`。

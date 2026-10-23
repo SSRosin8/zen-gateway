@@ -206,7 +206,7 @@ export function WorkerEditor({
           </label>
           {idError !== null && (
             <span id={idErrorId} role="alert">
-              <StatusIndicator tone="error" icon="✕" label={idError} />
+              <StatusIndicator tone="error" icon="cross" label={idError} />
             </span>
           )}
         </div>
@@ -247,7 +247,7 @@ export function WorkerEditor({
       )}
       {dropsSavedKey && (
         <p className="sm:col-span-2 xl:col-span-3" data-drops-key="">
-          <StatusIndicator tone="warn" icon="!" label="改为匿名后，已保存的 API key 会被删除且无法从后台找回。" />
+          <StatusIndicator tone="warn" icon="alert" label="改为匿名后，已保存的 API key 会被删除且无法从后台找回。" />
         </p>
       )}
       <div className="flex flex-wrap items-center gap-2 sm:col-span-2 xl:col-span-3">

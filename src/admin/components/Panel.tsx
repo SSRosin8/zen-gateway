@@ -179,10 +179,10 @@ export function FormStatus({ message }: { message: FormMessage }) {
       {message !== null &&
         (message.tone === "error" ? (
           <div role="alert">
-            <StatusIndicator tone="error" icon="✕" label={message.text} />
+            <StatusIndicator tone="error" icon="cross" label={message.text} />
           </div>
         ) : (
-          <StatusIndicator tone="success" icon="✓" label={message.text} />
+          <StatusIndicator tone="success" icon="check" label={message.text} />
         ))}
     </div>
   );
