@@ -449,7 +449,7 @@ function ProbeSummary({ probe }: { probe: ProbeRun }) {
     <div aria-live="polite">
       {probe.error !== null && (
         <p role="alert">
-          <StatusIndicator tone="error" icon="✕" label={`探测失败：${probe.error}`} />
+          <StatusIndicator tone="error" icon="cross" label={`探测失败：${probe.error}`} />
         </p>
       )}
       {!probe.running && probe.total !== null && probe.error === null && (

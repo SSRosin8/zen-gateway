@@ -210,7 +210,7 @@ export function UsagePage({
         {data.rates.droppedUsageCount > 0 && (
           <div className="mt-4 border-t border-border pt-3">
             <span className="inline-flex items-center gap-1">
-              <StatusIndicator tone="warn" icon="!" label={`${data.rates.droppedUsageCount} 次响应网关未完整解析，token 未计入`} />
+              <StatusIndicator tone="warn" icon="alert" label={`${data.rates.droppedUsageCount} 次响应网关未完整解析，token 未计入`} />
               <HintTip label="未完整解析说明">
                 这些响应过大或中途断流，网关没能读到其中的用量；<Strong>不是</Strong>上游没报。它们的 token 数没有计入统计。
               </HintTip>

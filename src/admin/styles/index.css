@@ -1,11 +1,14 @@
 /* 字体自托管：localhost 工具没有 CDN 往返的理由。
    Noto Sans SC 承担全部中文字形 —— 本项目文案只有中文,
-   Inter 的 CJK 覆盖为零,回落链里它必须排在 Inter 之后但在 system-ui 之前。 */
+   Inter 的 CJK 覆盖为零,回落链里它必须排在 Inter 之后但在 system-ui 之前。
+   两者的字重要与界面实际用到的 400 / 500 / 600 一一对应：缺了 600 时，没有 PingFang /
+   微软雅黑的系统（如 Linux）上中文标题会被合成加粗或退成 500，与同一行的拉丁字不一样粗。 */
 @import "@fontsource/inter/400.css";
 @import "@fontsource/inter/500.css";
 @import "@fontsource/inter/600.css";
 @import "@fontsource/noto-sans-sc/400.css";
 @import "@fontsource/noto-sans-sc/500.css";
+@import "@fontsource/noto-sans-sc/600.css";
 @import "@fontsource/instrument-serif/400.css";
 @import "@fontsource/jetbrains-mono/400.css";
 

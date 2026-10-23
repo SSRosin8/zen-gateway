@@ -129,7 +129,7 @@ export function LanAccessPanel() {
     return (
       <Panel title="局域网访问">
         <div className="flex flex-wrap items-center gap-3">
-          <StatusIndicator tone="success" icon="✓" label="已通过访问口令登录" />
+          <StatusIndicator tone="success" icon="check" label="已通过访问口令登录" />
           <SecondaryButton onClick={() => void lanRequest("/api/lan/logout").then(() => window.location.reload())}>
             退出登录
           </SecondaryButton>
@@ -144,7 +144,7 @@ export function LanAccessPanel() {
         <div className="flex flex-wrap items-center gap-x-4 gap-y-1">
           <StatusIndicator
             tone={status.enabled ? "success" : "neutral"}
-            icon={status.enabled ? "✓" : "○"}
+            icon={status.enabled ? "check" : "idle"}
             label={status.enabled ? "已设置访问口令" : "未开启"}
           />
           <span className="text-text-muted">

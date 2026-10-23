@@ -3,19 +3,20 @@ import type { PageId } from "../lib/router.ts";
 import type { ThemePreference } from "../lib/theme.ts";
 
 /**
- * 侧栏用的线性图标。内联 SVG 而不是图标库：一共十几个，都是 20px、1.75 描边、跟随文字颜色。
- * 图标一律 `aria-hidden`，可访问名称由所在的链接或按钮给出。
+ * 线性图标。内联 SVG 而不是图标库：一共二十来个，跟随文字颜色。侧栏与按钮用 20px、1.75 描边；
+ * 状态与行内小图标用 16px、2 描边（14px 正文旁 1.75 描边发虚）。
+ * 图标一律 `aria-hidden`，可访问名称由所在的链接、按钮或旁边的文字给出。
  */
-function Svg({ children }: { children: ReactNode }) {
+function Svg({ children, size = 20 }: { children: ReactNode; size?: 16 | 20 }) {
   return (
     <svg
       aria-hidden="true"
       viewBox="0 0 24 24"
-      width="20"
-      height="20"
+      width={size}
+      height={size}
       fill="none"
       stroke="currentColor"
-      strokeWidth="1.75"
+      strokeWidth={size === 16 ? 2 : 1.75}
       strokeLinecap="round"
       strokeLinejoin="round"
       className="shrink-0"
@@ -121,5 +122,78 @@ export function SkinIcon() {
       <circle cx="10.5" cy="7.5" r="1" />
       <circle cx="15" cy="7.5" r="1" />
     </Svg>
+  );
+}
+
+/**
+ * 状态图标：`StatusIndicator` 只接受这里的名字。先前传字符（✕ ✓ ! ? ○ ◴），各字体下字形大小与
+ * 基线不一，和旁边的 SVG 摆在一起不协调；改成名字后类型就挡住了字符。
+ *
+ * 形状本身也要能区分（色觉障碍下颜色靠不住）：错误是叉、警告是三角、未知是问号圈、
+ * 空闲是空心圈、进行中是钟面。
+ */
+export const STATUS_ICON = {
+  check: (
+    <Svg size={16}>
+      <path d="M5 12.5l4.5 4.5L19 7.5" />
+    </Svg>
+  ),
+  cross: (
+    <Svg size={16}>
+      <path d="M6.5 6.5l11 11M17.5 6.5l-11 11" />
+    </Svg>
+  ),
+  alert: (
+    <Svg size={16}>
+      <path d="M12 4l9 16H3z" />
+      <path d="M12 10v4M12 17h.01" />
+    </Svg>
+  ),
+  unknown: (
+    <Svg size={16}>
+      <circle cx="12" cy="12" r="8.5" />
+      <path d="M9.5 9.5a2.5 2.5 0 114 2c-.9.6-1.5 1.1-1.5 2.2M12 16.5h.01" />
+    </Svg>
+  ),
+  idle: (
+    <Svg size={16}>
+      <circle cx="12" cy="12" r="7" />
+    </Svg>
+  ),
+  progress: (
+    <Svg size={16}>
+      <circle cx="12" cy="12" r="8.5" />
+      <path d="M12 7.5V12l3 2" />
+    </Svg>
+  ),
+} as const;
+
+export type StatusIconName = keyof typeof STATUS_ICON;
+
+/** 说明提示按钮（`HintTip`）的 i。 */
+export function InfoIcon() {
+  return (
+    <Svg size={16}>
+      <circle cx="12" cy="12" r="8.5" />
+      <path d="M12 11v5.5M12 7.5h.01" />
+    </Svg>
+  );
+}
+
+/** 行内「更多操作」菜单（`RowMenu`）。 */
+export function MoreIcon() {
+  return (
+    <Svg size={16}>
+      <path d="M6 12h.01M12 12h.01M18 12h.01" strokeWidth="3" />
+    </Svg>
+  );
+}
+
+/** 「未保存」前的实心小圆点。 */
+export function DotIcon() {
+  return (
+    <svg aria-hidden="true" viewBox="0 0 8 8" width="8" height="8" className="shrink-0" fill="currentColor">
+      <circle cx="4" cy="4" r="4" />
+    </svg>
   );
 }
