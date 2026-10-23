@@ -2,7 +2,8 @@
 
 zen-gateway 是可独立使用的本机个人工具。上游固定为 OpenCode Zen，支持认证与匿名
 Worker、免费模型规则、多个出口、流式透传和本机管理后台。不做多用户、公共服务或
-通用 provider 平台；UI 与文档只维护中文。本文件是开发约定的唯一来源，
+通用 provider 平台；UI 与文档只维护中文，根目录另有一份英文概览 `README.en.md`，
+只做介绍、链接中文文档，不复制配置示例与操作细节。本文件是开发约定的唯一来源，
 `CLAUDE.md` 与 `CONTRIBUTING.md` 只引用它。
 
 需求与功能边界见 [`docs/requirements.md`](docs/requirements.md)，实现见
