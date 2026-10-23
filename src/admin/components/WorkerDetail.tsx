@@ -111,7 +111,7 @@ export function WorkerDetail({
             <dt className="text-text-muted">回显 IP</dt>
             <dd className="inline-flex items-center gap-2">
               {w.egressIp === null ? <span className="text-text-muted">未探测</span> : <Mono>{w.egressIp}</Mono>}
-              {shared && <StatusIndicator tone="error" icon="✕" label="与其他 Worker 共用" />}
+              {shared && <StatusIndicator tone="error" icon="cross" label="与其他 Worker 共用" />}
             </dd>
           </dl>
         </section>

@@ -5,6 +5,7 @@ import { FormStatus, Panel, PrimaryButton, SecondaryButton, errorMessage, type F
 import { patchConfig } from "../lib/api.ts";
 import { FIELD } from "../lib/styles.ts";
 import { useFormState, useLeaveGuard } from "../lib/formState.ts";
+import { DotIcon } from "./Icons.tsx";
 
 /**
  * 网关页的两张设置表单：运行参数与调度。
@@ -319,7 +320,10 @@ export function DirtyMark({ form }: { form: { dirty: boolean; serverChanged: boo
   if (!form.dirty) return null;
   return (
     <span className="inline-flex items-center gap-2" data-dirty="">
-      <span className="text-label-13 text-warn">● 未保存</span>
+      <span className="inline-flex items-center gap-1.5 text-label-13 text-warn">
+        <DotIcon />
+        未保存
+      </span>
       {form.serverChanged && (
         <SecondaryButton compact onClick={form.reset}>
           服务端已变化 · 载入最新

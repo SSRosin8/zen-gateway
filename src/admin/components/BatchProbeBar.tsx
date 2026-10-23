@@ -56,7 +56,7 @@ export function BatchProbeBar({ control }: { control: ReturnType<typeof useBatch
         <>
           <StatusIndicator
             tone={tone}
-            icon={progress.state === "done" && progress.failureKind === null ? "✓" : running ? "◴" : "○"}
+            icon={progress.state === "done" && progress.failureKind === null ? "check" : running ? "progress" : "idle"}
             label={progress.elapsedMs === null ? stateLabel[progress.state] : `${stateLabel[progress.state]} · ${humanMs(progress.elapsedMs)}`}
           />
           {(running || progress.state === "paused") && (
@@ -84,7 +84,7 @@ export function BatchProbeBar({ control }: { control: ReturnType<typeof useBatch
       <div aria-live="polite">
         {control.error !== null && (
           <p role="alert">
-            <StatusIndicator tone="error" icon="✕" label={control.error} />
+            <StatusIndicator tone="error" icon="cross" label={control.error} />
           </p>
         )}
       </div>

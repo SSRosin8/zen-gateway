@@ -1,6 +1,7 @@
 import { Fragment, type ReactNode } from "react";
 import { Mono, RowMark, SecondaryButton, Skeleton, Truncate } from "./Panel.tsx";
 import { FIELD } from "../lib/styles.ts";
+import { STATUS_ICON } from "./Icons.tsx";
 
 /**
  * 表格 —— 分页 + 搜索 + 状态筛选，以及不分页的 `SimpleTable`。
@@ -479,11 +480,10 @@ export function BulkBar({ count, onClear, children }: { count: number; onClear: 
     >
       <span className="font-medium">已选 {count} 项</span>
       <span className="flex flex-wrap gap-2">{children}</span>
-      <span className="ml-auto">
-        <SecondaryButton compact onClick={onClear}>
-          取消选择
-        </SecondaryButton>
-      </span>
+      {/* 紧跟批量按钮，不推到右边缘：宽屏下离「已选 N 项」太远就看不出它们属于同一组。 */}
+      <SecondaryButton compact onClick={onClear}>
+        取消选择
+      </SecondaryButton>
     </div>
   );
 }
@@ -504,7 +504,7 @@ export function RowNoteView({
   return (
     <span className="inline-flex items-center gap-2" data-row-note={note.tone}>
       <span className={`inline-flex items-center gap-1.5 ${note.tone === "error" ? "text-error" : "text-success"}`}>
-        <span aria-hidden="true">{note.tone === "error" ? "✕" : "✓"}</span>
+        <span aria-hidden="true" className="inline-flex">{STATUS_ICON[note.tone === "error" ? "cross" : "check"]}</span>
         <Truncate text={note.text} maxWidth="16rem" />
       </span>
       {note.undo !== undefined && (
